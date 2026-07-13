@@ -131,7 +131,10 @@ const shortRow = (text: string): DocTableRow => ({
     content: [{ type: 'paragraph', ...para(text) } as unknown as CellElement],
     colSpan: 1, vMerge: null, borders: allEdges(), background: null, vAlign: 'top', widthPt: null,
   }],
-  rowHeight: null, rowHeightRule: 'auto', isHeader: false,
+  // This fixture isolates a page cut that lands exactly on a row boundary.
+  // `exact` makes 20pt the complete §17.4.80 row box; an auto row also reserves
+  // the resolved border footprint and therefore would not be a 20pt row.
+  rowHeight: 20, rowHeightRule: 'exact', isHeader: false,
 } as unknown as DocTableRow);
 
 async function renderPage(model: DocxDocumentModel, pages: PaginatedBodyElement[][], pageIndex: number): Promise<StrokeSeg[]> {

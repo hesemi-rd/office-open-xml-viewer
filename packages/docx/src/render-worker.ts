@@ -11,15 +11,17 @@ import init, { DocxArchive, reinit } from './wasm/docx_parser.js';
 import {
   decodeDataUrl,
   preloadGoogleFonts,
+  unloadLocalFontMetrics,
   WasmParserHost,
   dropBitmapCacheByPath,
   dropSvgImageCache,
 } from '@silurus/ooxml-core';
 import type { DocxDocumentModel, PaginatedBodyElement } from './types';
-import { paginateDocument, renderDocumentToCanvas, physicalPageSizeForPage, dropColorReplacedCache, type DocxTextRunInfo } from './renderer';
+import { paginateDocument, renderDocumentToCanvas, physicalPageSizeForPage, dropColorReplacedCache, setResolvedLocalFonts, clearResolvedLocalFonts, type DocxTextRunInfo } from './renderer';
 import { buildBookmarkPageMap } from './bookmark-nav';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
+import { loadDocxLocalFontMetrics } from './local-font-metrics';
 import type { RenderWorkerRequest, RenderWorkerResponse, DocumentMeta } from './worker-protocol';
 
 // RB6: self-poison + auto-respawn. A trap during parse (or an in-worker image /
@@ -33,6 +35,7 @@ const host = new WasmParserHost<DocxArchive>(init, {
 });
 let doc: DocxDocumentModel | null = null;
 let pages: PaginatedBodyElement[][] | null = null;
+let localMetricFontFaces: FontFace[] = [];
 const imageCache = new Map<string, Promise<Blob>>();
 
 const post = (msg: RenderWorkerResponse, transfer?: Transferable[]) =>
@@ -65,6 +68,11 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
   try {
     await host.ensureReady();
     if (req.type === 'parse') {
+      if (doc) clearResolvedLocalFonts(doc);
+      if (localMetricFontFaces.length > 0) {
+        unloadLocalFontMetrics(localMetricFontFaces);
+        localMetricFontFaces = [];
+      }
       // Cached blobs belong to the previous document; serving them after a
       // re-parse would silently return the wrong file's image.
       imageCache.clear();
@@ -113,6 +121,9 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
           return new Uint8Array(host.run(() => loaded.extract_image(p))).slice();
         });
       }
+      const localMetrics = await loadDocxLocalFontMetrics(doc);
+      localMetricFontFaces = localMetrics.faces;
+      setResolvedLocalFonts(doc, localMetrics.metrics);
       pages = paginateDocument(doc);
       // ECMA-376 §17.6.13 / §17.6.11 / §17.6.20 — per-page size from each page's
       // stamped frame (its page-meta for an empty parity page). A vertical

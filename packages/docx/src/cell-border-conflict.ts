@@ -1,4 +1,4 @@
-import type { BorderSpec } from './types';
+import type { BorderSpec, CellBorders, TableBorders } from './types';
 
 /**
  * ECMA-376 §17.4.66 (tcBorders) — adjacent table cell border conflict resolution.
@@ -28,6 +28,62 @@ import type { BorderSpec } from './types';
 export interface BorderCandidate {
   spec: BorderSpec;
   source: 'cell' | 'table';
+}
+
+/** Structural location of a cell in the table grid. The same edge cascade is
+ * consumed by both border paint and row-footprint measurement. */
+export interface CellEdgeFlags {
+  topRow: boolean;
+  bottomRow: boolean;
+  leftCol: boolean;
+  rightCol: boolean;
+}
+
+/** Cell/table cascade result before an adjacent-cell conflict is resolved. */
+export interface ResolvedCellEdges {
+  top: BorderCandidate | null;
+  bottom: BorderCandidate | null;
+  left: BorderCandidate | null;
+  right: BorderCandidate | null;
+}
+
+/** ECMA-376 §17.4.38/§17.4.39/§17.4.66 — resolve one cell's own, inside,
+ * and outer table border cascade. `mirror` maps logical left/right to physical
+ * sides for `bidiVisual`; horizontal edges are unchanged. */
+export function resolveCellEdges(
+  cell: CellBorders,
+  table: TableBorders,
+  edges: CellEdgeFlags,
+  mirror: boolean,
+): ResolvedCellEdges {
+  const horizontal = (
+    own: BorderSpec | null,
+    outer: boolean,
+    tableOuter: BorderSpec | null,
+  ): BorderCandidate | null => {
+    if (own) return { spec: own, source: 'cell' };
+    const inherited = outer ? tableOuter : (cell.insideH ?? table.insideH);
+    return inherited ? { spec: inherited, source: 'table' } : null;
+  };
+  const vertical = (
+    own: BorderSpec | null,
+    outer: boolean,
+    tableOuter: BorderSpec | null,
+  ): BorderCandidate | null => {
+    if (own) return { spec: own, source: 'cell' };
+    const inherited = outer ? tableOuter : (cell.insideV ?? table.insideV);
+    return inherited ? { spec: inherited, source: 'table' } : null;
+  };
+
+  const top = horizontal(cell.top, edges.topRow, table.top);
+  const bottom = horizontal(cell.bottom, edges.bottomRow, table.bottom);
+  const left = mirror
+    ? vertical(cell.right, edges.rightCol, table.right)
+    : vertical(cell.left, edges.leftCol, table.left);
+  const right = mirror
+    ? vertical(cell.left, edges.leftCol, table.left)
+    : vertical(cell.right, edges.rightCol, table.right);
+  return { top, bottom, left, right };
 }
 
 /** ECMA-376 §17.4.66 — the "border number" rank of each ST_Border style. The

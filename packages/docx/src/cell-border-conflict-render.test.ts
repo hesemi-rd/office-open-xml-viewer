@@ -31,6 +31,7 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; strokes: StrokeSeg[
   let strokeStyle = '#000000';
   let fillStyle = '#000000';
   const ctx = {
+    canvas: { width: 1000, height: 1000 },
     get font() { return font; },
     set font(v: string) { font = v; },
     get lineWidth() { return lineWidth; },
@@ -110,7 +111,10 @@ function tableOf(rows: DocTableRow[], tableBorders: Partial<Edges> = {}): DocTab
 }
 
 function rowOf(cells: DocTableCell[]): DocTableRow {
-  return { cells, rowHeight: 20, rowHeightRule: 'atLeast', isHeader: false } as unknown as DocTableRow;
+  // Exact rows keep the border-conflict assertions pinned to y=20; non-exact
+  // rows intentionally reserve resolved border width and are covered by the
+  // table-row-height geometry tests.
+  return { cells, rowHeight: 20, rowHeightRule: 'exact', isHeader: false } as unknown as DocTableRow;
 }
 
 function docOf(t: DocTable): DocxDocumentModel {

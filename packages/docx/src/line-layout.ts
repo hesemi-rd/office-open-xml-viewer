@@ -19,7 +19,7 @@ import type {
   DocParagraph, DocRun, DocxTextRun, ImageRun, ShapeRun, ShapeTextRun, FieldRun,
   LineSpacing, TabStop, DocxRunBorder, DocSettings, EmphasisMark,
 } from './types';
-import type { MathNode, KinsokuRules, ChartModel, HyperlinkTarget, NumberFormat, Duotone } from '@silurus/ooxml-core';
+import type { MathNode, KinsokuRules, ChartModel, HyperlinkTarget, NumberFormat, Duotone, ResolvedLocalFontMetric } from '@silurus/ooxml-core';
 import type { RenderState, DecodedImage } from './renderer.js';
 import {
   classifyCjkFont,
@@ -46,6 +46,7 @@ import {
   formatDateTimePicture,
   parseDateTimePictureSwitch,
   fontAdvanceBiasEm,
+  normalizeLocalFontMetricFamily,
 } from '@silurus/ooxml-core';
 import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
 import { groupFitTextRegions, type FitTextRun } from './fit-text.js';
@@ -87,6 +88,10 @@ export interface LayoutTextSeg extends LayoutSegSource {
   fontSize: number;  // pt
   color: string | null;
   fontFamily: string | null;
+  /** Exact local face selected during async document loading. The family above
+   * is its isolated alias; this measured ratio supplies Word's design-line floor
+   * without a version-specific font constant. */
+  resolvedLineHeightRatio?: number;
   vertAlign: 'super' | 'sub' | null;
   measuredWidth: number;  // px (set during layout)
   smallCaps?: boolean;
@@ -134,6 +139,7 @@ export interface LayoutTextSeg extends LayoutSegSource {
    *  per segment, so body behaviour is unchanged); the TEXT-BOX metrics
    *  (`lineMetricsFor`) floor on it so a text box matches PR #640/#646/#648. */
   eaFloorFamily?: string | null;
+  resolvedEaFloorLineHeightRatio?: number;
   /** IX1 — the resolved hyperlink target of the originating run (ECMA-376
    *  §17.16.22 external `r:id` URL / §17.16.23 internal `w:anchor` bookmark),
    *  computed once per run in `buildSegments`. Carried purely so the text-layer
@@ -321,6 +327,12 @@ export interface LayoutLine {
   height: number;  // pt — max fontSize on line (for empty-line sizing fallback)
   ascent: number;  // px — fontBoundingBoxAscent (font-metric, stable per font+size)
   descent: number; // px — fontBoundingBoxDescent
+  /** Baseline box contributed by segments that paint inline ink. A floating
+   *  anchor host can reserve the line's ascent/descent while contributing no
+   *  glyph; in that mixed case these exclude the metric-only placeholder. */
+  visibleAscent?: number;
+  visibleDescent?: number;
+  visibleIntendedSingle?: number;
   /** px — intended single-line height (max over segments of the requested
    *  font's win line-height ratio × em), for fonts whose substituted Canvas
    *  metrics understate Word's line spacing. 0 when no segment needs it. */
@@ -429,6 +441,7 @@ export interface LineLayoutEnvironment {
   readonly noteNumbers?: ReadonlyMap<string, number>;
   readonly currentNoteNumber?: number;
   readonly verticalCJK?: boolean;
+  readonly resolvedLocalFonts?: Readonly<Record<string, ResolvedLocalFontMetric>>;
 }
 
 // ── Math (OMML) rendering via MathJax ───────────────────────────────────────
@@ -762,6 +775,31 @@ export function calcEffectiveFontPx(s: LayoutTextSeg, scale: number): number {
   let size = pt * scale;
   if (s.vertAlign) size *= 0.65;
   return size;
+}
+
+/** Design single-line floor for a measured segment. An exact local face, when
+ * resolved during document loading, supersedes the static family profile; the
+ * latter remains the fallback when local() is unavailable or rejected. */
+export function segmentIntendedSingleLinePx(
+  segment: LayoutTextSeg,
+  emPx: number,
+  eastAsian = false,
+): number {
+  return Math.max(
+    intendedSingleLinePx(segment.fontFamily, emPx, eastAsian),
+    (segment.resolvedLineHeightRatio ?? 0) * emPx,
+  );
+}
+
+export function segmentEastAsiaFloorSingleLinePx(
+  segment: LayoutTextSeg,
+  emPx: number,
+  eastAsian = false,
+): number {
+  return Math.max(
+    intendedSingleLinePx(segment.eaFloorFamily, emPx, eastAsian),
+    (segment.resolvedEaFloorLineHeightRatio ?? 0) * emPx,
+  );
 }
 
 export function getDefaultFontSize(para: DocParagraph): number {
@@ -2111,6 +2149,8 @@ function resolveFitTextSegments(
 
 export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment): LayoutSeg[] {
   const segs: LayoutSeg[] = [];
+  const resolvedFont = (family: string | null | undefined): ResolvedLocalFontMetric | undefined =>
+    family ? environment.resolvedLocalFonts?.[normalizeLocalFontMetricFamily(family)] : undefined;
   // Group §17.3.2.14 adjacency over SOURCE RUNS before script/font, word, or
   // small-caps segmentation, but model each tab-delimited fragment as its own
   // source unit. A tab is a position-dependent advance rather than a glyph, so a
@@ -2240,6 +2280,8 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
     // family for its whole `.text` — so the measure==draw / docGrid char-grid
     // invariant holds and the draw loop needs no per-segment font switching.
     const pushSeg = (text: string, cs: boolean, fontFamily: string | null) => {
+      const localFont = resolvedFont(fontFamily);
+      const localEaFloor = resolvedFont(eaFontFamily);
       segs.push({
         text,
         bold: cs ? csBold : base.bold,
@@ -2253,7 +2295,8 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         strikethrough: base.strikethrough,
         fontSize: cs ? csFontSize : base.fontSize,
         color: base.color,
-        fontFamily,
+        fontFamily: localFont?.family ?? fontFamily,
+        resolvedLineHeightRatio: localFont?.lineHeightRatio,
         vertAlign,
         measuredWidth: 0,
         smallCaps: reduced,
@@ -2272,7 +2315,8 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         digitsAsAN: digitsAsAN ? true : undefined,
         // §17.3.2.26 declared eastAsia axis — recorded for the text-box line-box
         // floor only (see LayoutTextSeg.eaFloorFamily). Inert for the body path.
-        eaFloorFamily: eaFontFamily,
+        eaFloorFamily: localEaFloor?.family ?? eaFontFamily,
+        resolvedEaFloorLineHeightRatio: localEaFloor?.lineHeightRatio,
         // IX1 — resolved hyperlink target of the originating run, for the
         // text-layer clickable overlay. Does not affect layout or drawing.
         hyperlink,
@@ -2669,6 +2713,10 @@ export function layoutLines(
   let lineDescent = 0;  // px
   let lineIntendedSingle = 0; // px — max intended single-line height on the line
   let lineGridCountSingle = 0; // px — max over segments of (tabled design height | untabled box)
+  let lineVisibleAscent = 0;
+  let lineVisibleDescent = 0;
+  let lineVisibleIntendedSingle = 0;
+  let lineHasVisibleMetrics = false;
   let isFirst = true;
   // Effective width/offset for the current line after float exclusion.
   let lineMaxWidth = maxWidth;
@@ -2818,6 +2866,11 @@ export function layoutLines(
     const hasContent = lineAscent > 0 || lineDescent > 0;
     const asc = hasContent ? lineAscent : h * scale * 0.8;
     const desc = hasContent ? lineDescent : h * scale * 0.2;
+    const visibleAscent = lineHasVisibleMetrics ? lineVisibleAscent : asc;
+    const visibleDescent = lineHasVisibleMetrics ? lineVisibleDescent : desc;
+    const visibleIntendedSingle = lineHasVisibleMetrics
+      ? lineVisibleIntendedSingle
+      : lineIntendedSingle;
     const gridCountSingle = lineGridCountSingle
       || (lineEastAsian ? eastAsianGridCountSinglePx(lineIntendedSingle, h * scale) : asc + desc);
     lines.push({
@@ -2825,6 +2878,9 @@ export function layoutLines(
       height: h,
       ascent: asc,
       descent: desc,
+      visibleAscent,
+      visibleDescent,
+      visibleIntendedSingle,
       intendedSingle: lineIntendedSingle,
       // Empty/synthetic East Asian lines use the same design-height rule as a
       // text run; their synthesized Canvas box must not reintroduce a
@@ -2857,6 +2913,10 @@ export function layoutLines(
     lineDescent = 0;
     lineIntendedSingle = 0;
     lineGridCountSingle = 0;
+    lineVisibleAscent = 0;
+    lineVisibleDescent = 0;
+    lineVisibleIntendedSingle = 0;
+    lineHasVisibleMetrics = false;
     lineHasRuby = false;
     lineEastAsian = false;
     lineHasSea = false;
@@ -2887,6 +2947,12 @@ export function layoutLines(
     if (h > lineHeight) lineHeight = h;
     if (asc > lineAscent) lineAscent = asc;
     if (desc > lineDescent) lineDescent = desc;
+    const paintsInlineInk = !('text' in s) || s.metricOnly !== true;
+    if (paintsInlineInk) {
+      lineHasVisibleMetrics = true;
+      if (asc > lineVisibleAscent) lineVisibleAscent = asc;
+      if (desc > lineVisibleDescent) lineVisibleDescent = desc;
+    }
     // Grid-count height for docGrid cell allocation (§17.6.5). Only East Asian
     // TEXT (and tall inline objects) drives the count — a Latin run keeps its
     // natural height and is NOT cell-rounded, so it must not contribute (its
@@ -2913,8 +2979,11 @@ export function layoutLines(
       // annotation box (sample-5 calibration) and Word's FE height for a
       // ruby-bearing line is unmeasured, so the pre-#1013 metrics stand.
       const segScriptHint = metricEastAsian && !ts.ruby;
-      const intended = intendedSingleLinePx(ts.fontFamily, intendedEm, segScriptHint);
+      const intended = segmentIntendedSingleLinePx(ts, intendedEm, segScriptHint);
       if (intended > lineIntendedSingle) lineIntendedSingle = intended;
+      if (paintsInlineInk && intended > lineVisibleIntendedSingle) {
+        lineVisibleIntendedSingle = intended;
+      }
       // Only East Asian text is cell-rounded. Both branches are scale-linear:
       // tabled fonts use recorded design metrics; untabled fonts use 1.3em.
       if (segScriptHint) segGridCount = eastAsianGridCountSinglePx(intended, intendedEm);
@@ -3892,8 +3961,9 @@ export function layoutLines(
 }
 
 /** Phase 4-1 B2 Stage 2 — rehydrate the paginator's scale-1 stamped lines into
- *  the paint scale, keeping the scale-1 line PARTITION but re-deriving all
- *  hinting-sensitive geometry at the paint scale.
+ *  the paint scale while keeping the scale-1 line PARTITION. The default legacy
+ *  bridge re-derives hinting-sensitive geometry at the paint scale; the optional
+ *  canonical bridge scales the complete stored geometry for viewport paint.
  *
  *  Why not a pure ×scale of the scale-1 fields: a real (hinted) font's Canvas
  *  metrics are NOT scale-linear — `measureText(pt·s).width ≠ s · measureText(pt)`
@@ -3924,15 +3994,65 @@ export function layoutLines(
  *  draw path and repeated renderPage calls read the same immutable array; see
  *  layout-lines-reuse-identity.test.ts). `scale === 1` returns the stamp
  *  unchanged (identity — no copy, no re-measure), so the scale-1 reuse path stays
- *  byte-for-byte as in Stage 1. */
+ *  byte-for-byte as in Stage 1.
+ *
+ *  When `canonicalGeometry` is true, text and line geometry are also mapped by
+ *  a pure ×scale from the stamp. The caller must then paint scale-1 glyphs under
+ *  the matching Canvas transform; this is the document-space body-text path that
+ *  preserves both the frozen partition and its width contract. */
 export function rescaleLayoutLines(
   lines: LayoutLine[],
   scale: number,
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   fontFamilyClasses: Record<string, string>,
   gridDeltaPx: number,
+  canonicalGeometry = false,
 ): LayoutLine[] {
   if (scale === 1) return lines;
+
+  if (canonicalGeometry) {
+    return lines.map((line) => ({
+      ...line,
+      segments: line.segments.map((segment) => {
+        if ('imagePath' in segment) {
+          return segment.anchor
+            ? { ...segment, measuredWidth: 0 }
+            : { ...segment, measuredWidth: segment.widthPt * scale };
+        }
+        if ('mathNodes' in segment) {
+          return {
+            ...segment,
+            measuredWidth: segment.measuredWidth * scale,
+            mathAscent: segment.mathAscent * scale,
+            mathDescent: segment.mathDescent * scale,
+          };
+        }
+        if ('text' in segment) {
+          return {
+            ...segment,
+            measuredWidth: segment.measuredWidth * scale,
+            fitTextPerGapPx: segment.fitTextPerGapPx === undefined
+              ? undefined
+              : segment.fitTextPerGapPx * scale,
+            fitTextTrailingPadPx: segment.fitTextTrailingPadPx === undefined
+              ? undefined
+              : segment.fitTextTrailingPadPx * scale,
+          };
+        }
+        return { ...segment, measuredWidth: segment.measuredWidth * scale };
+      }),
+      ascent: line.ascent * scale,
+      descent: line.descent * scale,
+      visibleAscent: (line.visibleAscent ?? line.ascent) * scale,
+      visibleDescent: (line.visibleDescent ?? line.descent) * scale,
+      visibleIntendedSingle: (line.visibleIntendedSingle ?? line.intendedSingle) * scale,
+      intendedSingle: line.intendedSingle * scale,
+      gridCountSingle: line.gridCountSingle * scale,
+      xOffset: line.xOffset * scale,
+      availWidth: line.availWidth * scale,
+      topY: line.topY === undefined ? undefined : line.topY * scale,
+    }));
+  }
 
   const withSegKerning = <T>(s: LayoutTextSeg, measure: () => T): T => {
     if (s.kerning == null) return measure();
@@ -3987,7 +4107,7 @@ export function rescaleLayoutLines(
     // Intended single-line floor (font-metrics.ts) — small caps keep the FULL run
     // size here too (addToLine's intendedEm).
     const intendedEm = s.smallCaps && !s.vertAlign ? fullPx : effPx;
-    const intended = intendedSingleLinePx(s.fontFamily, intendedEm, segScriptHint);
+    const intended = segmentIntendedSingleLinePx(s, intendedEm, segScriptHint);
     return {
       advance,
       asc,
@@ -4003,6 +4123,10 @@ export function rescaleLayoutLines(
     let intended = 0;
     let gridCount = 0; // px — max over segments of (tabled design | untabled 1.3em)
     let hasText = false;
+    let visibleAsc = 0;
+    let visibleDesc = 0;
+    let visibleIntended = 0;
+    let hasVisibleMetrics = false;
     const scaledSource = l.segments.map((segment) => ({ ...segment })) as LayoutSeg[];
     // Recompute the region gap from paint-scale natural metrics. Reusing the
     // scale-1 gap would break measure==paint because targetPx and font advances
@@ -4036,6 +4160,8 @@ export function rescaleLayoutLines(
         // size docGrid cells, mirroring layoutLines' addToLine contribution.
         asc = Math.max(asc, h);
         gridCount = Math.max(gridCount, h);
+        visibleAsc = Math.max(visibleAsc, h);
+        hasVisibleMetrics = true;
         return { ...s, measuredWidth: s.widthPt * scale };
       }
       if ('mathNodes' in s) {
@@ -4045,6 +4171,9 @@ export function rescaleLayoutLines(
         asc = Math.max(asc, copy.mathAscent, s.fontSize * scale * 0.8);
         desc = Math.max(desc, copy.mathDescent, s.fontSize * scale * 0.2);
         gridCount = Math.max(gridCount, copy.mathAscent + copy.mathDescent);
+        visibleAsc = Math.max(visibleAsc, copy.mathAscent, s.fontSize * scale * 0.8);
+        visibleDesc = Math.max(visibleDesc, copy.mathDescent, s.fontSize * scale * 0.2);
+        hasVisibleMetrics = true;
         return copy;
       }
       const t = s as LayoutTextSeg;
@@ -4053,6 +4182,12 @@ export function rescaleLayoutLines(
       if (mm.asc > asc) asc = mm.asc;
       if (mm.desc > desc) desc = mm.desc;
       if (mm.intended > intended) intended = mm.intended;
+      if (t.metricOnly !== true) {
+        visibleAsc = Math.max(visibleAsc, mm.asc);
+        visibleDesc = Math.max(visibleDesc, mm.desc);
+        visibleIntended = Math.max(visibleIntended, mm.intended);
+        hasVisibleMetrics = true;
+      }
       // Only East Asian text is cell-rounded (§17.6.5); a Latin run keeps its
       // natural height and must not contribute its (substituted) box to the
       // grid-count height. measureTextSeg derives both tabled and untabled
@@ -4073,6 +4208,15 @@ export function rescaleLayoutLines(
       segments,
       ascent: asc,
       descent: desc,
+      visibleAscent: hasVisibleMetrics
+        ? visibleAsc
+        : (l.visibleAscent ?? l.ascent) * scale,
+      visibleDescent: hasVisibleMetrics
+        ? visibleDesc
+        : (l.visibleDescent ?? l.descent) * scale,
+      visibleIntendedSingle: hasVisibleMetrics
+        ? visibleIntended
+        : (l.visibleIntendedSingle ?? l.intendedSingle) * scale,
       intendedSingle: intended,
       gridCountSingle: gridCount || (asc + desc),
       // Pure page geometry — scale-linear (no glyph hinting).

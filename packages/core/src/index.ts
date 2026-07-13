@@ -489,6 +489,16 @@ export {
   intendedSingleLinePx,
   correctLineMetrics,
 } from './text/line-metrics';
+// Exact local-font metric probing. Shared contract for docx/xlsx/pptx; format
+// packages supply only their evidence-backed Office line-height policy.
+export {
+  loadLocalFontMetrics,
+  unloadLocalFontMetrics,
+  normalizeLocalFontMetricFamily,
+  type LocalFontMetricRequest,
+  type ResolvedLocalFontMetric,
+  type LoadedLocalFontMetrics,
+} from './fonts/local-metrics';
 // Format-agnostic same-font Canvas-vs-Word line-fit bias. Consumers keep their
 // layout/paint wiring local, while the metric provenance and normalized family
 // matching remain shared data.

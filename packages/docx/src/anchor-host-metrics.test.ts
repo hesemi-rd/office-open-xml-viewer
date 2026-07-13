@@ -50,6 +50,46 @@ function anchoredShape(): DocRun {
   } as DocRun;
 }
 
+function textRun(text: string, fontSize = 11): DocRun {
+  return {
+    type: 'text',
+    text,
+    bold: false,
+    italic: false,
+    underline: false,
+    strikethrough: false,
+    fontSize,
+    color: null,
+    fontFamily: 'Yu Mincho',
+    fontFamilyEastAsia: 'Yu Mincho',
+    isLink: false,
+    background: null,
+    vertAlign: null,
+  } as DocRun;
+}
+
+function layOut(runs: DocRun[]) {
+  return layoutLines(
+    linearCtx(),
+    buildSegments(runs, { pageIndex: 0, totalPages: 1 })
+      .map((segment) => ({ ...segment })) as LayoutSeg[],
+    400,
+    0,
+    1,
+    undefined,
+    undefined,
+    {},
+    0,
+    DEFAULT_KINSOKU_RULES,
+    0,
+    36,
+    400,
+    false,
+    false,
+    false,
+  );
+}
+
 describe('floating drawing anchor-host metrics', () => {
   it('emits a zero-width metric segment using the anchor character formatting', () => {
     const segments = buildSegments([anchoredShape()], { pageIndex: 0, totalPages: 1 });
@@ -99,5 +139,23 @@ describe('floating drawing anchor-host metrics', () => {
       line.eastAsian,
       line.gridCountSingle,
     )).toBe(36);
+  });
+
+  it('reserves host line height without using its zero-ink box for a visible run baseline', () => {
+    const [hostOnly] = layOut([anchoredShape()]);
+    const [visibleOnly] = layOut([textRun('Caption')]);
+    const [mixed] = layOut([anchoredShape(), textRun('Caption')]);
+
+    // The host formatting still reserves the same two-cell line advance used by
+    // anchor-only rows; only the visible glyph baseline comes from visible ink.
+    expect(mixed.height).toBe(hostOnly.height);
+    expect(mixed.ascent).toBe(hostOnly.ascent);
+    expect(mixed.descent).toBe(hostOnly.descent);
+    expect(mixed.intendedSingle).toBe(hostOnly.intendedSingle);
+    expect(mixed.gridCountSingle).toBe(hostOnly.gridCountSingle);
+    expect(mixed.visibleAscent).toBe(visibleOnly.ascent);
+    expect(mixed.visibleDescent).toBe(visibleOnly.descent);
+    expect(hostOnly.visibleAscent).toBe(hostOnly.ascent);
+    expect(hostOnly.visibleDescent).toBe(hostOnly.descent);
   });
 });

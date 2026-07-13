@@ -17,6 +17,7 @@
 // so there is no import cycle with renderer.ts.
 
 import type { DocTable, DocTableRow, DocTableCell } from './types.js';
+import { resolveBorderConflict, resolveCellEdges } from './cell-border-conflict.js';
 
 /** Minimum table-row height (pt) when no `w:trHeight` floor applies — i.e. an
  *  `auto` row, or `atLeast`/`exact` with no `@val`. ECMA-376 leaves the auto
@@ -71,6 +72,113 @@ export function findMergeEndRow(table: DocTable, startRi: number, startCi: numbe
  *  Asian paragraph mark on a docGrid rounds to a different cell count), so this
  *  skeleton keeps each caller's measurer intact rather than choosing one. */
 export type MeasureCellContentHeight = (cell: DocTableCell, cellWidth: number) => number;
+
+interface TableGridOwner {
+  cell: DocTableCell;
+  ri: number;
+  lastRi: number;
+  ci: number;
+  span: number;
+}
+
+function cellAtGridColumn(
+  row: DocTableRow,
+  targetCi: number,
+  columnCount: number,
+): DocTableCell | null {
+  let ci = rowGridBefore(row, columnCount);
+  for (const cell of row.cells) {
+    if (targetCi >= ci && targetCi < ci + cell.colSpan) return cell;
+    ci += cell.colSpan;
+  }
+  return null;
+}
+
+function paintWidth(candidate: ReturnType<typeof resolveBorderConflict>): number {
+  const spec = candidate?.spec;
+  if (!spec || spec.style === 'none' || spec.style === 'nil') return 0;
+  return spec.width;
+}
+
+/** Width of each resolved horizontal table-grid boundary, from the outer top
+ * through every shared row boundary to the outer bottom. Adjacent-cell
+ * conflicts use the same §17.4.66 cascade as paint; a boundary inside one
+ * vertically merged owner contributes no rule. */
+export function resolvedHorizontalBoundaryWidths(table: DocTable): number[] {
+  const rowCount = table.rows.length;
+  const columnCount = table.colWidths.length;
+  const widths = new Array<number>(rowCount + 1).fill(0);
+  if (rowCount === 0 || columnCount === 0) return widths;
+
+  const owners: Array<Array<TableGridOwner | null>> = Array.from(
+    { length: rowCount },
+    () => new Array<TableGridOwner | null>(columnCount).fill(null),
+  );
+  for (let ri = 0; ri < rowCount; ri++) {
+    const row = table.rows[ri];
+    let ci = rowGridBefore(row, columnCount);
+    for (const cell of row.cells) {
+      const span = Math.min(cell.colSpan, columnCount - ci);
+      if (cell.vMerge !== false && span > 0) {
+        const lastRi = cell.vMerge === true ? findMergeEndRow(table, ri, ci) : ri;
+        const owner: TableGridOwner = { cell, ri, lastRi, ci, span };
+        for (let rj = ri; rj <= lastRi; rj++) {
+          for (let cj = ci; cj < ci + span; cj++) owners[rj][cj] = owner;
+        }
+      }
+      ci += span;
+    }
+  }
+
+  const edgesFor = (owner: TableGridOwner) => ({
+    topRow: owner.ri === 0,
+    bottomRow: owner.lastRi === rowCount - 1,
+    leftCol: owner.ci === 0,
+    rightCol: owner.ci + owner.span === columnCount,
+  });
+  const bottomCandidate = (owner: TableGridOwner) => {
+    const terminal = owner.lastRi > owner.ri
+      ? (cellAtGridColumn(table.rows[owner.lastRi], owner.ci, columnCount) ?? owner.cell)
+      : owner.cell;
+    return resolveCellEdges(terminal.borders, table.borders, edgesFor(owner), false).bottom;
+  };
+
+  for (let ci = 0; ci < columnCount; ci++) {
+    const topOwner = owners[0][ci];
+    if (topOwner) {
+      const top = resolveCellEdges(
+        topOwner.cell.borders,
+        table.borders,
+        edgesFor(topOwner),
+        false,
+      ).top;
+      widths[0] = Math.max(widths[0], paintWidth(resolveBorderConflict(top, null)));
+    }
+
+    for (let boundary = 1; boundary < rowCount; boundary++) {
+      const above = owners[boundary - 1][ci];
+      const below = owners[boundary][ci];
+      if (above && above === below) continue;
+      const aboveBottom = above ? bottomCandidate(above) : null;
+      const belowTop = below
+        ? resolveCellEdges(below.cell.borders, table.borders, edgesFor(below), false).top
+        : null;
+      widths[boundary] = Math.max(
+        widths[boundary],
+        paintWidth(resolveBorderConflict(aboveBottom, belowTop)),
+      );
+    }
+
+    const bottomOwner = owners[rowCount - 1][ci];
+    if (bottomOwner) {
+      widths[rowCount] = Math.max(
+        widths[rowCount],
+        paintWidth(resolveBorderConflict(bottomCandidate(bottomOwner), null)),
+      );
+    }
+  }
+  return widths;
+}
 
 /**
  * Resolve per-row heights for a table whose grid columns have widths
@@ -166,6 +274,18 @@ export function resolveTableRowHeights(
   const rowHeights = table.rows.map((row) =>
     resolveSingleRowHeight(row, colWidths, scale, measureCellContentHeight),
   );
+
+  // Word's auto/atLeast row footprint runs between the centres of the resolved
+  // horizontal rules. Therefore each non-exact row reserves half of the rule
+  // above and half below. Exact `trHeight` already defines the complete row box
+  // and is not expanded (§17.4.80).
+  const horizontalBoundaries = resolvedHorizontalBoundaryWidths(table);
+  for (let ri = 0; ri < rowHeights.length; ri++) {
+    if (table.rows[ri].rowHeightRule === 'exact') continue;
+    rowHeights[ri] += (
+      (horizontalBoundaries[ri] ?? 0) + (horizontalBoundaries[ri + 1] ?? 0)
+    ) * scale / 2;
+  }
 
   // §17.4.85 span extension: for each vMerge=restart cell, grow the span's last
   // row if the restart cell's full content is taller than the summed span rows.

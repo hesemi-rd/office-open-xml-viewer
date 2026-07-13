@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { calculateRowHeight } from './renderer.js';
-import { resolveSingleRowHeight } from './table-geometry.js';
+import { resolveSingleRowHeight, resolveTableRowHeights } from './table-geometry.js';
 import type { DocTable, DocTableRow, DocTableCell } from './types.js';
 
 // ECMA-376 §17.4.80 (trHeight) + §17.18.37 (ST_HeightRule): the @hRule attribute
@@ -113,5 +113,27 @@ describe('calculateRowHeight — ST_HeightRule (§17.4.80 / §17.18.37)', () => 
     });
 
     expect(measuredWidths).toEqual([40]);
+  });
+
+  it('includes half of each resolved horizontal border in adjacent non-exact row boxes', () => {
+    const single = { style: 'single', width: 0.5, color: '#000000' };
+    const rows = Array.from({ length: 4 }, () => ({
+      ...rowWith(20.4, 'auto'),
+      cells: [{
+        ...emptyCell(),
+        borders: { top: single, bottom: single, left: null, right: null, insideH: null, insideV: null },
+      }],
+    } as unknown as DocTableRow));
+    const bordered = {
+      ...table(),
+      rows,
+    } as DocTable;
+
+    const heights = resolveTableRowHeights(bordered, [100], 1, () => 0);
+
+    // Five 0.5pt boundary rules contribute half at the two outer edges and a
+    // full rule across each of the three shared boundaries: 4 × 20.4 + 2.0.
+    expect(heights).toEqual([20.9, 20.9, 20.9, 20.9]);
+    expect(heights.reduce((sum, height) => sum + height, 0)).toBeCloseTo(83.6, 8);
   });
 });
