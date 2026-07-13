@@ -8,6 +8,11 @@ use ooxml_common::zip::read_zip_string;
 
 mod markdown;
 
+mod worksheet_reference;
+use worksheet_reference::{
+    extract_reference_cells, resolve_worksheet_reference, ReferencedCellValue, MAX_REFERENCE_CELLS,
+};
+
 mod types;
 pub use types::*;
 mod styles;
@@ -274,8 +279,15 @@ fn parse_sheet_with(
     ws.defined_names = parse_defined_names_for_sheet(&wb_doc, sheet_index);
     ws.tables = load_sheet_tables(archive, &sheet_path, theme_colors);
     ws.slicers = load_sheet_slicers(archive, &sheet_path);
-    ws.sparkline_groups =
-        load_sheet_sparklines(archive, &sheet_xml, &shared.sheets, &rels_doc, theme_colors);
+    ws.sparkline_groups = load_sheet_sparklines(
+        archive,
+        &sheet_xml,
+        name,
+        &shared.sheets,
+        &rels_doc,
+        theme_colors,
+        &shared.shared_strings,
+    );
     let (df_family, df_size) = parse_default_font(archive);
     ws.default_font_family = df_family;
     ws.default_font_size = df_size;
@@ -692,7 +704,7 @@ fn parse_defined_names_for_sheet(doc: &roxmltree::Document, sheet_index: u32) ->
     names
 }
 
-fn resolve_sheet_path(doc: &roxmltree::Document, r_id: &str) -> Option<String> {
+pub(crate) fn resolve_sheet_path(doc: &roxmltree::Document, r_id: &str) -> Option<String> {
     let ns = "http://schemas.openxmlformats.org/package/2006/relationships";
     for node in doc.descendants() {
         if node.tag_name().name() == "Relationship"
@@ -2077,25 +2089,6 @@ fn parse_sqref(s: &str) -> Vec<CellRange> {
         .collect()
 }
 
-/// Split an `<xm:f>` reference like `Sheet1!A1:A10` or `'My Sheet'!$B$3:$B$8`
-/// into `(sheet_name, range)`. Returns `None` if the reference has no sheet
-/// qualifier — sparkline data refs always do, so unqualified is treated as
-/// "same sheet" by callers.
-fn split_sheet_ref(s: &str) -> (Option<String>, String) {
-    let s = s.trim();
-    let Some(bang) = s.rfind('!') else {
-        return (None, s.to_string());
-    };
-    let mut sheet = s[..bang].to_string();
-    // Strip absolute-ref dollars from the range part.
-    let range = s[bang + 1..].replace('$', "");
-    // Quoted sheet names ('foo''s sheet' uses doubled quotes for inner ').
-    if sheet.starts_with('\'') && sheet.ends_with('\'') {
-        sheet = sheet[1..sheet.len() - 1].replace("''", "'");
-    }
-    (Some(sheet), range)
-}
-
 /// Read a worksheet XML and extract numeric `<v>` values for the cells in
 /// `range`. Returns one value per cell in row-major order across the range.
 /// Empty cells, non-numeric values, and cells outside the range yield `None`.
@@ -2119,86 +2112,16 @@ fn split_sheet_ref(s: &str) -> (Option<String>, String) {
 /// `Vec` and the sparkline is simply not drawn (the renderer iterates the value
 /// slice by index, so an empty slice draws nothing — graceful degradation, not
 /// a hard error).
-const MAX_SPARKLINE_CELLS: usize = 1_000_000;
+const MAX_SPARKLINE_CELLS: usize = MAX_REFERENCE_CELLS;
 
 fn extract_range_values(sheet_xml: &str, range: &CellRange) -> Vec<Option<f64>> {
-    let total = ((range.bottom - range.top + 1) as usize)
-        .saturating_mul((range.right - range.left + 1) as usize);
-    // Guard the dense allocation: refuse pathological ranges (e.g. a full-sheet
-    // `<xm:f>`) that would demand a multi-hundred-GB buffer. Returning empty
-    // fails safe — no sparkline rather than OOM. See MAX_SPARKLINE_CELLS.
-    if total > MAX_SPARKLINE_CELLS {
-        return Vec::new();
-    }
-    let mut values: Vec<Option<f64>> = vec![None; total];
-    let Ok(doc) = parse_guarded(sheet_xml) else {
-        return values;
-    };
-    let row_span = (range.right - range.left + 1) as usize;
-
-    // Walk `<row>` elements first so we can reconstruct implicit positions the
-    // same way the main cell path does (PR #851): `@r` is `use="optional"` on
-    // both `CT_Row` (§18.3.1.73) and `CT_Cell` (§18.3.1.4). A flat
-    // `doc.descendants()` scan over `<c>` cannot recover an omitted position
-    // because it has no row grouping and no running column, so an r-less cell
-    // would be silently dropped and the sparkline would render blank. Track an
-    // implicit row counter across rows and, within each row, an implicit column
-    // counter — both resolved through `resolve_implicit_ordinal` so this path
-    // stays in lockstep with `parse_worksheet` / `parse_row_cells`.
-    let mut prev_row: u32 = 0;
-    for row_node in doc
-        .descendants()
-        .filter(|n| n.tag_name().name() == "row" && is_x_ns(n.tag_name().namespace()))
-    {
-        let row = resolve_implicit_ordinal(
-            row_node.attribute("r").and_then(|s| s.parse::<u32>().ok()),
-            &mut prev_row,
-        );
-
-        let mut prev_col: u32 = 0;
-        for c in row_node
-            .children()
-            .filter(|n| n.tag_name().name() == "c" && is_x_ns(n.tag_name().namespace()))
-        {
-            // An explicit `@r` re-anchors both the column and (authoritatively)
-            // the row; an omitted `@r` takes the previous cell's column + 1 and
-            // the running row.
-            let (col, cell_row) = match c.attribute("r") {
-                Some(r_attr) => {
-                    let (col, row) = parse_cell_ref(r_attr);
-                    prev_col = col;
-                    (col, row)
-                }
-                None => (resolve_implicit_ordinal(None, &mut prev_col), row),
-            };
-
-            if cell_row < range.top
-                || cell_row > range.bottom
-                || col < range.left
-                || col > range.right
-            {
-                continue;
-            }
-            // Only honor numeric / formula-numeric cells. `t` of "s" / "str" /
-            // "inlineStr" / "b" / "e" all map to None for sparkline values.
-            let t = c.attribute("t").unwrap_or("");
-            if matches!(t, "s" | "str" | "inlineStr" | "b" | "e") {
-                continue;
-            }
-            let v = c
-                .children()
-                .find(|n| n.tag_name().name() == "v" && is_x_ns(n.tag_name().namespace()))
-                .and_then(|n| n.text())
-                .and_then(|s| s.trim().parse::<f64>().ok());
-            if let Some(num) = v {
-                let idx = (cell_row - range.top) as usize * row_span + (col - range.left) as usize;
-                if idx < values.len() {
-                    values[idx] = Some(num);
-                }
-            }
-        }
-    }
-    values
+    extract_reference_cells(sheet_xml, range, &[])
+        .into_iter()
+        .map(|value| match value {
+            ReferencedCellValue::Number(number) => Some(number),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Walk the worksheet XML's `<extLst>` and produce one `SparklineGroup` per
@@ -2208,9 +2131,11 @@ fn extract_range_values(sheet_xml: &str, range: &CellRange) -> Vec<Option<f64>> 
 fn load_sheet_sparklines(
     archive: &mut XlsxZip,
     sheet_xml: &str,
+    current_sheet_name: &str,
     sheets: &[SheetMeta],
     rels_doc: &roxmltree::Document,
     theme_colors: &[String],
+    shared_strings: &[SharedString],
 ) -> Vec<SparklineGroup> {
     let Ok(doc) = parse_guarded(sheet_xml) else {
         return Vec::new();
@@ -2275,33 +2200,22 @@ fn load_sheet_sparklines(
                     continue;
                 }
                 let (col, row) = parse_cell_ref(sqref_text.trim());
-                let (source_sheet, range_str) = split_sheet_ref(f_text);
-                let ranges = parse_sqref(&range_str);
-                let Some(range) = ranges.into_iter().next() else {
-                    continue;
-                };
-
-                // Look up source sheet XML (cross-sheet ref). When the ref
-                // has no sheet qualifier, fall back to the *current* sheet
-                // XML.
-                let source_xml: Option<&str> = match source_sheet {
-                    Some(name) => {
-                        if !xml_cache.contains_key(&name) {
-                            let path = sheets
-                                .iter()
-                                .find(|s| s.name == name)
-                                .and_then(|s| resolve_sheet_path(rels_doc, &s.r_id))
-                                .map(|p| format!("xl/{}", p));
-                            let xml = path.and_then(|p| read_zip_string(archive, &p).ok());
-                            xml_cache.insert(name.clone(), xml);
-                        }
-                        xml_cache.get(&name).and_then(|o| o.as_deref())
-                    }
-                    None => Some(sheet_xml),
-                };
-                let values = source_xml
-                    .map(|xml| extract_range_values(xml, &range))
-                    .unwrap_or_default();
+                let values = resolve_worksheet_reference(
+                    archive,
+                    f_text,
+                    sheet_xml,
+                    current_sheet_name,
+                    sheets,
+                    rels_doc,
+                    shared_strings,
+                    &mut xml_cache,
+                )
+                .into_iter()
+                .map(|value| match value {
+                    ReferencedCellValue::Number(number) => Some(number),
+                    _ => None,
+                })
+                .collect();
 
                 sparklines.push(Sparkline { row, col, values });
             }
@@ -2516,7 +2430,7 @@ pub(crate) fn parse_cell_ref(r: &str) -> (u32, u32) {
 /// `<row>`/`<c>` sequences — `parse_worksheet` (row numbers), `parse_row_cells`
 /// (cell columns), and `extract_range_values` (sparkline data cells) — so their
 /// implicit-reference handling cannot drift apart.
-fn resolve_implicit_ordinal(explicit: Option<u32>, prev: &mut u32) -> u32 {
+pub(crate) fn resolve_implicit_ordinal(explicit: Option<u32>, prev: &mut u32) -> u32 {
     let resolved = explicit.unwrap_or(*prev + 1);
     *prev = resolved;
     resolved
