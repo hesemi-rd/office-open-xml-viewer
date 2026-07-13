@@ -22,7 +22,11 @@ const DOCX_FILES: { name: string; pageCount: number; width: number }[] = [
   // XF9 vertical writing (§17.6.20 tbRl): a landscape vertical-Japanese
   // newspaper. width = physical page width (842pt, A4 landscape). Reference is
   // private (gitignored) and generated locally with UPDATE_REFS=1.
-  { name: 'private/sample-26', pageCount: 1, width: 842 },
+  // 2 pages per the Word PDF (page 2 carries only the spill of the final
+  // column): the deterministic untabled EA docGrid cell height (1.3 em — the
+  // sample-9 regression fix) restores the Word page count from the crammed
+  // 1-page state the 2026-07-13a baseline captured.
+  { name: 'private/sample-26', pageCount: 2, width: 842 },
   // Multilingual / section coverage (references private + gitignored, generated
   // locally with UPDATE_REFS=1):
   // sample-27 = continuous section-break page-number restart fixture (US Letter, 612pt).

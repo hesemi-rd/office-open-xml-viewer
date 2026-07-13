@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { docGridLineCells, isGridLineRule, lineBoxHeight } from './line-layout.js';
+import {
+  docGridLineCells,
+  eastAsianGridCountSinglePx,
+  isGridLineRule,
+  lineBoxHeight,
+} from './line-layout.js';
 import type { LineSpacing } from './types.js';
 
 // Regression: some generators emit <w:spacing w:line="0" w:lineRule="exact"/> on
@@ -222,25 +227,28 @@ describe('lineBoxHeight — docGrid line-cell rounding (East Asian vs Latin)', (
     const boxDesc = 18.02 * 0.2;
     expect(lineBoxHeight(null, boxAsc, boxDesc, 1, grid18, false, 12 * YU, true, 12 * YU)).toBe(18);
   });
-  it('still counts a tall UNTABLED run on a mixed line — grid-count height keeps its box', () => {
-    // A mixed docGrid line: a small 12pt tabled Yu Mincho run (design 17.19px,
-    // the intendedSingle floor) plus a larger untabled CJK run whose measured
-    // box is 30px. The line's grid-count height (arg 9) is the max over runs of
-    // (tabled design | untabled box) = max(17.19, 30) = 30, so the untabled run
-    // still claims its two cells — the design-height rule must not UNDER-count
-    // a genuinely tall untabled run (independent review, Codex gpt-5.6-sol).
-    expect(lineBoxHeight(null, 24, 6, 1, grid18, false, 12 * YU, true, 30)).toBe(36);
+  it('counts a tall UNTABLED run on a mixed line from its 1.3em FE height', () => {
+    // A mixed docGrid line: a small 12pt tabled Yu Mincho run (design 17.19px)
+    // plus a 24pt untabled CJK run. The latter contributes 31.2px regardless of
+    // its substituted 30px Canvas box, so the line still claims two cells.
+    const untabledDesign = eastAsianGridCountSinglePx(0, 24);
+    expect(lineBoxHeight(null, 24, 6, 1, grid18, false, 12 * YU, true, untabledDesign)).toBe(36);
   });
   it('rounds a 20pt EA line on a 20pt pitch UP to two cells (sample-9)', () => {
     // design box 28.65px → ceil(28.65/20) = 2 cells = 40.
     expect(lineBoxHeight(null, 20 * YU_ASC, 20 * YU_DESC, 1, grid20, false, 20 * YU, true)).toBe(40);
   });
-  it('falls back to natural when no grid-count height is supplied (box 30 → 2 cells)', () => {
-    // With no arg-9 grid-count height, the count falls back to `natural` =
-    // max(box 24+6=30, design floor 20*YU=28.65) = 30 → ceil(30/20) = 2 cells =
-    // 40 on a 20pt pitch. Both the box and the design floor land in the same
-    // cell here, so the pre-existing callers (which supply no arg 9) are
-    // unaffected. Callers that need the substitution-robust count pass arg 9.
+  it('uses a scale-linear 1.3em fallback for an untabled EA line', () => {
+    // MS Mincho's hhea box is 1.0em and Word's FE single-line height is 1.3 ×
+    // hhea. The substituted Canvas box is exactly 1.0em here, but a 20pt line
+    // on a 20pt grid still occupies two cells in the sample-9 Word PDF.
+    expect(lineBoxHeight(null, 18, 2, 1, grid20, false, 0, true, undefined, 20)).toBe(40);
+    expect(lineBoxHeight(null, 43, 5, 2.3529, grid20, false, 0, true, undefined, 20 * 2.3529)).toBeCloseTo(40 * 2.3529, 8);
+  });
+  it('uses the tabled design floor when no per-line grid-count height is supplied', () => {
+    // A direct caller without arg 9 still has a deterministic tabled-font input
+    // in intendedSinglePx. The substituted 30px box is not consulted for the
+    // cell count; Yu Mincho's 28.65px design height takes two 20px cells.
     expect(lineBoxHeight(null, 24, 6, 1, grid20, false, 20 * YU, true)).toBe(40);
   });
   it('keeps a Latin line at natural height (one-cell floor), NOT cell-rounded', () => {

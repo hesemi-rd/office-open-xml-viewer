@@ -5,17 +5,22 @@
  *
  * The rule (see addToLine): the max over segments of each run's Word-faithful
  * single-line height, where a tabled EA run counts from its DESIGN height, an
- * untabled EA run from its measured box, and a Latin run does NOT contribute
+ * untabled EA run from the Word FE 1.3em fallback, and a Latin run does NOT contribute
  * (it is not cell-rounded). This is what keeps a substituted face's over-tall
- * box from inflating the cell count (sample-52) while still letting a genuinely
- * tall untabled East Asian run claim its cells (independent-review mixed case).
+ * or under-tall box from changing the cell count (sample-9/sample-52).
  *
  * A linear stub context makes the metrics analytic: measured box = fontSize
  * (0.8 + 0.2 em); Yu Mincho's tabled EA design height = 1.43267 × em.
  */
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_KINSOKU_RULES } from '@silurus/ooxml-core';
-import { layoutLines, type LayoutSeg, type LayoutTextSeg } from './line-layout.js';
+import {
+  layoutLines,
+  lineBoxHeight,
+  rescaleLayoutLines,
+  type LayoutSeg,
+  type LayoutTextSeg,
+} from './line-layout.js';
 
 function linearCtx(): CanvasRenderingContext2D {
   let font = '10px serif';
@@ -30,6 +35,26 @@ function linearCtx(): CanvasRenderingContext2D {
       fontBoundingBoxDescent: px() * 0.2,
       actualBoundingBoxAscent: px() * 0.8,
       actualBoundingBoxDescent: px() * 0.2,
+    } as TextMetrics),
+  } as unknown as CanvasRenderingContext2D;
+}
+
+function integerRoundedCtx(): CanvasRenderingContext2D {
+  let font = '10px serif';
+  const px = (): number => Number.parseFloat(/([\d.]+)px/.exec(font)?.[1] ?? '10');
+  return {
+    get font() { return font; },
+    set font(v: string) { font = v; },
+    letterSpacing: '0px',
+    measureText: (t: string) => ({
+      width: [...t].length * px() * 0.5,
+      // Deliberately reproduce Chrome's integer-rounded font boxes. At 20px
+      // the substituted box lands exactly on the grid-pitch boundary; cell
+      // allocation must come from the run's design count height instead.
+      fontBoundingBoxAscent: Math.round(px() * 0.9),
+      fontBoundingBoxDescent: Math.round(px() * 0.1),
+      actualBoundingBoxAscent: Math.round(px() * 0.9),
+      actualBoundingBoxDescent: Math.round(px() * 0.1),
     } as TextMetrics),
   } as unknown as CanvasRenderingContext2D;
 }
@@ -75,13 +100,78 @@ describe('layoutLines — per-line gridCountSingle (§17.6.5 docGrid cell height
     expect(line.gridCountSingle).toBeLessThan(20); // the 20pt Latin box did NOT count
   });
 
-  it('counts a genuinely TALL untabled EA run over a small tabled run (mixed case)', () => {
-    // Small 12pt Yu Mincho (design 17.19) + a large 24pt untabled CJK face
-    // (measured box 24). The untabled run is taller and East Asian, so it must
-    // claim its extent: max(17.19, 24) = 24. Guards the design-height rule from
-    // under-counting a tall untabled run (independent review, Codex gpt-5.6-sol).
+  it('counts a genuinely TALL untabled EA run from the Word FE design fallback', () => {
+    // Small 12pt Yu Mincho (design 17.19) + a large 24pt untabled CJK face.
+    // Word's untabled FE fallback is 1.3em, so the latter contributes 31.2px;
+    // its substituted Canvas box (24px in this stub) is irrelevant.
     const [line] = layout([seg('小', 'Yu Mincho', 12), seg('大きい', 'PMingLiU', 24)]);
-    expect(line.gridCountSingle).toBeCloseTo(24, 4);
+    expect(line.gridCountSingle).toBeCloseTo(24 * 1.3, 4);
+  });
+
+  it('uses 1.3em for an untabled 20pt EA run whose measured box is exactly one em', () => {
+    const run = seg('物理', 'ＭＳ 明朝', 20);
+    const [line] = layoutLines(
+      integerRoundedCtx(), [{ ...run }] as LayoutSeg[], 400, 0, 1,
+      undefined, undefined, {}, 0, DEFAULT_KINSOKU_RULES, 0, 36, 400,
+      false, false, false,
+    );
+
+    expect(line.ascent + line.descent).toBe(20);
+    expect(line.gridCountSingle).toBeCloseTo(26, 8);
+  });
+
+  it('keeps the untabled EA grid count scale-linear through paint-side rescaling', () => {
+    const paintScale = 2.3529;
+    const run = seg('物理', 'ＭＳ 明朝', 20);
+    const ctx = integerRoundedCtx();
+    const measured = layoutLines(
+      ctx, [{ ...run }] as LayoutSeg[], 400, 0, 1,
+      undefined, undefined, {}, 0, DEFAULT_KINSOKU_RULES, 0, 36, 400,
+      false, false, false,
+    );
+    const [painted] = rescaleLayoutLines(measured, paintScale, ctx, {}, 0);
+
+    expect(measured[0].ascent + measured[0].descent).toBe(20);
+    expect(painted.ascent + painted.descent).toBe(47);
+    expect(measured[0].gridCountSingle).toBeCloseTo(26, 8);
+    expect(painted.gridCountSingle).toBeCloseTo(26 * paintScale, 8);
+  });
+
+  it('keeps paginator and paint advances equal across integer-rounded docGrid boundaries', () => {
+    const paintScale = 2.3529;
+    const cases = [
+      { fontSize: 20, linePitchPt: 20, expectedAdvance: 40 },
+      { fontSize: 16, linePitchPt: 18, expectedAdvance: 36 },
+    ];
+
+    for (const { fontSize, linePitchPt, expectedAdvance } of cases) {
+      const ctx = integerRoundedCtx();
+      const measured = layoutLines(
+        ctx, [seg('物理', 'ＭＳ 明朝', fontSize)] as LayoutSeg[], 400, 0, 1,
+        undefined, undefined, {}, 0, DEFAULT_KINSOKU_RULES, 0, 36, 400,
+        false, false, false,
+      );
+      const painted = rescaleLayoutLines(measured, paintScale, ctx, {}, 0);
+      const grid = { type: 'lines' as const, linePitchPt };
+
+      expect(painted).toHaveLength(measured.length);
+      for (const [index, measuredLine] of measured.entries()) {
+        const paintedLine = painted[index];
+        const measureAdvance = lineBoxHeight(
+          null, measuredLine.ascent, measuredLine.descent, 1, grid, false,
+          measuredLine.intendedSingle, measuredLine.eastAsian ?? false,
+          measuredLine.gridCountSingle,
+        );
+        const paintAdvance = lineBoxHeight(
+          null, paintedLine.ascent, paintedLine.descent, paintScale, grid, false,
+          paintedLine.intendedSingle, paintedLine.eastAsian ?? false,
+          paintedLine.gridCountSingle,
+        );
+
+        expect(measureAdvance).toBe(expectedAdvance);
+        expect(paintAdvance).toBeCloseTo(measureAdvance * paintScale, 8);
+      }
+    }
   });
 
   it('a pure-Latin line is NOT cell-rounded — falls back to the box (unused off the EA path)', () => {
