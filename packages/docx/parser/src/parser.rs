@@ -3096,8 +3096,6 @@ fn text_runs_mergeable(a: &TextRun, b: &TextRun) -> bool {
         && a.east_asian_vert_compress == b.east_asian_vert_compress
 }
 
-// Same parse-context threading as handle_run_in_para.
-#[allow(clippy::too_many_arguments)]
 /// Prepend the zero-advance host-character metrics for a floating DrawingML
 /// payload. The metrics belong to the enclosing WordprocessingML `<w:r>`, so a
 /// group expanded into multiple drawing runs must still receive exactly one.
@@ -3116,6 +3114,8 @@ fn prepend_anchor_host_metrics(
     }
 }
 
+// Same parse-context threading as handle_run_in_para.
+#[allow(clippy::too_many_arguments)]
 fn parse_run_inner(
     node: roxmltree::Node,
     base_run: &RunFmt,
