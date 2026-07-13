@@ -1,8 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import {
   layoutLines,
+  lineBoxHeight,
   rescaleLayoutLines,
   type LayoutSeg,
+  type LayoutImageSeg,
   type LayoutLine,
   type LayoutTextSeg,
   type WrapLayoutCtx,
@@ -88,6 +90,25 @@ function textSeg(text: string, fontSize = 10, extra: Partial<LayoutTextSeg> = {}
     fontSize, color: null, fontFamily: 'Times New Roman', vertAlign: null,
     measuredWidth: 0, ...extra,
   } as LayoutSeg;
+}
+
+function inlineImageSeg(
+  heightPt: number,
+  imagePath = 'word/media/image1.png',
+  anchor = false,
+): LayoutImageSeg {
+  return {
+    imagePath,
+    mimeType: imagePath ? 'image/png' : '',
+    widthPt: 12,
+    heightPt,
+    anchor,
+    anchorXPt: 0,
+    anchorYPt: 0,
+    anchorXFromMargin: false,
+    anchorYFromPara: false,
+    measuredWidth: 0,
+  };
 }
 
 /** Deep-clone segs so a scale=1 call and a scale=s call never share the mutable
@@ -391,5 +412,104 @@ describe('layoutLines scale-dependence under a NON-linear (real-font-like) advan
     // Fewer lines at the larger scale — the exact paginate/paint mismatch the
     // paint loop already guards (paintEnd = min(sliceEnd, lines.length)).
     expect(b.length).toBeLessThan(a.length);
+  });
+});
+
+describe('rescaleLayoutLines inline-image line-box parity', () => {
+  it('includes a tall inline image in mixed-line ascent and grid-count metrics', () => {
+    const imageHeightPt = 30;
+    const scale = 2;
+    const { ctx } = makeLinearCtx();
+    const measured = layoutLines(
+      ctx,
+      [textSeg('body', 10), inlineImageSeg(imageHeightPt)],
+      200,
+      0,
+      1,
+    );
+
+    const [painted] = rescaleLayoutLines(measured, scale, ctx, {}, 0);
+
+    expect(painted.ascent).toBeCloseTo(imageHeightPt * scale, 8);
+    expect(painted.descent).toBeCloseTo(10 * 0.2 * scale, 8);
+    expect(painted.gridCountSingle).toBeCloseTo(imageHeightPt * scale, 8);
+  });
+
+  it('keeps a mixed text/chart-sentinel line box measure==paint on docGrid', () => {
+    const scale = 2;
+    const grid = { type: 'lines', linePitchPt: 10 };
+    const makeSegs = (): LayoutSeg[] => [textSeg('物', 10), inlineImageSeg(30, '')];
+    const { ctx } = makeLinearCtx();
+    const [measured] = layoutLines(
+      ctx,
+      makeSegs(),
+      200,
+      0,
+      1,
+    );
+    const [painted] = rescaleLayoutLines([measured], scale, ctx, {}, 0);
+    const { ctx: freshCtx } = makeLinearCtx();
+    const [freshPainted] = layoutLines(freshCtx, makeSegs(), 200 * scale, 0, scale);
+
+    expect(painted.ascent).toBeCloseTo(freshPainted.ascent, 8);
+    expect(painted.descent).toBeCloseTo(freshPainted.descent, 8);
+    expect(painted.gridCountSingle).toBeCloseTo(freshPainted.gridCountSingle, 8);
+    expect(painted.segments.map((segment) => segment.measuredWidth))
+      .toEqual(freshPainted.segments.map((segment) => segment.measuredWidth));
+
+    const measuredLineBox = lineBoxHeight(
+      null,
+      measured.ascent,
+      measured.descent,
+      1,
+      grid,
+      measured.hasRuby,
+      measured.intendedSingle,
+      measured.eastAsian,
+      measured.gridCountSingle,
+    );
+    const paintedLineBox = lineBoxHeight(
+      null,
+      painted.ascent,
+      painted.descent,
+      scale,
+      grid,
+      painted.hasRuby,
+      painted.intendedSingle,
+      painted.eastAsian,
+      painted.gridCountSingle,
+    );
+
+    expect(paintedLineBox).toBeCloseTo(measuredLineBox * scale, 8);
+  });
+
+  it('preserves the former fallback metrics for an image-only line', () => {
+    const scale = 2;
+    const { ctx } = makeLinearCtx();
+    const [measured] = layoutLines(ctx, [inlineImageSeg(30)], 200, 0, 1);
+
+    const [painted] = rescaleLayoutLines([measured], scale, ctx, {}, 0);
+
+    expect(painted.ascent).toBeCloseTo(measured.ascent * scale, 8);
+    expect(painted.descent).toBeCloseTo(measured.descent * scale, 8);
+    expect(painted.gridCountSingle).toBeCloseTo(measured.gridCountSingle * scale, 8);
+  });
+
+  it('keeps an anchored image out of rescaled inline metrics', () => {
+    const scale = 2;
+    const { ctx } = makeLinearCtx();
+    const [measured] = layoutLines(ctx, [textSeg('body', 10)], 200, 0, 1);
+    const withAnchor: LayoutLine = {
+      ...measured,
+      segments: [...measured.segments, inlineImageSeg(100, 'word/media/anchor.png', true)],
+    };
+
+    const [textOnlyPainted] = rescaleLayoutLines([measured], scale, ctx, {}, 0);
+    const [anchoredPainted] = rescaleLayoutLines([withAnchor], scale, ctx, {}, 0);
+
+    expect(anchoredPainted.ascent).toBeCloseTo(textOnlyPainted.ascent, 8);
+    expect(anchoredPainted.descent).toBeCloseTo(textOnlyPainted.descent, 8);
+    expect(anchoredPainted.gridCountSingle).toBeCloseTo(textOnlyPainted.gridCountSingle, 8);
+    expect(anchoredPainted.segments.at(-1)?.measuredWidth).toBe(0);
   });
 });

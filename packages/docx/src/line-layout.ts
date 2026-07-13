@@ -3986,6 +3986,11 @@ export function rescaleLayoutLines(
         // measuredWidth to 0 (they add no pen advance) and their anchor*Pt
         // fields stay in pt space for the draw-time position resolver.
         if (s.anchor) return { ...s, measuredWidth: 0 };
+        const h = s.heightPt * scale;
+        // Inline images stand fully above the baseline (descent 0) and always
+        // size docGrid cells, mirroring layoutLines' addToLine contribution.
+        asc = Math.max(asc, h);
+        gridCount = Math.max(gridCount, h);
         return { ...s, measuredWidth: s.widthPt * scale };
       }
       if ('mathNodes' in s) {
