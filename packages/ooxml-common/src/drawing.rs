@@ -163,27 +163,19 @@ impl DrawingGroupTransform {
 
     /// Apply the Annex L nested-transform rendering procedure to a leaf's
     /// authored bounding box and own rotation/flip.
-    pub fn apply_rect(
-        self,
-        x: f64,
-        y: f64,
-        width: f64,
-        height: f64,
-        rotation_degrees: f64,
-        flip_h: bool,
-        flip_v: bool,
-    ) -> DrawingRect {
-        let (center_x, center_y) = self.map_point(x + width / 2.0, y + height / 2.0);
-        let mapped_width = width * self.scale_x;
-        let mapped_height = height * self.scale_y;
+    pub fn apply_rect(self, rect: DrawingRect) -> DrawingRect {
+        let (center_x, center_y) =
+            self.map_point(rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+        let mapped_width = rect.width * self.scale_x;
+        let mapped_height = rect.height * self.scale_y;
         DrawingRect {
             x: center_x - mapped_width / 2.0,
             y: center_y - mapped_height / 2.0,
             width: mapped_width,
             height: mapped_height,
-            rotation_degrees: self.rotation_degrees + rotation_degrees,
-            flip_h: self.flip_h ^ flip_h,
-            flip_v: self.flip_v ^ flip_v,
+            rotation_degrees: self.rotation_degrees + rect.rotation_degrees,
+            flip_h: self.flip_h ^ rect.flip_h,
+            flip_v: self.flip_v ^ rect.flip_v,
         }
     }
 }
@@ -245,7 +237,15 @@ mod tests {
             flip_h: false,
             flip_v: false,
         });
-        let mapped = transform.apply_rect(0.0, 50_800.0, 127_000.0, 25_400.0, 90.0, false, false);
+        let mapped = transform.apply_rect(DrawingRect {
+            x: 0.0,
+            y: 50_800.0,
+            width: 127_000.0,
+            height: 25_400.0,
+            rotation_degrees: 90.0,
+            flip_h: false,
+            flip_v: false,
+        });
 
         assert!((mapped.x - 0.0).abs() < 1e-6);
         assert!((mapped.y - 101_600.0).abs() < 1e-6);
@@ -303,7 +303,15 @@ mod tests {
             flip_h: true,
             flip_v: false,
         });
-        let mapped = transform.apply_rect(10.0, 20.0, 20.0, 10.0, 15.0, false, true);
+        let mapped = transform.apply_rect(DrawingRect {
+            x: 10.0,
+            y: 20.0,
+            width: 20.0,
+            height: 10.0,
+            rotation_degrees: 15.0,
+            flip_h: false,
+            flip_v: true,
+        });
 
         assert!((mapped.x - 105.0).abs() < 1e-6);
         assert!((mapped.y - 105.0).abs() < 1e-6);

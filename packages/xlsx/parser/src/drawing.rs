@@ -11,7 +11,7 @@ use ooxml_common::blip::{
     svg_blip_rid,
 };
 use ooxml_common::depth::{parse_guarded, DepthGuard};
-use ooxml_common::drawing::{DrawingGroupSpec, DrawingGroupTransform};
+use ooxml_common::drawing::{DrawingGroupSpec, DrawingGroupTransform, DrawingRect};
 use ooxml_common::ns::{attr_ns, is_a_ns, is_xdr_ns, relationships};
 use ooxml_common::units::EMU_PER_PX_96DPI;
 use std::collections::HashMap;
@@ -987,15 +987,15 @@ pub(crate) fn collect_shapes(
             // Shape rect in root coords. Use the cross-format DrawingML mapper
             // so a quarter-turned leaf under non-uniform group scale keeps its
             // transformed centre and swaps the applicable scale axes.
-            let root_rect = transform.apply_rect(
-                xfrm.off_x,
-                xfrm.off_y,
-                xfrm.ext_x,
-                xfrm.ext_y,
-                xfrm.rot,
-                xfrm.flip_h,
-                xfrm.flip_v,
-            );
+            let root_rect = transform.apply_rect(DrawingRect {
+                x: xfrm.off_x,
+                y: xfrm.off_y,
+                width: xfrm.ext_x,
+                height: xfrm.ext_y,
+                rotation_degrees: xfrm.rot,
+                flip_h: xfrm.flip_h,
+                flip_v: xfrm.flip_v,
+            });
             let root_x = root_rect.x;
             let root_y = root_rect.y;
             let root_w = root_rect.width;
@@ -1225,15 +1225,15 @@ pub(crate) fn collect_shapes(
             };
             let mime_type = mime_from_ext(&image_path).to_string();
 
-            let root_rect = transform.apply_rect(
-                xfrm.off_x,
-                xfrm.off_y,
-                xfrm.ext_x,
-                xfrm.ext_y,
-                xfrm.rot,
-                xfrm.flip_h,
-                xfrm.flip_v,
-            );
+            let root_rect = transform.apply_rect(DrawingRect {
+                x: xfrm.off_x,
+                y: xfrm.off_y,
+                width: xfrm.ext_x,
+                height: xfrm.ext_y,
+                rotation_degrees: xfrm.rot,
+                flip_h: xfrm.flip_h,
+                flip_v: xfrm.flip_v,
+            });
             let root_x = root_rect.x;
             let root_y = root_rect.y;
             let root_w = root_rect.width;
@@ -4226,7 +4226,15 @@ mod group_transform_contract_tests {
             flip_h: group.flip_h,
             flip_v: group.flip_v,
         });
-        let mapped = transform.apply_rect(10.0, 20.0, 20.0, 10.0, 15.0, false, true);
+        let mapped = transform.apply_rect(DrawingRect {
+            x: 10.0,
+            y: 20.0,
+            width: 20.0,
+            height: 10.0,
+            rotation_degrees: 15.0,
+            flip_h: false,
+            flip_v: true,
+        });
 
         assert!((mapped.x - 105.0).abs() < 1e-9);
         assert!((mapped.y - 105.0).abs() < 1e-9);

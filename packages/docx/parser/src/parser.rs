@@ -3,7 +3,7 @@ use ooxml_common::blip::{
     svg_blip_rid, Duotone,
 };
 use ooxml_common::depth::{parse_guarded, DepthGuard};
-use ooxml_common::drawing::{DrawingGroupSpec, DrawingGroupTransform};
+use ooxml_common::drawing::{DrawingGroupSpec, DrawingGroupTransform, DrawingRect};
 use ooxml_common::ns::{attr_ns, is_w_ns, math, relationships, wordprocessingml};
 use ooxml_common::zip::read_zip_string;
 // Production parses go through `ooxml_common::depth::parse_guarded` (depth-guarded
@@ -4784,7 +4784,15 @@ fn parse_group_pic(
         / 60000.0;
     let leaf_flip_h = matches!(xfrm.attribute("flipH"), Some("1") | Some("true"));
     let leaf_flip_v = matches!(xfrm.attribute("flipV"), Some("1") | Some("true"));
-    let mapped = xform.apply_rect(ox, oy, cx, cy, leaf_rotation, leaf_flip_h, leaf_flip_v);
+    let mapped = xform.apply_rect(DrawingRect {
+        x: ox,
+        y: oy,
+        width: cx,
+        height: cy,
+        rotation_degrees: leaf_rotation,
+        flip_h: leaf_flip_h,
+        flip_v: leaf_flip_v,
+    });
 
     if cx <= 0.0 || cy <= 0.0 {
         return None;
@@ -5160,7 +5168,15 @@ fn parse_wsp_shape(
     // child's original centre to determine translation.
     let (width_pt, height_pt, local_x_pt, local_y_pt, rotation, flip_h, flip_v) =
         if let Some(transform) = group_transform {
-            let mapped = transform.apply_rect(ox, oy, cx, cy, rotation, flip_h, flip_v);
+            let mapped = transform.apply_rect(DrawingRect {
+                x: ox,
+                y: oy,
+                width: cx,
+                height: cy,
+                rotation_degrees: rotation,
+                flip_h,
+                flip_v,
+            });
             (
                 mapped.width / 12700.0,
                 mapped.height / 12700.0,

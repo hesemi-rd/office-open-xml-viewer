@@ -3,7 +3,7 @@
 //! re-exports these via `pub use types::*`.
 
 use ooxml_common::blip::{Duotone, SrcRect};
-use ooxml_common::drawing::{DrawingGroupSpec, DrawingGroupTransform};
+use ooxml_common::drawing::{DrawingGroupSpec, DrawingGroupTransform, DrawingRect};
 use ooxml_common::math::MathNode;
 use ooxml_common::text::SpaceLine;
 use serde::{Deserialize, Serialize};
@@ -1174,15 +1174,15 @@ impl GroupTransform {
             flip_h: self.flip_h,
             flip_v: self.flip_v,
         })
-        .apply_rect(
-            t.x as f64,
-            t.y as f64,
-            t.cx as f64,
-            t.cy as f64,
-            t.rot,
-            t.flip_h,
-            t.flip_v,
-        );
+        .apply_rect(DrawingRect {
+            x: t.x as f64,
+            y: t.y as f64,
+            width: t.cx as f64,
+            height: t.cy as f64,
+            rotation_degrees: t.rot,
+            flip_h: t.flip_h,
+            flip_v: t.flip_v,
+        });
         Transform {
             x: mapped.x.round() as i64,
             y: mapped.y.round() as i64,
@@ -1191,6 +1191,137 @@ impl GroupTransform {
             rot: mapped.rotation_degrees,
             flip_h: mapped.flip_h,
             flip_v: mapped.flip_v,
+        }
+    }
+}
+
+pub(crate) fn apply_group_transform_to_element(el: &mut SlideElement, gt: &GroupTransform) {
+    match el {
+        SlideElement::Shape(s) => {
+            let t = Transform {
+                x: s.x,
+                y: s.y,
+                cx: s.width,
+                cy: s.height,
+                rot: s.rotation,
+                flip_h: s.flip_h,
+                flip_v: s.flip_v,
+            };
+            let nt = gt.apply_to_transform(t);
+            s.x = nt.x;
+            s.y = nt.y;
+            s.width = nt.cx;
+            s.height = nt.cy;
+            s.rotation = nt.rot;
+            s.flip_h = nt.flip_h;
+            s.flip_v = nt.flip_v;
+            // Transform the explicit text frame in lock-step. It is axis-aligned
+            // in local coords; pass rot=0/flip=false so it only translates+scales
+            // (SmartArt drawings that carry txXfrm are not nested in rotated groups).
+            if let Some(tr) = &mut s.text_rect {
+                let tt = Transform {
+                    x: tr.x,
+                    y: tr.y,
+                    cx: tr.width,
+                    cy: tr.height,
+                    rot: 0.0,
+                    flip_h: false,
+                    flip_v: false,
+                };
+                let ntt = gt.apply_to_transform(tt);
+                tr.x = ntt.x;
+                tr.y = ntt.y;
+                tr.width = ntt.cx;
+                tr.height = ntt.cy;
+            }
+        }
+        SlideElement::Picture(p) => {
+            let t = Transform {
+                x: p.x,
+                y: p.y,
+                cx: p.width,
+                cy: p.height,
+                rot: p.rotation,
+                flip_h: p.flip_h,
+                flip_v: p.flip_v,
+            };
+            let nt = gt.apply_to_transform(t);
+            p.x = nt.x;
+            p.y = nt.y;
+            p.width = nt.cx;
+            p.height = nt.cy;
+            p.rotation = nt.rot;
+            p.flip_h = nt.flip_h;
+            p.flip_v = nt.flip_v;
+        }
+        SlideElement::Table(tbl) => {
+            // If the table has no xfrm (zero dimensions), it fills the group's child space.
+            let (ex, ey, ecx, ecy) = if tbl.width == 0 && tbl.height == 0 {
+                (gt.ch_x, gt.ch_y, gt.ch_cx, gt.ch_cy)
+            } else {
+                (tbl.x, tbl.y, tbl.width, tbl.height)
+            };
+            let t = Transform {
+                x: ex,
+                y: ey,
+                cx: ecx,
+                cy: ecy,
+                rot: tbl.rotation,
+                flip_h: tbl.flip_h,
+                flip_v: tbl.flip_v,
+            };
+            let nt = gt.apply_to_transform(t);
+            tbl.x = nt.x;
+            tbl.y = nt.y;
+            tbl.width = nt.cx;
+            tbl.height = nt.cy;
+            tbl.rotation = nt.rot;
+            tbl.flip_h = nt.flip_h;
+            tbl.flip_v = nt.flip_v;
+        }
+        SlideElement::Chart(chart) => {
+            // If the chart graphicFrame has no xfrm (zero dimensions), it fills the group's child space.
+            let (ex, ey, ecx, ecy) = if chart.width == 0 && chart.height == 0 {
+                (gt.ch_x, gt.ch_y, gt.ch_cx, gt.ch_cy)
+            } else {
+                (chart.x, chart.y, chart.width, chart.height)
+            };
+            let t = Transform {
+                x: ex,
+                y: ey,
+                cx: ecx,
+                cy: ecy,
+                rot: chart.rotation,
+                flip_h: chart.flip_h,
+                flip_v: chart.flip_v,
+            };
+            let nt = gt.apply_to_transform(t);
+            chart.x = nt.x;
+            chart.y = nt.y;
+            chart.width = nt.cx;
+            chart.height = nt.cy;
+            chart.rotation = nt.rot;
+            chart.flip_h = nt.flip_h;
+            chart.flip_v = nt.flip_v;
+        }
+        SlideElement::Media(m) => {
+            let t = Transform {
+                x: m.x,
+                y: m.y,
+                cx: m.width,
+                cy: m.height,
+                rot: m.rotation,
+                flip_h: m.flip_h,
+                flip_v: m.flip_v,
+            };
+            let nt = gt.apply_to_transform(t);
+            m.x = nt.x;
+            m.y = nt.y;
+            m.width = nt.cx;
+            m.height = nt.cy;
+            m.rotation = nt.rot;
+            m.flip_h = nt.flip_h;
+            m.flip_v = nt.flip_v;
         }
     }
 }
@@ -1338,137 +1469,6 @@ mod group_transform_tests {
                 }
                 _ => unreachable!(),
             }
-        }
-    }
-}
-
-pub(crate) fn apply_group_transform_to_element(el: &mut SlideElement, gt: &GroupTransform) {
-    match el {
-        SlideElement::Shape(s) => {
-            let t = Transform {
-                x: s.x,
-                y: s.y,
-                cx: s.width,
-                cy: s.height,
-                rot: s.rotation,
-                flip_h: s.flip_h,
-                flip_v: s.flip_v,
-            };
-            let nt = gt.apply_to_transform(t);
-            s.x = nt.x;
-            s.y = nt.y;
-            s.width = nt.cx;
-            s.height = nt.cy;
-            s.rotation = nt.rot;
-            s.flip_h = nt.flip_h;
-            s.flip_v = nt.flip_v;
-            // Transform the explicit text frame in lock-step. It is axis-aligned
-            // in local coords; pass rot=0/flip=false so it only translates+scales
-            // (SmartArt drawings that carry txXfrm are not nested in rotated groups).
-            if let Some(tr) = &mut s.text_rect {
-                let tt = Transform {
-                    x: tr.x,
-                    y: tr.y,
-                    cx: tr.width,
-                    cy: tr.height,
-                    rot: 0.0,
-                    flip_h: false,
-                    flip_v: false,
-                };
-                let ntt = gt.apply_to_transform(tt);
-                tr.x = ntt.x;
-                tr.y = ntt.y;
-                tr.width = ntt.cx;
-                tr.height = ntt.cy;
-            }
-        }
-        SlideElement::Picture(p) => {
-            let t = Transform {
-                x: p.x,
-                y: p.y,
-                cx: p.width,
-                cy: p.height,
-                rot: p.rotation,
-                flip_h: p.flip_h,
-                flip_v: p.flip_v,
-            };
-            let nt = gt.apply_to_transform(t);
-            p.x = nt.x;
-            p.y = nt.y;
-            p.width = nt.cx;
-            p.height = nt.cy;
-            p.rotation = nt.rot;
-            p.flip_h = nt.flip_h;
-            p.flip_v = nt.flip_v;
-        }
-        SlideElement::Table(tbl) => {
-            // If the table has no xfrm (zero dimensions), it fills the group's child space.
-            let (ex, ey, ecx, ecy) = if tbl.width == 0 && tbl.height == 0 {
-                (gt.ch_x, gt.ch_y, gt.ch_cx, gt.ch_cy)
-            } else {
-                (tbl.x, tbl.y, tbl.width, tbl.height)
-            };
-            let t = Transform {
-                x: ex,
-                y: ey,
-                cx: ecx,
-                cy: ecy,
-                rot: tbl.rotation,
-                flip_h: tbl.flip_h,
-                flip_v: tbl.flip_v,
-            };
-            let nt = gt.apply_to_transform(t);
-            tbl.x = nt.x;
-            tbl.y = nt.y;
-            tbl.width = nt.cx;
-            tbl.height = nt.cy;
-            tbl.rotation = nt.rot;
-            tbl.flip_h = nt.flip_h;
-            tbl.flip_v = nt.flip_v;
-        }
-        SlideElement::Chart(chart) => {
-            // If the chart graphicFrame has no xfrm (zero dimensions), it fills the group's child space.
-            let (ex, ey, ecx, ecy) = if chart.width == 0 && chart.height == 0 {
-                (gt.ch_x, gt.ch_y, gt.ch_cx, gt.ch_cy)
-            } else {
-                (chart.x, chart.y, chart.width, chart.height)
-            };
-            let t = Transform {
-                x: ex,
-                y: ey,
-                cx: ecx,
-                cy: ecy,
-                rot: chart.rotation,
-                flip_h: chart.flip_h,
-                flip_v: chart.flip_v,
-            };
-            let nt = gt.apply_to_transform(t);
-            chart.x = nt.x;
-            chart.y = nt.y;
-            chart.width = nt.cx;
-            chart.height = nt.cy;
-            chart.rotation = nt.rot;
-            chart.flip_h = nt.flip_h;
-            chart.flip_v = nt.flip_v;
-        }
-        SlideElement::Media(m) => {
-            let t = Transform {
-                x: m.x,
-                y: m.y,
-                cx: m.width,
-                cy: m.height,
-                rot: m.rotation,
-                flip_h: m.flip_h,
-                flip_v: m.flip_v,
-            };
-            let nt = gt.apply_to_transform(t);
-            m.x = nt.x;
-            m.y = nt.y;
-            m.width = nt.cx;
-            m.height = nt.cy;
-            m.rotation = nt.rot;
-            m.flip_h = nt.flip_h;
-            m.flip_v = nt.flip_v;
         }
     }
 }
