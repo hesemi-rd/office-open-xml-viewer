@@ -197,14 +197,15 @@ describe('lineRule=exact / atLeast keep the centred placement (regression guard,
     expect(t!.y).toBeCloseTo(ASCENT, TOL);
   });
 
-  it('sub-single multiplier (0.5×) keeps the baseline pinned at ascent (negative leading)', async () => {
+  it('sub-single auto multiplier (0.5×) centres the glyph in the compressed line box', async () => {
     const calls = await renderAndRead(paragraph('T', auto(0.5)));
     const t = calls.find((c) => c.text === 'T');
     expect(t).toBeDefined();
-    // lineH = 10 × 0.5 = 5 < singleBox 10; the baseline stays at the natural
-    // ascent (8) and the shortfall is negative leading (lines overlap), not a
-    // re-centring inside the shrunken box.
-    expect(t!.y).toBeCloseTo(ASCENT, TOL);
+    // lineH = 10 × 0.5 = 5 < glyph box 10. Word centres the glyph box in the
+    // compressed advance: top + (5 − 10)/2 + ascent 8 = 5.5. The glyph may
+    // extend beyond both line-box edges, but it does not shift wholly downward
+    // into the following row/content.
+    expect(t!.y).toBeCloseTo(5.5, TOL);
   });
 });
 

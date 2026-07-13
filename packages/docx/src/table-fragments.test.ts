@@ -271,6 +271,20 @@ describe('buildTableFragment — pure recursion contract', () => {
     expect(widths).toEqual([40, 30]); // spanned 20+20, then 30
   });
 
+  it('§17.4.15: builds cell blocks from columns after gridBefore', () => {
+    const t = table(
+      [row([textCell('middle')], { gridBefore: 1, gridAfter: 1 } as Partial<DocTableRow>)],
+      [20, 40, 60],
+    );
+    const widths: number[] = [];
+    buildTableFragment({
+      table: t, columnWidthsPt: [20, 40, 60], rowHeightsPt: [12],
+      continuesFromPreviousPage: false, continuesOnNextPage: false, repeatedHeaderRowCount: 0,
+      buildCellBlocks: (_c, w) => { widths.push(w); return []; },
+    });
+    expect(widths).toEqual([40]);
+  });
+
   it('classifies vMerge roles and renders no content for a continue cell', () => {
     const t = table(
       [

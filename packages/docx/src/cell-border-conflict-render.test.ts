@@ -149,6 +149,32 @@ function horizontalAt(strokes: StrokeSeg[], y: number): StrokeSeg[] {
 }
 
 describe('§17.4.66 — adjacent cell border conflict, end-to-end render', () => {
+  it('§17.4.15: gridBefore starts the first cell after the skipped grid columns', async () => {
+    const middle = cell('middle', {
+      top: bs({ width: 1 }),
+      bottom: bs({ width: 1 }),
+      left: bs({ width: 1 }),
+      right: bs({ width: 1 }),
+    });
+    const shiftedRow = {
+      ...rowOf([middle]),
+      gridBefore: 1,
+      gridAfter: 1,
+    } as unknown as DocTableRow;
+    const t = tableOf([shiftedRow]);
+    t.colWidths = [20, 40, 60];
+    t.layout = 'fixed';
+    t.widthPt = 120;
+
+    const strokes = await render(t);
+    const top = horizontalAt(strokes, 0);
+
+    expect(top).toEqual(expect.arrayContaining([
+      expect.objectContaining({ x1: 20, x2: 60 }),
+    ]));
+    expect(top.some((s) => Math.min(s.x1, s.x2) < 20)).toBe(false);
+  });
+
   it('shared vertical gridline is drawn exactly ONCE (not once per cell)', async () => {
     // Both cells set their facing edge to the SAME single 1pt border. Previously
     // each cell drew it (two strokes at x=60); now it is drawn once.
@@ -326,5 +352,24 @@ describe('§17.4.66 — adjacent cell border conflict, end-to-end render', () =>
     const bot = seg.filter((s) => Math.max(s.y1, s.y2) > 30);
     expect(top.some((s) => s.color.toLowerCase().includes('111111'))).toBe(true);
     expect(bot.some((s) => s.color.toLowerCase().includes('222222'))).toBe(true);
+  });
+
+  it('uses the final continuation cell border at the bottom of a vertical merge', async () => {
+    // A vertical merge is represented by one restart cell followed by continuation
+    // cells. The boundary at the bottom of the merged region is therefore the
+    // continuation cell's bottom edge, not the restart cell's bottom edge. An
+    // explicit nil on that final continuation must suppress the table insideH
+    // fallback at the boundary below the merge.
+    const restart = cell('merged');
+    restart.vMerge = true;
+    const continuation = cell('', { bottom: bs({ style: 'nil' }) });
+    continuation.vMerge = false;
+    const below = cell('below', { top: bs({ style: 'nil' }) });
+    const strokes = await render(tableOf(
+      [rowOf([restart]), rowOf([continuation]), rowOf([below])],
+      { insideH: bs({ style: 'single', width: 1 }) },
+    ));
+
+    expect(horizontalAt(strokes, 40)).toHaveLength(0);
   });
 });

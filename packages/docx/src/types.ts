@@ -1533,6 +1533,12 @@ export interface BorderSpec {
 
 export interface DocTableRow {
   cells: DocTableCell[];
+  /** ECMA-376 §17.4.15 `<w:gridBefore>` — shared table-grid columns skipped
+   *  before placing this row's first real cell. Omitted/zero means none. */
+  gridBefore?: number;
+  /** ECMA-376 §17.4.14 `<w:gridAfter>` — shared table-grid columns skipped
+   *  after this row's last real cell. Omitted/zero means none. */
+  gridAfter?: number;
   rowHeight: number | null;  // pt
   /** ECMA-376 §17.4.80 hRule. "auto" (default) = informational; "atLeast" =
    *  lower bound; "exact" = fixed clip. */

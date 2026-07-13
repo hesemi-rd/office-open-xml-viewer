@@ -29,6 +29,7 @@ import type {
   RowFragment,
   TableFragment,
 } from './layout-fragments.js';
+import { rowGridBefore } from './table-geometry.js';
 
 /**
  * Build the recursive content fragments of one cell laid out at `cellTotalWidthPt`
@@ -101,7 +102,7 @@ export function buildTableFragment(input: BuildTableFragmentInput): TableFragmen
   const columns = Object.freeze([...columnWidthsPt]) as readonly number[];
 
   const rows: RowFragment[] = table.rows.map((sourceRow, ri) => {
-    let ci = 0;
+    let ci = rowGridBefore(sourceRow, columns.length);
     const cells: CellFragment[] = sourceRow.cells.map((sourceCell) => {
       const span = Math.min(sourceCell.colSpan, columns.length - ci);
       let cellTotalWidthPt = 0;

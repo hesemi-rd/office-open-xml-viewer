@@ -168,4 +168,12 @@ describe('applyStroke dash patterns (§20.1.10.49 ST_PresetLineDashVal)', () => 
     applyStroke(ctx, strokeWith('sysDash'), 3);
     expect(lastDash()).toEqual([24, 12]);
   });
+
+  it('renders a VML numeric relative dashstyle without falling back to solid', () => {
+    const { ctx, lastDash } = makeStrokeMock();
+    // VML dashstyle numbers are relative to the stroke width. With lw=2,
+    // `1 1` becomes one stroke-width on and one stroke-width off.
+    applyStroke(ctx, strokeWith('1 1'), 1);
+    expect(lastDash()).toEqual([2, 2]);
+  });
 });

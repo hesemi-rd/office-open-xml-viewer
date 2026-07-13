@@ -24,6 +24,15 @@ import type { DocTable, DocTableRow, DocTableCell } from './types.js';
  *  before content (cell margins + measured content) expands it. */
 export const MIN_ROW_HEIGHT_PT = 10;
 
+/** ECMA-376 §17.4.15 — clamp the number of shared table-grid columns skipped
+ * before a row's first cell. Older parsed models omit the property, so zero is
+ * the compatibility default required by the specification. */
+export function rowGridBefore(row: DocTableRow, columnCount: number): number {
+  const raw = row.gridBefore ?? 0;
+  if (!Number.isFinite(raw)) return 0;
+  return Math.min(Math.max(0, Math.trunc(raw)), Math.max(0, columnCount));
+}
+
 /** Last row index covered by the vMerge span that starts at (`startRi`,
  *  `startCi`). A span continues through following rows whose cell anchored in the
  *  same grid column carries `vMerge=continue` (ECMA-376 §17.4.85). Pure
@@ -32,7 +41,7 @@ export function findMergeEndRow(table: DocTable, startRi: number, startCi: numbe
   let endRi = startRi;
   for (let rj = startRi + 1; rj < table.rows.length; rj++) {
     const row = table.rows[rj];
-    let ci = 0;
+    let ci = rowGridBefore(row, table.colWidths.length);
     let matched = false;
     for (const cell of row.cells) {
       if (ci === startCi) {
@@ -129,7 +138,7 @@ export function resolveSingleRowHeight(
       ? row.rowHeight * scale
       : MIN_ROW_HEIGHT_PT * scale;
 
-  let ci = 0;
+  let ci = rowGridBefore(row, colWidths.length);
   for (const cell of row.cells) {
     const span = Math.min(cell.colSpan, colWidths.length - ci);
     // vMerge=restart cells are sized by the span post-pass; vMerge=continue
@@ -157,8 +166,9 @@ export function resolveTableRowHeights(
   // §17.4.85 span extension: for each vMerge=restart cell, grow the span's last
   // row if the restart cell's full content is taller than the summed span rows.
   for (let ri = 0; ri < table.rows.length; ri++) {
-    let ci = 0;
-    for (const cell of table.rows[ri].cells) {
+    const row = table.rows[ri];
+    let ci = rowGridBefore(row, colWidths.length);
+    for (const cell of row.cells) {
       const span = Math.min(cell.colSpan, colWidths.length - ci);
       if (cell.vMerge === true) {
         const cellW = colWidths.slice(ci, ci + span).reduce((s, w) => s + w, 0);

@@ -160,7 +160,23 @@ const PPTX_PRESET_DASH_RELATIVE: Record<string, RelativeDashPattern> = {
  */
 export function pptxPresetDashArray(style: string, lineW: number): number[] {
   const relative = PPTX_PRESET_DASH_RELATIVE[style];
-  return relative ? dashArray(relative, lineW) : [];
+  if (relative) return dashArray(relative, lineW);
+
+  // Legacy VML `<v:stroke dashstyle>` may carry an explicit whitespace/comma-
+  // separated sequence of on/off lengths rather than a DrawingML preset name.
+  // The values are relative to the stroke width, the same unit convention this
+  // shape-stroke helper already uses. Accept only an entirely numeric sequence;
+  // unknown symbolic styles continue to fall back to a solid line.
+  const tokens = style.trim().split(/[\s,]+/);
+  const numeric = tokens.map(Number);
+  if (
+    numeric.length >= 2 &&
+    numeric.every((value) => Number.isFinite(value) && value >= 0) &&
+    numeric.some((value) => value > 0)
+  ) {
+    return dashArray(numeric, lineW);
+  }
+  return [];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

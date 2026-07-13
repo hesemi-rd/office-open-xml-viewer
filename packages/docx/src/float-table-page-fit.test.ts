@@ -153,6 +153,17 @@ function floatTable(tp: TblpPr, tableHPt: number): BodyElement {
   return floatTableRows(tp, 1, tableHPt);
 }
 
+/** An ordinary in-flow block table with one exact-height row. */
+function blockTable(tableHPt: number): BodyElement {
+  const table = floatTableRows(tblp(), 1, tableHPt) as unknown as DocTable & { type: 'table' };
+  const { tblpPr: _floating, ...block } = table;
+  return block as unknown as BodyElement;
+}
+
+const continuousBreak = (): BodyElement => ({
+  type: 'sectionBreak', kind: 'nextPage', columns: null,
+} as BodyElement);
+
 /** True when an element is a floating table (identified by its tblpPr). */
 const isFloatTable = (el: PaginatedBodyElement): boolean =>
   el.type === 'table' && (el as unknown as DocTable).tblpPr != null;
@@ -221,6 +232,34 @@ describe('computePages — floating-table page-fit / row-split (§17.4.57, Word 
     expect([...floatRowsOn(pages[0]), ...floatRowsOn(pages[1])]).toEqual([
       'r1', 'r2', 'r3', 'r4', 'r5',
     ]);
+  });
+
+  it('moves a following block table past a page-filling float across a continuous section', () => {
+    const body = [
+      floatTableRows(tblp({ vertAnchor: 'text', tblpY: 0 }), 5, 20),
+      continuousBreak(),
+      blockTable(90),
+    ];
+    const pages = computePages(body, section({ sectionStart: 'continuous' }), makeCtx());
+    expect(pages.length).toBe(2);
+    expect(hasFloatTable(pages[0])).toBe(true);
+    expect(pages[0].filter((el) => el.type === 'table' && !isFloatTable(el))).toHaveLength(0);
+    expect(pages[1].filter((el) => el.type === 'table' && !isFloatTable(el))).toHaveLength(1);
+  });
+
+  it('does not overlap a following block table with a terminal float continuation slice', () => {
+    const body = [
+      // Five rows fill page 1; the sixth occupies y=0..20 on page 2.
+      floatTableRows(tblp({ vertAnchor: 'text', tblpY: 0 }), 6, 20),
+      continuousBreak(),
+      // It fits a clean 100pt page, but not page 2 below the 20pt float slice.
+      blockTable(90),
+    ];
+    const pages = computePages(body, section({ sectionStart: 'continuous' }), makeCtx());
+    expect(pages.length).toBe(3);
+    expect(floatRowsOn(pages[1])).toEqual(['r6']);
+    expect(pages[1].filter((el) => el.type === 'table' && !isFloatTable(el))).toHaveLength(0);
+    expect(pages[2].filter((el) => el.type === 'table' && !isFloatTable(el))).toHaveLength(1);
   });
 
   it('(b) splits a tall floating table across pages until every row is placed (sample-21 shape)', () => {

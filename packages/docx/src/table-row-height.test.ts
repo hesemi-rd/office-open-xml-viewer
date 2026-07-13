@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { calculateRowHeight } from './renderer.js';
+import { resolveSingleRowHeight } from './table-geometry.js';
 import type { DocTable, DocTableRow, DocTableCell } from './types.js';
 
 // ECMA-376 §17.4.80 (trHeight) + §17.18.37 (ST_HeightRule): the @hRule attribute
@@ -96,5 +97,21 @@ describe('calculateRowHeight — ST_HeightRule (§17.4.80 / §17.18.37)', () => 
   it('atLeast with no @val — falls back to the minimum (val null ⇒ no floor)', () => {
     const h = calculateRowHeight(rowWith(null, 'atLeast'), t, COLS, SCALE, EMPTY_STATE);
     expect(h).toBe(10 * SCALE);
+  });
+
+  it('§17.4.15: measures a cell against columns after gridBefore', () => {
+    const measuredWidths: number[] = [];
+    const row = {
+      ...rowWith(null, 'auto'),
+      gridBefore: 1,
+      gridAfter: 1,
+    } as unknown as DocTableRow;
+
+    resolveSingleRowHeight(row, [20, 40, 60], 1, (_cell, width) => {
+      measuredWidths.push(width);
+      return 10;
+    });
+
+    expect(measuredWidths).toEqual([40]);
   });
 });

@@ -2010,6 +2010,12 @@ pub struct BorderSpec {
 #[serde(rename_all = "camelCase")]
 pub struct DocTableRow {
     pub cells: Vec<DocTableCell>,
+    /// ECMA-376 §17.4.15: number of table-grid columns skipped before the first
+    /// real cell in this row. Omitted means zero.
+    pub grid_before: u32,
+    /// ECMA-376 §17.4.14: number of table-grid columns skipped after the last
+    /// real cell in this row. Omitted means zero.
+    pub grid_after: u32,
     /// pt, None = auto
     pub row_height: Option<f64>,
     /// ECMA-376 §17.4.80 w:trHeight/@hRule. "auto" (default) = treat row_height

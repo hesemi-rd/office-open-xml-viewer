@@ -104,6 +104,7 @@ import {
 } from './anchor-geometry.js';
 import {
   findMergeEndRow,
+  rowGridBefore,
   resolveTableRowHeights,
   resolveSingleRowHeight,
 } from './table-geometry.js';
@@ -3923,6 +3924,47 @@ export function computePages(
       const tblContentWPt = colW();
       const { colWidthsPt: tblColWidthsPt, rowHeightsPt: measuredRowHs } =
         computeTablePtLayout(measureState, tbl, tblContentWPt);
+      const tblWidthPt = tblColWidthsPt.reduce((sum, width) => sum + width, 0);
+
+      // §17.4.57: a floating table reserves a page-scoped exclusion band for
+      // following flow content. Paragraphs already consume that band through the
+      // float wrap oracle; an in-flow TABLE is an indivisible block at its own
+      // horizontal origin, so mirror the same avoidance here. If its box would
+      // intersect a floating-table exclusion rectangle, advance the cursor to the
+      // deepest blocking bottom before making the ordinary page-fit/split decision.
+      // This matters especially after splitFloatTableAcrossPages: the terminal
+      // continuation starts at the fresh page top while the flow cursor also resets
+      // to that top, and a following block table must not paint over the slice.
+      const applyInd = tbl.tblInd != null && tbl.jc === 'left';
+      let tblLeftPt = tbl.jc === 'center'
+        ? colX() + Math.max(0, (colW() - tblWidthPt) / 2)
+        : tbl.jc === 'right'
+          ? colX() + Math.max(0, colW() - tblWidthPt)
+          : colX();
+      if (applyInd) {
+        const indPt = tbl.tblInd as number;
+        tblLeftPt = tbl.bidiVisual === true
+          ? colX() + colW() - indPt - tblWidthPt
+          : colX() + indPt;
+      }
+      const tblRightPt = tblLeftPt + tblWidthPt;
+      const tableTopAbsPt = bodyTopPt() + y;
+      const tableBottomAbsPt = tableTopAbsPt + measuredRowHs.reduce((sum, height) => sum + height, 0);
+      let clearToAbsPt = tableTopAbsPt;
+      for (const float of measureState.floats) {
+        if (float.kind !== 'table') continue;
+        const overlapsX =
+          tblRightPt - float.xLeft > FLOAT_OVERLAP_EPS &&
+          float.xRight - tblLeftPt > FLOAT_OVERLAP_EPS;
+        const overlapsY =
+          tableBottomAbsPt - float.yTop > FLOAT_OVERLAP_EPS &&
+          float.yBottom - tableTopAbsPt > FLOAT_OVERLAP_EPS;
+        if (overlapsX && overlapsY) clearToAbsPt = Math.max(clearToAbsPt, float.yBottom);
+      }
+      if (clearToAbsPt > tableTopAbsPt + FLOAT_OVERLAP_EPS) {
+        y = clearToAbsPt - bodyTopPt();
+        measureState.y = clearToAbsPt;
+      }
       // effContentH() respects any reserve already accumulated on this page; the
       // table's own footnote reserve is subtracted on top so the note clears the
       // table content.
@@ -5558,7 +5600,7 @@ export function resolveColumnWidths(table: DocTable, contentWPt: number, state: 
   // tblGrid so a wide spanning cell does not over-inflate any one column.
   const minW: number[] = new Array(n).fill(0);
   for (const row of table.rows) {
-    let ci = 0;
+    let ci = rowGridBefore(row, n);
     for (const cell of row.cells) {
       const span = Math.min(Math.max(cell.colSpan, 1), n - ci);
       const m = cellMinContentPt(cell, table, state);
@@ -5703,7 +5745,7 @@ export function resolveColumnWidths(table: DocTable, contentWPt: number, state: 
 
   // First pass: single-column (non-spanning) cells set a hard per-column floor.
   for (const row of table.rows) {
-    let ci = 0;
+    let ci = rowGridBefore(row, n);
     for (const cell of row.cells) {
       const span = Math.min(Math.max(cell.colSpan, 1), n - ci);
       if (span === 1) {
@@ -5721,7 +5763,7 @@ export function resolveColumnWidths(table: DocTable, contentWPt: number, state: 
   // columns in proportion to the tblGrid widths, but only raise columns that
   // are still below their share (so a single-column floor is never lowered).
   for (const row of table.rows) {
-    let ci = 0;
+    let ci = rowGridBefore(row, n);
     for (const cell of row.cells) {
       const span = Math.min(Math.max(cell.colSpan, 1), n - ci);
       if (span > 1) {
@@ -5775,7 +5817,7 @@ function tableBreakAllowedBefore(table: DocTable, ri: number): boolean {
  *  Pure grid walk (gridSpan-aware), mirroring {@link findMergeEndRow}'s column
  *  scan (ECMA-376 §17.4.85). */
 function cellAtGridColumn(row: DocTableRow, targetCi: number): DocTableCell | null {
-  let ci = 0;
+  let ci = rowGridBefore(row, Number.MAX_SAFE_INTEGER);
   for (const cell of row.cells) {
     if (targetCi >= ci && targetCi < ci + cell.colSpan) return cell;
     ci += cell.colSpan;
@@ -5809,7 +5851,7 @@ function reopenMergedCellsInRow(
   headersPrepended: boolean,
 ): DocTableRow {
   const row = rows[start];
-  let ci = 0;
+  let ci = rowGridBefore(row, Number.MAX_SAFE_INTEGER);
   const cells = row.cells.map((cell) => {
     const gridCi = ci;
     ci += cell.colSpan;
@@ -6263,7 +6305,7 @@ function splitRowByCellLines(
   const restartRemainders = new Map<number, number>();
   let madeProgress = false;
   let hasRemainder = false;
-  let ci = 0;
+  let ci = rowGridBefore(row, colWidthsPt.length);
 
   for (const cell of row.cells) {
     const cellState = withTableCellStory(state);
@@ -6369,8 +6411,9 @@ function repairSpanExtensionAfterRowSplit(
   // impossible: continue cells there would have refused the split).
   let maxEnd = finalPieceIdx;
   const scanRow = (ri: number): void => {
-    let ci = 0;
-    for (const cell of rows[ri].cells) {
+    const row = rows[ri];
+    let ci = rowGridBefore(row, colWidthsPt.length);
+    for (const cell of row.cells) {
       const span = Math.min(cell.colSpan, colWidthsPt.length - ci);
       if (cell.vMerge === true) {
         const e = findMergeEndRow(workTable, ri, ci);
@@ -6388,8 +6431,9 @@ function repairSpanExtensionAfterRowSplit(
   }
   // 2) Re-apply the extension per restart cell, row-major (resolver order).
   for (let ri = finalPieceIdx; ri <= maxEnd && ri < rows.length; ri++) {
-    let ci = 0;
-    for (const cell of rows[ri].cells) {
+    const row = rows[ri];
+    let ci = rowGridBefore(row, colWidthsPt.length);
+    for (const cell of row.cells) {
       const span = Math.min(cell.colSpan, colWidthsPt.length - ci);
       if (cell.vMerge === true) {
         const cellW = colWidthsPt.slice(ci, ci + span).reduce((s, w) => s + w, 0);
@@ -8489,10 +8533,10 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
     //     ~22pt when centred.) The substituted-font single-line FLOOR
     //     (intendedSingle) still centres the glyph box within the single design
     //     line (half-leading), so a Meiryo single-spaced line is byte-for-byte
-    //     unchanged. A sub-single multiplier (0 < value < 1) makes lineH <
-    //     singleBox: the baseline stays pinned at the natural ascent and the
-    //     shortfall is NEGATIVE leading (consecutive lines overlap), matching
-    //     Word's compressed sub-single spacing.
+    //     unchanged. A sub-single multiplier (0 < value < 1) compresses the
+    //     entire line box, so the glyph box is centred across that shorter
+    //     advance. This lets the ink protrude equally above and below instead of
+    //     shifting it wholly toward the following row/content.
     //   • exact/atLeast keep the extra space split half above / half below
     //     (centred). docGrid line rules snap to whole cells and ruby paragraphs
     //     use a uniform box — both have their own within-box placement, so they
@@ -8506,10 +8550,14 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
     const glyphNatural = line.ascent + line.descent;
     const autoMultiple =
       para.lineSpacing?.rule === 'auto' && !paraHasRuby && !isGridLineRule(grid);
-    // For auto multiple spacing, centre the glyph only within the single design-
-    // line box (= max(glyphNatural, intendedSingle), matching lineBoxHeight's
-    // `natural`); the multiplier's extra (lineH − singleBox) then falls below.
-    const centerBox = autoMultiple ? Math.max(glyphNatural, line.intendedSingle) : lineH;
+    // For auto multiple spacing at or above 1×, centre the glyph only within
+    // the single design-line box (= max(glyphNatural, intendedSingle), matching
+    // lineBoxHeight's `natural`); the multiplier's extra then falls below. Below
+    // 1×, centre against the authored compressed line box itself.
+    const compressedAuto = autoMultiple && (para.lineSpacing?.value ?? 1) < 1;
+    const centerBox = autoMultiple && !compressedAuto
+      ? Math.max(glyphNatural, line.intendedSingle)
+      : lineH;
     const baseline = state.y + (centerBox - glyphNatural) / 2 + line.ascent;
 
     // Per-line X range (may be narrower than paraW when wrapping around floats).
@@ -12385,8 +12433,8 @@ function drawTableRows(
     const row = table.rows[ri];
     const rowFragment = fragment?.rows[ri];
     const rowH = rowHeights[ri];
-    let x = tableX;
-    let ci = 0;
+    let ci = rowGridBefore(row, colWidths.length);
+    let x = tableX + colWidths.slice(0, ci).reduce((sum, width) => sum + width, 0);
     let cellIdx = 0;
 
     for (const cell of row.cells) {
@@ -12489,6 +12537,23 @@ function drawTableRows(
   for (const j of jobs) {
     const { x, y, w, h } = j;
     const own = resolveCellEdges(j.cell.borders, table.borders, j.edges, mirror);
+    // ECMA-376 §17.4.66 / §17.4.85: a vertical merge is serialized as a
+    // restart cell followed by continuation cells. Its bottom boundary belongs
+    // to the LAST continuation cell, whose tcBorders can explicitly differ from
+    // the restart cell (commonly `bottom="nil"` to leave an adjacent area open).
+    // Using only the restart borders incorrectly falls through to table insideH
+    // and paints a rule that Word suppresses.
+    const terminalCell = j.lastRi > j.ri
+      ? (cellAtGridColumn(table.rows[j.lastRi], j.ci) ?? j.cell)
+      : j.cell;
+    const ownBottom = terminalCell === j.cell
+      ? own.bottom
+      : resolveCellEdges(
+          terminalCell.borders,
+          table.borders,
+          { ...j.edges, topRow: false },
+          mirror,
+        ).bottom;
     // `own.left`/`own.right` are already PHYSICAL (resolveCellEdges folded the
     // bidiVisual swap into the spec). The OUTER-vs-interior GATE must be physical
     // too: under mirror a cell's physical-left edge is the logical RIGHT edge, so
@@ -12535,9 +12600,9 @@ function drawTableRows(
           { ...j.edges, topRow: true },
           mirror,
         ).top;
-        spec = resolveSharedEdge(own.bottom, siblingTop);
+        spec = resolveSharedEdge(ownBottom, siblingTop);
       } else {
-        spec = paintable(own.bottom?.spec ?? null);
+        spec = paintable(ownBottom?.spec ?? null);
       }
       if (spec) drawBorderLine(ctx, x, y + h, x + w, y + h, spec, scale, dpr);
     } else if ((table.rows[j.lastRi] as DocTableRow & { pageCutBottom?: boolean })?.pageCutBottom === true) {
@@ -12568,7 +12633,7 @@ function drawTableRows(
         const belowEdges = below
           ? resolveCellEdges(below.cell.borders, table.borders, below.edges, mirror)
           : null;
-        const spec = resolveSharedEdge(own.bottom, belowEdges?.top ?? null);
+        const spec = resolveSharedEdge(ownBottom, belowEdges?.top ?? null);
         if (spec) drawBorderLine(ctx, colBoundaryX(cj), y + h, colBoundaryX(cEnd), y + h, spec, scale, dpr);
         cj = cEnd;
       }
