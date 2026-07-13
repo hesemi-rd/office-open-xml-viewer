@@ -3587,9 +3587,10 @@ function drawShape(
   loadedImages?: Map<string, CanvasImageSource | null>,
 ): void {
   ctx.save();
-  if (shape.rot !== 0) {
+  if (shape.rot !== 0 || shape.flipH || shape.flipV) {
     ctx.translate(sx + sw / 2, sy + sh / 2);
     ctx.rotate((shape.rot * Math.PI) / 180);
+    ctx.scale(shape.flipH ? -1 : 1, shape.flipV ? -1 : 1);
     ctx.translate(-sw / 2, -sh / 2);
   } else {
     ctx.translate(sx, sy);

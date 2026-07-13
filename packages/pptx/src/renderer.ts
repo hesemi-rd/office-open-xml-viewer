@@ -5,6 +5,7 @@ import type {
   PictureElement,
   MediaElement,
   TableElement,
+  ChartElement,
   TableCell,
   Fill,
   TileInfo,
@@ -4735,26 +4736,30 @@ async function renderMedia(
   const w = emuToPx(el.width, scale);
   const h = emuToPx(el.height, scale);
 
-  let drewPoster = false;
+  let poster: ImageBitmap | undefined;
   if (el.posterPath && fetchMedia) {
     try {
       // Poster is cached (and prefetched by renderSlide); do not close it here —
       // it is reused across renders of the same slide.
-      const bitmap = await getPosterBitmap(el, fetchMedia);
-      ctx.drawImage(bitmap, x, y, w, h);
-      drewPoster = true;
+      poster = await getPosterBitmap(el, fetchMedia);
     } catch {
       // fall through to plain fill
     }
   }
-  if (!drewPoster) {
+
+  // Do not retain a saved canvas state across the asynchronous poster decode:
+  // a newer render may reuse the same context while the promise is pending.
+  ctx.save();
+  applyFrameTransform(ctx, el, scale);
+  if (poster) {
+    ctx.drawImage(poster, x, y, w, h);
+  } else {
     ctx.fillStyle = el.mediaKind === 'video' ? '#111' : '#f0f0f0';
     ctx.fillRect(x, y, w, h);
   }
 
-  if (skipControls) return;
-
-  drawPlayBadge(ctx, x + w / 2, y + h / 2, w, h, 'paused');
+  if (!skipControls) drawPlayBadge(ctx, x + w / 2, y + h / 2, w, h, 'paused');
+  ctx.restore();
 }
 
 // ===== Table renderer =====
@@ -4862,7 +4867,26 @@ function applyStroke(ctx: CanvasRenderingContext2D, stroke: Stroke | null, scale
 
 // ─── Table rendering ─────────────────────────────────────────────────────────
 
+export function applyFrameTransform(
+  ctx: CanvasRenderingContext2D,
+  el: Pick<TableElement | ChartElement | MediaElement, 'x' | 'y' | 'width' | 'height' | 'rotation' | 'flipH' | 'flipV'>,
+  scale: number,
+): void {
+  if (el.rotation === 0 && !el.flipH && !el.flipV) return;
+  const x = emuToPx(el.x, scale);
+  const y = emuToPx(el.y, scale);
+  const w = emuToPx(el.width, scale);
+  const h = emuToPx(el.height, scale);
+  ctx.translate(x + w / 2, y + h / 2);
+  ctx.rotate((el.rotation * Math.PI) / 180);
+  if (el.flipH) ctx.scale(-1, 1);
+  if (el.flipV) ctx.scale(1, -1);
+  ctx.translate(-(x + w / 2), -(y + h / 2));
+}
+
 export function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: number, slideNumber?: number, rc: RenderContext = { themeMajorFont: null, themeMinorFont: null, dpr: 1 }) {
+  ctx.save();
+  applyFrameTransform(ctx, el, scale);
   const x0 = emuToPx(el.x, scale);
   const y0 = emuToPx(el.y, scale);
 
@@ -5181,6 +5205,7 @@ export function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, sca
     }
     ctx.restore();
   }
+  ctx.restore();
 }
 
 // ===== Public API =====
@@ -5502,6 +5527,8 @@ async function renderSlideLeased(
       const chartPtToPx = PT_TO_EMU * scale;
       // `el.chart` is already the canonical ChartModel emitted by the Rust
       // parser (`ooxml_common::chart::ChartModel`) — no per-field adapter.
+      ctx.save();
+      applyFrameTransform(ctx, el, scale);
       renderChart(
         ctx,
         el.chart,
@@ -5513,6 +5540,7 @@ async function renderSlideLeased(
         },
         chartPtToPx,
       );
+      ctx.restore();
     }
   }
 

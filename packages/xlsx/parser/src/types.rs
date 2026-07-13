@@ -524,6 +524,10 @@ pub struct ShapeInfo {
     /// Rotation in degrees (clockwise). DrawingML `a:xfrm/@rot` is in 60000ths
     /// of a degree; the parser converts to degrees here.
     pub rot: f64,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub flip_h: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub flip_v: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fill_color: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

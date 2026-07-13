@@ -89,18 +89,23 @@ describe('autoContrastColor (impl-defined; §17.3.2.6 w:color auto)', () => {
 function makeStrokeMock(): {
   ctx: CanvasRenderingContext2D;
   lastDash: () => number[];
+  lastCap: () => CanvasLineCap;
 } {
   let dash: number[] = [];
+  let cap: CanvasLineCap = 'butt';
   const ctx = {
     strokeStyle: '',
     lineWidth: 0,
     setLineDash(segments: number[]) {
       dash = segments;
     },
+    get lineCap() { return cap; },
+    set lineCap(value: CanvasLineCap) { cap = value; },
   };
   return {
     ctx: ctx as unknown as CanvasRenderingContext2D,
     lastDash: () => dash,
+    lastCap: () => cap,
   };
 }
 
@@ -167,6 +172,32 @@ describe('applyStroke dash patterns (§20.1.10.49 ST_PresetLineDashVal)', () => 
     const { ctx, lastDash } = makeStrokeMock();
     applyStroke(ctx, strokeWith('sysDash'), 3);
     expect(lastDash()).toEqual([24, 12]);
+  });
+
+  it('carries a round VML endcap so a zero-length dash renders as a dot', () => {
+    const { ctx, lastDash, lastCap } = makeStrokeMock();
+    applyStroke(ctx, { ...strokeWith('0 2'), lineCap: 'round' }, 1);
+    expect(lastDash()).toEqual([0, 4]);
+    expect(lastCap()).toBe('round');
+  });
+
+  it.each([undefined, 'butt' as const])(
+    'renders a zero-length VML dash as a fourfold-symmetric dot with %s endcap',
+    (lineCap) => {
+      const { ctx, lastDash, lastCap } = makeStrokeMock();
+      applyStroke(ctx, { ...strokeWith('0 2'), lineCap }, 1);
+      expect(lastDash()).toEqual([0, 4]);
+      // Canvas paints a zero-length segment with a square cap, but drops it
+      // with its `butt` cap. VML requires the zero token to remain visible.
+      expect(lastCap()).toBe('square');
+    },
+  );
+
+  it('keeps a flat cap when only a VML gap is zero-length', () => {
+    const { ctx, lastDash, lastCap } = makeStrokeMock();
+    applyStroke(ctx, strokeWith('2 0'), 1);
+    expect(lastDash()).toEqual([4, 0]);
+    expect(lastCap()).toBe('butt');
   });
 
   it('renders a VML numeric relative dashstyle without falling back to solid', () => {

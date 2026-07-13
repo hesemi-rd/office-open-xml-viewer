@@ -78,6 +78,7 @@ function tableOf(rows: TableCell[][], cols: number[]): TableElement {
   return {
     type: 'table', x: 0, y: 0,
     width: cols.reduce((a, b) => a + b, 0), height: rowH * rows.length,
+    rotation: 0, flipH: false, flipV: false,
     cols, rows: tableRows,
   };
 }

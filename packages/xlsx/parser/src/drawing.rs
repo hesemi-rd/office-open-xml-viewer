@@ -11,6 +11,7 @@ use ooxml_common::blip::{
     svg_blip_rid,
 };
 use ooxml_common::depth::{parse_guarded, DepthGuard};
+use ooxml_common::drawing::{DrawingGroupSpec, DrawingGroupTransform};
 use ooxml_common::ns::{attr_ns, is_a_ns, is_xdr_ns, relationships};
 use ooxml_common::units::EMU_PER_PX_96DPI;
 use std::collections::HashMap;
@@ -269,6 +270,9 @@ pub(crate) struct Xfrm {
     ch_ext_x: f64,
     ch_ext_y: f64,
     has_ch: bool,
+    rot: f64,
+    flip_h: bool,
+    flip_v: bool,
 }
 
 pub(crate) fn parse_xfrm(xfrm_node: &roxmltree::Node) -> Option<Xfrm> {
@@ -327,6 +331,13 @@ pub(crate) fn parse_xfrm(xfrm_node: &roxmltree::Node) -> Option<Xfrm> {
         ch_ext_x: if ch_ext.0 == 0.0 { ext.0 } else { ch_ext.0 },
         ch_ext_y: if ch_ext.1 == 0.0 { ext.1 } else { ch_ext.1 },
         has_ch,
+        rot: xfrm_node
+            .attribute("rot")
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(0.0)
+            / 60000.0,
+        flip_h: matches!(xfrm_node.attribute("flipH"), Some("1") | Some("true")),
+        flip_v: matches!(xfrm_node.attribute("flipV"), Some("1") | Some("true")),
     })
 }
 
@@ -886,11 +897,8 @@ pub(crate) fn collect_shapes(
     root_off_y: f64,
     root_ext_x: f64,
     root_ext_y: f64,
-    // transform from current local coords into root (top-level grpSp) coords
-    scale_x: f64,
-    scale_y: f64,
-    trans_x: f64,
-    trans_y: f64,
+    // cumulative Annex L transform from current local coords into root coords
+    transform: DrawingGroupTransform,
     theme_colors: &[String],
     theme_ln_widths: &[i64],
     rid_urls: &HashMap<String, String>,
@@ -923,29 +931,29 @@ pub(crate) fn collect_shapes(
                 })
                 .as_ref()
                 .and_then(parse_xfrm);
-            let (sx, sy, tx, ty) = if let Some(x) = xfrm {
-                if x.has_ch && x.ch_ext_x != 0.0 && x.ch_ext_y != 0.0 {
-                    let csx = x.ext_x / x.ch_ext_x;
-                    let csy = x.ext_y / x.ch_ext_y;
-                    // Child point (cx, cy) → (x.off_x + (cx - x.ch_off_x)*csx) in parent coords,
-                    // then apply outer (scale/trans) to reach root coords.
-                    (
-                        scale_x * csx,
-                        scale_y * csy,
-                        trans_x + scale_x * (x.off_x - x.ch_off_x * csx),
-                        trans_y + scale_y * (x.off_y - x.ch_off_y * csy),
-                    )
-                } else {
-                    // No child coord system: treat as identity mapping inside the group.
-                    (
-                        scale_x,
-                        scale_y,
-                        trans_x + scale_x * x.off_x,
-                        trans_y + scale_y * x.off_y,
-                    )
-                }
+            let child_transform = if let Some(x) = xfrm {
+                // Without chOff/chExt, DrawingML defines no distinct child
+                // coordinate system; using ext as chExt keeps scale at 1 while
+                // still applying the group's offset.
+                let child_ext_x = if x.has_ch { x.ch_ext_x } else { x.ext_x };
+                let child_ext_y = if x.has_ch { x.ch_ext_y } else { x.ext_y };
+                let child_off_x = if x.has_ch { x.ch_off_x } else { 0.0 };
+                let child_off_y = if x.has_ch { x.ch_off_y } else { 0.0 };
+                transform.compose_group(DrawingGroupSpec {
+                    off_x: x.off_x,
+                    off_y: x.off_y,
+                    ext_x: x.ext_x,
+                    ext_y: x.ext_y,
+                    child_off_x,
+                    child_off_y,
+                    child_ext_x,
+                    child_ext_y,
+                    rotation_degrees: x.rot,
+                    flip_h: x.flip_h,
+                    flip_v: x.flip_v,
+                })
             } else {
-                (scale_x, scale_y, trans_x, trans_y)
+                transform
             };
             collect_shapes(
                 &child,
@@ -953,10 +961,7 @@ pub(crate) fn collect_shapes(
                 root_off_y,
                 root_ext_x,
                 root_ext_y,
-                sx,
-                sy,
-                tx,
-                ty,
+                child_transform,
                 theme_colors,
                 theme_ln_widths,
                 rid_urls,
@@ -979,16 +984,22 @@ pub(crate) fn collect_shapes(
             let Some(xfrm) = parse_xfrm(&xfrm_n) else {
                 continue;
             };
-            let rot_raw: f64 = xfrm_n
-                .attribute("rot")
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0.0);
-
-            // Shape rect in root coords
-            let root_x = trans_x + scale_x * xfrm.off_x;
-            let root_y = trans_y + scale_y * xfrm.off_y;
-            let root_w = scale_x * xfrm.ext_x;
-            let root_h = scale_y * xfrm.ext_y;
+            // Shape rect in root coords. Use the cross-format DrawingML mapper
+            // so a quarter-turned leaf under non-uniform group scale keeps its
+            // transformed centre and swaps the applicable scale axes.
+            let root_rect = transform.apply_rect(
+                xfrm.off_x,
+                xfrm.off_y,
+                xfrm.ext_x,
+                xfrm.ext_y,
+                xfrm.rot,
+                xfrm.flip_h,
+                xfrm.flip_v,
+            );
+            let root_x = root_rect.x;
+            let root_y = root_rect.y;
+            let root_w = root_rect.width;
+            let root_h = root_rect.height;
 
             // Normalize to [0,1] of root ext
             if root_ext_x == 0.0 || root_ext_y == 0.0 {
@@ -1147,7 +1158,9 @@ pub(crate) fn collect_shapes(
                 y: ny,
                 w: nw,
                 h: nh,
-                rot: rot_raw / 60000.0,
+                rot: root_rect.rotation_degrees,
+                flip_h: root_rect.flip_h,
+                flip_v: root_rect.flip_v,
                 fill_color,
                 stroke_color,
                 stroke_width,
@@ -1173,11 +1186,6 @@ pub(crate) fn collect_shapes(
             let Some(xfrm) = parse_xfrm(&xfrm_n) else {
                 continue;
             };
-            let rot_raw: f64 = xfrm_n
-                .attribute("rot")
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0.0);
-
             // Resolve `<a:blip>`. The raster fallback rides in `r:embed`; the
             // vector original (Microsoft 2016 svgBlip extension, MS-ODRAWXML) is
             // nested in `<a:blip><a:extLst>`. `rid_urls` maps every media rId
@@ -1217,10 +1225,19 @@ pub(crate) fn collect_shapes(
             };
             let mime_type = mime_from_ext(&image_path).to_string();
 
-            let root_x = trans_x + scale_x * xfrm.off_x;
-            let root_y = trans_y + scale_y * xfrm.off_y;
-            let root_w = scale_x * xfrm.ext_x;
-            let root_h = scale_y * xfrm.ext_y;
+            let root_rect = transform.apply_rect(
+                xfrm.off_x,
+                xfrm.off_y,
+                xfrm.ext_x,
+                xfrm.ext_y,
+                xfrm.rot,
+                xfrm.flip_h,
+                xfrm.flip_v,
+            );
+            let root_x = root_rect.x;
+            let root_y = root_rect.y;
+            let root_w = root_rect.width;
+            let root_h = root_rect.height;
             if root_ext_x == 0.0 || root_ext_y == 0.0 {
                 continue;
             }
@@ -1237,7 +1254,9 @@ pub(crate) fn collect_shapes(
                 y: ny,
                 w: nw,
                 h: nh,
-                rot: rot_raw / 60000.0,
+                rot: root_rect.rotation_degrees,
+                flip_h: root_rect.flip_h,
+                flip_v: root_rect.flip_v,
                 fill_color: None,
                 stroke_color: None,
                 stroke_width: 0,
@@ -1380,11 +1399,21 @@ pub(crate) fn parse_shape_anchors(
             native_ext_cx = root.ext_x as i64;
             native_ext_cy = root.ext_y as i64;
 
-            // Map child coords → root coords with the grpSp's own chOff/chExt.
-            let csx = root.ext_x / root.ch_ext_x;
-            let csy = root.ext_y / root.ch_ext_y;
-            let tx = root.off_x - root.ch_off_x * csx;
-            let ty = root.off_y - root.ch_off_y * csy;
+            // Map child coords → root coords through the same shared DrawingML
+            // transform contract used by DOCX and PPTX.
+            let root_transform = DrawingGroupTransform::from_group(DrawingGroupSpec {
+                off_x: root.off_x,
+                off_y: root.off_y,
+                ext_x: root.ext_x,
+                ext_y: root.ext_y,
+                child_off_x: root.ch_off_x,
+                child_off_y: root.ch_off_y,
+                child_ext_x: root.ch_ext_x,
+                child_ext_y: root.ch_ext_y,
+                rotation_degrees: root.rot,
+                flip_h: root.flip_h,
+                flip_v: root.flip_v,
+            });
 
             collect_shapes(
                 &grp,
@@ -1392,10 +1421,7 @@ pub(crate) fn parse_shape_anchors(
                 root.off_y,
                 root.ext_x,
                 root.ext_y,
-                csx,
-                csy,
-                tx,
-                ty,
+                root_transform,
                 theme_colors,
                 theme_ln_widths,
                 rid_urls,
@@ -1454,10 +1480,7 @@ pub(crate) fn parse_shape_anchors(
                 xfrm.off_y,
                 xfrm.ext_x,
                 xfrm.ext_y,
-                1.0,
-                1.0,
-                0.0,
-                0.0,
+                DrawingGroupTransform::IDENTITY,
                 theme_colors,
                 theme_ln_widths,
                 rid_urls,
@@ -4122,5 +4145,95 @@ mod strict_namespace_tests {
         );
         assert_eq!(anchors[0].image_path, "xl/media/image1.png");
         assert_eq!(anchors[0].mime_type, "image/png");
+    }
+}
+
+#[cfg(test)]
+mod group_transform_contract_tests {
+    use super::*;
+
+    #[test]
+    fn quarter_turned_leaf_uses_shared_non_uniform_group_mapping() {
+        let xml = r#"<xdr:grpSp xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+                                  xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <xdr:sp>
+            <xdr:spPr>
+              <a:xfrm rot="5400000">
+                <a:off x="0" y="50800"/>
+                <a:ext cx="127000" cy="25400"/>
+              </a:xfrm>
+              <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+            </xdr:spPr>
+          </xdr:sp>
+        </xdr:grpSp>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut shapes = Vec::new();
+        collect_shapes(
+            &doc.root_element(),
+            0.0,
+            0.0,
+            127_000.0,
+            254_000.0,
+            DrawingGroupTransform::from_group(DrawingGroupSpec {
+                off_x: 0.0,
+                off_y: 0.0,
+                ext_x: 127_000.0,
+                ext_y: 254_000.0,
+                child_off_x: 0.0,
+                child_off_y: 0.0,
+                child_ext_x: 127_000.0,
+                child_ext_y: 127_000.0,
+                rotation_degrees: 0.0,
+                flip_h: false,
+                flip_v: false,
+            }),
+            &[],
+            &[],
+            &HashMap::new(),
+            &mut shapes,
+            DepthGuard::root(),
+        );
+
+        assert_eq!(shapes.len(), 1);
+        let shape = &shapes[0];
+        assert!((shape.x - 0.0).abs() < 1e-9);
+        assert!((shape.y - 0.4).abs() < 1e-9);
+        assert!((shape.w - 1.0).abs() < 1e-9);
+        assert!((shape.h - 0.2).abs() < 1e-9);
+        assert_eq!(shape.rot, 90.0);
+    }
+
+    #[test]
+    fn xfrm_preserves_group_rotation_and_flip_for_shared_mapping() {
+        let doc = roxmltree::Document::parse(
+            r#"<a:xfrm xmlns:a="urn:a" rot="5400000" flipH="1">
+                 <a:off x="0" y="0"/><a:ext cx="200" cy="100"/>
+                 <a:chOff x="0" y="0"/><a:chExt cx="100" cy="100"/>
+               </a:xfrm>"#,
+        )
+        .unwrap();
+        let group = parse_xfrm(&doc.root_element()).unwrap();
+        let transform = DrawingGroupTransform::from_group(DrawingGroupSpec {
+            off_x: group.off_x,
+            off_y: group.off_y,
+            ext_x: group.ext_x,
+            ext_y: group.ext_y,
+            child_off_x: group.ch_off_x,
+            child_off_y: group.ch_off_y,
+            child_ext_x: group.ch_ext_x,
+            child_ext_y: group.ch_ext_y,
+            rotation_degrees: group.rot,
+            flip_h: group.flip_h,
+            flip_v: group.flip_v,
+        });
+        let mapped = transform.apply_rect(10.0, 20.0, 20.0, 10.0, 15.0, false, true);
+
+        assert!((mapped.x - 105.0).abs() < 1e-9);
+        assert!((mapped.y - 105.0).abs() < 1e-9);
+        assert!((mapped.width - 40.0).abs() < 1e-9);
+        assert!((mapped.height - 10.0).abs() < 1e-9);
+        assert!((mapped.rotation_degrees - 105.0).abs() < 1e-9);
+        assert!(mapped.flip_h);
+        assert!(mapped.flip_v);
     }
 }

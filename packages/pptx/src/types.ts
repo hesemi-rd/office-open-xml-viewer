@@ -231,6 +231,9 @@ export interface MediaElement {
   y: number;
   width: number;
   height: number;
+  rotation: number;
+  flipH: boolean;
+  flipV: boolean;
   /** "audio" or "video" */
   mediaKind: 'audio' | 'video';
   /** Poster image zip path (e.g. "ppt/media/image2.png"). Empty when no poster. */
@@ -428,6 +431,9 @@ export interface TableElement {
   y: number;
   width: number;
   height: number;
+  rotation: number;
+  flipH: boolean;
+  flipV: boolean;
   /** Column widths in EMU */
   cols: number[];
   rows: TableRow[];
@@ -476,6 +482,9 @@ export interface ChartElement {
   y: number;
   width: number;
   height: number;
+  rotation: number;
+  flipH: boolean;
+  flipV: boolean;
   /**
    * The chart payload, already in the canonical {@link ChartModel} shape emitted
    * by the Rust parser (`ooxml_common::chart::ChartModel`). Passed straight to

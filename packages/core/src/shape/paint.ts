@@ -1,6 +1,6 @@
 import type { Fill, PatternFill, Stroke } from '../types/common';
 import { buildPatternBitmap } from './pattern-bitmaps';
-import { pptxPresetDashArray } from '../draw/dash';
+import { shapeStrokeDashArray } from '../draw/dash';
 
 /**
  * Convert a 6- or 8-char hex colour to a CSS `rgba()` string.
@@ -123,9 +123,9 @@ function resolvePatternFill(
  * Apply a Stroke to ctx. `emuPerPx` converts stroke width from EMU to px
  * (e.g. scale factor from pptx's emuToPx).
  *
- * The dash pattern comes from `pptxPresetDashArray` (§20.1.10.49
- * ST_PresetLineDashVal), which already scales by the pixel line width and
- * returns `[]` for solid / unknown styles.
+ * Parsers normalize symbolic dash vocabularies to DrawingML preset names; the
+ * shared resolver also accepts VML's numeric relative grammar. Both scale by
+ * the pixel line width and return `[]` for solid / unknown styles.
  */
 export function applyStroke(
   ctx: CanvasRenderingContext2D,
@@ -136,10 +136,20 @@ export function applyStroke(
     ctx.strokeStyle = 'transparent';
     ctx.lineWidth = 0;
     ctx.setLineDash([]);
+    ctx.lineCap = 'butt';
     return;
   }
   ctx.strokeStyle = hexToRgba(stroke.color);
   const lw = Math.max(0.5, stroke.width * emuPerPx);
   ctx.lineWidth = lw;
-  ctx.setLineDash(stroke.dashStyle ? pptxPresetDashArray(stroke.dashStyle, lw) : []);
+  const dash = stroke.dashStyle ? shapeStrokeDashArray(stroke.dashStyle, lw) : [];
+  const requestedCap = stroke.lineCap ?? 'butt';
+  // ECMA-376 Part 4 §19.1.2.21: a zero in VML's numeric dash grammar is a
+  // visible fourfold-symmetric dot, even though VML's default endcap is flat.
+  // Canvas drops a zero-length dash under its equivalent `butt` cap. A square
+  // cap is the exact centered, fourfold-symmetric fallback for that one case;
+  // explicit round/square caps keep their authored shape.
+  const hasZeroDash = dash.some((length, index) => index % 2 === 0 && length === 0);
+  ctx.lineCap = requestedCap === 'butt' && hasZeroDash ? 'square' : requestedCap;
+  ctx.setLineDash(dash);
 }

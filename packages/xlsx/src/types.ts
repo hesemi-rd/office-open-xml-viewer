@@ -380,6 +380,9 @@ export interface ShapeInfo {
   x: number; y: number; w: number; h: number;
   /** Rotation in degrees, clockwise. */
   rot: number;
+  /** Effective DrawingML reflection after composing parent groups. */
+  flipH?: boolean;
+  flipV?: boolean;
   fillColor?: string;
   strokeColor?: string;
   /** Stroke width in EMU. 0 = no stroke. */

@@ -160,20 +160,27 @@ const PPTX_PRESET_DASH_RELATIVE: Record<string, RelativeDashPattern> = {
  */
 export function pptxPresetDashArray(style: string, lineW: number): number[] {
   const relative = PPTX_PRESET_DASH_RELATIVE[style];
-  if (relative) return dashArray(relative, lineW);
+  return relative ? dashArray(relative, lineW) : [];
+}
 
-  // Legacy VML `<v:stroke dashstyle>` may carry an explicit whitespace/comma-
-  // separated sequence of on/off lengths rather than a DrawingML preset name.
-  // The values are relative to the stroke width, the same unit convention this
-  // shape-stroke helper already uses. Accept only an entirely numeric sequence;
-  // unknown symbolic styles continue to fall back to a solid line.
-  const tokens = style.trim().split(/[\s,]+/);
-  const numeric = tokens.map(Number);
+/**
+ * Shared shape-stroke dash resolver. Parsers normalize symbolic vocabularies
+ * (DrawingML presets, legacy VML names) to ST_PresetLineDashVal strings before
+ * they reach the shared {@link Stroke} contract. VML additionally permits a
+ * custom whitespace/comma-separated numeric sequence in line-width units
+ * (Part 4 §19.1.2.21); an unmatched final value is explicitly discarded.
+ */
+export function shapeStrokeDashArray(style: string, lineW: number): number[] {
+  const preset = pptxPresetDashArray(style, lineW);
+  if (preset.length > 0) return preset;
+
+  const numeric = style.trim().split(/[\s,]+/).map(Number);
   if (
     numeric.length >= 2 &&
     numeric.every((value) => Number.isFinite(value) && value >= 0) &&
     numeric.some((value) => value > 0)
   ) {
+    if (numeric.length % 2 !== 0) numeric.pop();
     return dashArray(numeric, lineW);
   }
   return [];

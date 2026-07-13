@@ -30,7 +30,11 @@ export const MIN_ROW_HEIGHT_PT = 10;
 export function rowGridBefore(row: DocTableRow, columnCount: number): number {
   const raw = row.gridBefore ?? 0;
   if (!Number.isFinite(raw)) return 0;
-  return Math.min(Math.max(0, Math.trunc(raw)), Math.max(0, columnCount));
+  const value = Math.max(0, Math.trunc(raw));
+  const size = Math.max(0, Math.trunc(columnCount));
+  // §17.4.15: a value larger than tblGrid is ignored; it is not clamped to
+  // the trailing edge (which would collapse every real cell to zero width).
+  return value > size ? 0 : value;
 }
 
 /** Last row index covered by the vMerge span that starts at (`startRi`,

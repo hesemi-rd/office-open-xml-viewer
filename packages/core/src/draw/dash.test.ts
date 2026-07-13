@@ -5,6 +5,7 @@ import {
   xlsxBorderDashArray,
   pptxUnderlineDashArray,
   pptxPresetDashArray,
+  shapeStrokeDashArray,
 } from './dash.js';
 
 describe('dashArray (generic on/off × unit helper)', () => {
@@ -133,5 +134,20 @@ describe('pptxPresetDashArray (§20.1.10.49 ST_PresetLineDashVal, shape borders)
   it('scales with the line width', () => {
     expect(pptxPresetDashArray('sysDash', 3)).toEqual([12, 6]);
     expect(pptxPresetDashArray('dash', 1)).toEqual([6, 3]);
+  });
+});
+
+describe('shapeStrokeDashArray — normalized presets and VML numeric sequences', () => {
+  it('keeps the PPTX preset contract unchanged', () => {
+    expect(shapeStrokeDashArray('sysDashDot', 2)).toEqual([8, 4, 2, 4]);
+  });
+
+  it('discards the final value from an odd VML numeric sequence (Part 4 §19.1.2.21)', () => {
+    expect(shapeStrokeDashArray('1 2 3', 2)).toEqual([2, 4]);
+  });
+
+  it('rejects invalid numeric sequences and preserves a zero-length dot', () => {
+    expect(shapeStrokeDashArray('1 nope', 2)).toEqual([]);
+    expect(shapeStrokeDashArray('0 2', 2)).toEqual([0, 4]);
   });
 });

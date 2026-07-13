@@ -984,6 +984,9 @@ pub(crate) fn parse_media(
         y: t.y,
         width: t.cx,
         height: t.cy,
+        rotation: t.rot,
+        flip_h: t.flip_h,
+        flip_v: t.flip_v,
         media_kind,
         poster_path,
         poster_mime_type,
@@ -1393,6 +1396,9 @@ pub(crate) fn parse_table(
         y: t.y,
         width: t.cx,
         height: t.cy,
+        rotation: t.rot,
+        flip_h: t.flip_h,
+        flip_v: t.flip_v,
         cols,
         rows,
         rtl,
@@ -1957,6 +1963,9 @@ pub(crate) fn parse_sp_tree_node(
                                 chart.y = t.y;
                                 chart.width = t.cx;
                                 chart.height = t.cy;
+                                chart.rotation = t.rot;
+                                chart.flip_h = t.flip_h;
+                                chart.flip_v = t.flip_v;
                                 out.push(SlideElement::Chart(chart));
                             }
                         }

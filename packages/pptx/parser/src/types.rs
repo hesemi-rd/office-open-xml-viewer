@@ -3,6 +3,7 @@
 //! re-exports these via `pub use types::*`.
 
 use ooxml_common::blip::{Duotone, SrcRect};
+use ooxml_common::drawing::{DrawingGroupSpec, DrawingGroupTransform};
 use ooxml_common::math::MathNode;
 use ooxml_common::text::SpaceLine;
 use serde::{Deserialize, Serialize};
@@ -129,6 +130,9 @@ pub(crate) struct ChartElement {
     pub(crate) y: i64,
     pub(crate) width: i64,
     pub(crate) height: i64,
+    pub(crate) rotation: f64,
+    pub(crate) flip_h: bool,
+    pub(crate) flip_v: bool,
     pub(crate) chart: ChartModel,
 }
 
@@ -139,6 +143,9 @@ pub(crate) struct TableElement {
     pub(crate) y: i64,
     pub(crate) width: i64,
     pub(crate) height: i64,
+    pub(crate) rotation: f64,
+    pub(crate) flip_h: bool,
+    pub(crate) flip_v: bool,
     /// Column widths in EMU
     pub(crate) cols: Vec<i64>,
     pub(crate) rows: Vec<TableRow>,
@@ -533,6 +540,9 @@ pub(crate) struct MediaElement {
     pub(crate) y: i64,
     pub(crate) width: i64,
     pub(crate) height: i64,
+    pub(crate) rotation: f64,
+    pub(crate) flip_h: bool,
+    pub(crate) flip_v: bool,
     /// "audio" or "video"
     pub(crate) media_kind: String,
     /// Zip path of the poster image (e.g. "ppt/media/image2.png"). Empty when
@@ -1151,72 +1161,183 @@ pub(crate) struct GroupTransform {
 
 impl GroupTransform {
     fn apply_to_transform(&self, t: Transform) -> Transform {
-        let sx = if self.ch_cx != 0 {
-            self.cx as f64 / self.ch_cx as f64
-        } else {
-            1.0
-        };
-        let sy = if self.ch_cy != 0 {
-            self.cy as f64 / self.ch_cy as f64
-        } else {
-            1.0
-        };
-        // If the group is flipped, mirror child positions in child coordinate space
-        // before applying the normal scale+translate.
-        // Mirror formula: new_left = (ch_x + ch_cx) - (t.x - ch_x) - t.cx
-        //                          = 2*ch_x + ch_cx - t.x - t.cx
-        let child_x = if self.flip_h {
-            2 * self.ch_x + self.ch_cx - t.x - t.cx
-        } else {
-            t.x
-        };
-        let child_y = if self.flip_v {
-            2 * self.ch_y + self.ch_cy - t.y - t.cy
-        } else {
-            t.y
-        };
-
-        // Child position and size in parent space (before group rotation)
-        let new_x = (child_x - self.ch_x) as f64 * sx + self.x as f64;
-        let new_y = (child_y - self.ch_y) as f64 * sy + self.y as f64;
-        let new_cx = (t.cx as f64 * sx).round() as i64;
-        let new_cy = (t.cy as f64 * sy).round() as i64;
-
-        // Apply group rotation: rotate child center around group center (clockwise, screen coords)
-        let (final_x, final_y) = if self.rot != 0.0 {
-            let rot_rad = self.rot.to_radians();
-            let cos_r = rot_rad.cos();
-            let sin_r = rot_rad.sin();
-            let group_cx = self.x as f64 + self.cx as f64 / 2.0;
-            let group_cy = self.y as f64 + self.cy as f64 / 2.0;
-            let child_cx = new_x + new_cx as f64 / 2.0;
-            let child_cy = new_y + new_cy as f64 / 2.0;
-            let dx = child_cx - group_cx;
-            let dy = child_cy - group_cy;
-            // Clockwise rotation in screen coords (y-axis down): x' = x*cos - y*sin, y' = x*sin + y*cos
-            let dx_new = dx * cos_r - dy * sin_r;
-            let dy_new = dx * sin_r + dy * cos_r;
-            (
-                group_cx + dx_new - new_cx as f64 / 2.0,
-                group_cy + dy_new - new_cy as f64 / 2.0,
-            )
-        } else {
-            (new_x, new_y)
-        };
-
-        // When the group has a net flip, the child's own rotation direction is negated
-        // before the group rotation is added (scale→flip→rotate OOXML order).
-        // GF (group net flip) = flip_h XOR flip_v.
-        let gf = self.flip_h ^ self.flip_v;
+        let mapped = DrawingGroupTransform::from_group(DrawingGroupSpec {
+            off_x: self.x as f64,
+            off_y: self.y as f64,
+            ext_x: self.cx as f64,
+            ext_y: self.cy as f64,
+            child_off_x: self.ch_x as f64,
+            child_off_y: self.ch_y as f64,
+            child_ext_x: self.ch_cx as f64,
+            child_ext_y: self.ch_cy as f64,
+            rotation_degrees: self.rot,
+            flip_h: self.flip_h,
+            flip_v: self.flip_v,
+        })
+        .apply_rect(
+            t.x as f64,
+            t.y as f64,
+            t.cx as f64,
+            t.cy as f64,
+            t.rot,
+            t.flip_h,
+            t.flip_v,
+        );
         Transform {
-            x: final_x.round() as i64,
-            y: final_y.round() as i64,
-            cx: new_cx,
-            cy: new_cy,
-            rot: self.rot + if gf { -t.rot } else { t.rot },
-            // Propagate group flip to child element flip flags
-            flip_h: t.flip_h ^ self.flip_h,
-            flip_v: t.flip_v ^ self.flip_v,
+            x: mapped.x.round() as i64,
+            y: mapped.y.round() as i64,
+            cx: mapped.width.round() as i64,
+            cy: mapped.height.round() as i64,
+            rot: mapped.rotation_degrees,
+            flip_h: mapped.flip_h,
+            flip_v: mapped.flip_v,
+        }
+    }
+}
+
+#[cfg(test)]
+mod group_transform_tests {
+    use super::*;
+
+    #[test]
+    fn quarter_turned_child_uses_shared_non_uniform_group_mapping() {
+        let group = GroupTransform {
+            x: 0,
+            y: 0,
+            cx: 127_000,
+            cy: 254_000,
+            ch_x: 0,
+            ch_y: 0,
+            ch_cx: 127_000,
+            ch_cy: 127_000,
+            ..Default::default()
+        };
+        let mapped = group.apply_to_transform(Transform {
+            x: 0,
+            y: 50_800,
+            cx: 127_000,
+            cy: 25_400,
+            rot: 90.0,
+            ..Default::default()
+        });
+
+        assert_eq!((mapped.x, mapped.y), (0, 101_600));
+        assert_eq!((mapped.cx, mapped.cy), (127_000, 50_800));
+        assert_eq!(mapped.rot, 90.0);
+    }
+
+    #[test]
+    fn rotated_flipped_group_uses_shared_annex_l_mapping() {
+        let group = GroupTransform {
+            x: 0,
+            y: 0,
+            cx: 200,
+            cy: 100,
+            ch_x: 0,
+            ch_y: 0,
+            ch_cx: 100,
+            ch_cy: 100,
+            rot: 90.0,
+            flip_h: true,
+            flip_v: false,
+        };
+        let mapped = group.apply_to_transform(Transform {
+            x: 10,
+            y: 20,
+            cx: 20,
+            cy: 10,
+            rot: 15.0,
+            flip_h: false,
+            flip_v: true,
+        });
+
+        assert_eq!(
+            (mapped.x, mapped.y, mapped.cx, mapped.cy),
+            (105, 105, 40, 10)
+        );
+        assert_eq!(mapped.rot, 105.0);
+        assert!(mapped.flip_h);
+        assert!(mapped.flip_v);
+    }
+
+    #[test]
+    fn group_transform_preserves_table_chart_and_media_frame_orientation() {
+        let group = GroupTransform {
+            x: 0,
+            y: 0,
+            cx: 200,
+            cy: 100,
+            ch_x: 0,
+            ch_y: 0,
+            ch_cx: 100,
+            ch_cy: 100,
+            rot: 90.0,
+            flip_h: true,
+            flip_v: false,
+        };
+
+        let xml = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:ser><c:cat><c:strLit><c:pt idx="0"><c:v>A</c:v></c:pt></c:strLit></c:cat><c:val><c:numLit><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
+        let chart = crate::chart::parse_legacy_chart(xml, &std::collections::HashMap::new())
+            .expect("minimal chart");
+        let mut elements = vec![
+            SlideElement::Table(TableElement {
+                x: 10,
+                y: 20,
+                width: 20,
+                height: 10,
+                rotation: 15.0,
+                flip_h: false,
+                flip_v: true,
+                cols: vec![],
+                rows: vec![],
+                rtl: false,
+            }),
+            SlideElement::Chart(ChartElement {
+                x: 10,
+                y: 20,
+                width: 20,
+                height: 10,
+                rotation: 15.0,
+                flip_h: false,
+                flip_v: true,
+                ..chart
+            }),
+            SlideElement::Media(MediaElement {
+                x: 10,
+                y: 20,
+                width: 20,
+                height: 10,
+                rotation: 15.0,
+                flip_h: false,
+                flip_v: true,
+                media_kind: "video".into(),
+                poster_path: String::new(),
+                poster_mime_type: String::new(),
+                media_path: String::new(),
+                mime_type: "video/mp4".into(),
+            }),
+        ];
+
+        for element in &mut elements {
+            apply_group_transform_to_element(element, &group);
+            match element {
+                SlideElement::Table(frame) => {
+                    assert_eq!(frame.rotation, 105.0);
+                    assert!(frame.flip_h);
+                    assert!(frame.flip_v);
+                }
+                SlideElement::Chart(frame) => {
+                    assert_eq!(frame.rotation, 105.0);
+                    assert!(frame.flip_h);
+                    assert!(frame.flip_v);
+                }
+                SlideElement::Media(frame) => {
+                    assert_eq!(frame.rotation, 105.0);
+                    assert!(frame.flip_h);
+                    assert!(frame.flip_v);
+                }
+                _ => unreachable!(),
+            }
         }
     }
 }
@@ -1292,15 +1413,18 @@ pub(crate) fn apply_group_transform_to_element(el: &mut SlideElement, gt: &Group
                 y: ey,
                 cx: ecx,
                 cy: ecy,
-                rot: 0.0,
-                flip_h: false,
-                flip_v: false,
+                rot: tbl.rotation,
+                flip_h: tbl.flip_h,
+                flip_v: tbl.flip_v,
             };
             let nt = gt.apply_to_transform(t);
             tbl.x = nt.x;
             tbl.y = nt.y;
             tbl.width = nt.cx;
             tbl.height = nt.cy;
+            tbl.rotation = nt.rot;
+            tbl.flip_h = nt.flip_h;
+            tbl.flip_v = nt.flip_v;
         }
         SlideElement::Chart(chart) => {
             // If the chart graphicFrame has no xfrm (zero dimensions), it fills the group's child space.
@@ -1314,15 +1438,18 @@ pub(crate) fn apply_group_transform_to_element(el: &mut SlideElement, gt: &Group
                 y: ey,
                 cx: ecx,
                 cy: ecy,
-                rot: 0.0,
-                flip_h: false,
-                flip_v: false,
+                rot: chart.rotation,
+                flip_h: chart.flip_h,
+                flip_v: chart.flip_v,
             };
             let nt = gt.apply_to_transform(t);
             chart.x = nt.x;
             chart.y = nt.y;
             chart.width = nt.cx;
             chart.height = nt.cy;
+            chart.rotation = nt.rot;
+            chart.flip_h = nt.flip_h;
+            chart.flip_v = nt.flip_v;
         }
         SlideElement::Media(m) => {
             let t = Transform {
@@ -1330,15 +1457,18 @@ pub(crate) fn apply_group_transform_to_element(el: &mut SlideElement, gt: &Group
                 y: m.y,
                 cx: m.width,
                 cy: m.height,
-                rot: 0.0,
-                flip_h: false,
-                flip_v: false,
+                rot: m.rotation,
+                flip_h: m.flip_h,
+                flip_v: m.flip_v,
             };
             let nt = gt.apply_to_transform(t);
             m.x = nt.x;
             m.y = nt.y;
             m.width = nt.cx;
             m.height = nt.cy;
+            m.rotation = nt.rot;
+            m.flip_h = nt.flip_h;
+            m.flip_v = nt.flip_v;
         }
     }
 }

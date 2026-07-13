@@ -920,6 +920,8 @@ export interface ShapeRun {
   strokeWidth?: number;
   /** `<a:ln><a:prstDash val>` — ECMA-376 §20.1.8.48. Absent = solid. */
   strokeDash?: string | null;
+  /** Normalized line cap: `butt` | `round` | `square`. */
+  strokeCap?: CanvasLineCap | null;
   /** `<a:ln><a:headEnd>` line-start decoration (ECMA-376 §20.1.8.3). */
   headEnd?: LineEnd | null;
   /** `<a:ln><a:tailEnd>` line-end decoration (ECMA-376 §20.1.8.3). */
@@ -1352,6 +1354,10 @@ export interface ImageRun {
   srcRect?: { l: number; t: number; r: number; b: number } | null;
   widthPt: number;
   heightPt: number;
+  /** Effective DrawingML transform for grouped pictures. */
+  rotation?: number;
+  flipH?: boolean;
+  flipV?: boolean;
   /** true = wp:anchor (absolute positioned), false/undefined = wp:inline (flows with text) */
   anchor?: boolean;
   /** X offset in pt (anchor only) */

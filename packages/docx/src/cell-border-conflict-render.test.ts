@@ -173,6 +173,55 @@ describe('§17.4.66 — adjacent cell border conflict, end-to-end render', () =>
       expect.objectContaining({ x1: 20, x2: 60 }),
     ]));
     expect(top.some((s) => Math.min(s.x1, s.x2) < 20)).toBe(false);
+    expect(verticalAt(strokes, 20)).toHaveLength(1);
+  });
+
+  it('§17.4.15: ignores gridBefore values larger than the table grid', async () => {
+    const first = cell('first', {
+      top: bs({ width: 1 }),
+      left: bs({ width: 1 }),
+    });
+    const shiftedRow = { ...rowOf([first]), gridBefore: 3 } as unknown as DocTableRow;
+    const t = tableOf([shiftedRow]);
+    t.colWidths = [20, 40];
+    t.layout = 'fixed';
+    t.widthPt = 60;
+
+    const strokes = await render(t);
+
+    expect(horizontalAt(strokes, 0)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ x1: 0, x2: 20 }),
+    ]));
+    expect(verticalAt(strokes, 0)).toHaveLength(1);
+  });
+
+  it('draws a cell top border where the row above omits that grid slot', async () => {
+    const upper = { ...rowOf([cell('upper')]), gridBefore: 1 } as unknown as DocTableRow;
+    const lower = rowOf([cell('lower', { top: bs({ width: 1 }) }), cell('right')]);
+    const t = tableOf([upper, lower]);
+    t.colWidths = [20, 40];
+    t.layout = 'fixed';
+    t.widthPt = 60;
+
+    const strokes = await render(t);
+
+    expect(horizontalAt(strokes, 20)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ x1: 0, x2: 20 }),
+    ]));
+  });
+
+  it('draws the physical-right boundary beside gridBefore in a bidiVisual row', async () => {
+    const shifted = cell('shifted', { left: bs({ width: 1 }) });
+    const shiftedRow = { ...rowOf([shifted]), gridBefore: 1 } as unknown as DocTableRow;
+    const t = tableOf([shiftedRow]);
+    t.colWidths = [20, 40, 60];
+    t.layout = 'fixed';
+    t.widthPt = 120;
+    t.bidiVisual = true;
+
+    const strokes = await render(t);
+
+    expect(verticalAt(strokes, 100)).toHaveLength(1);
   });
 
   it('shared vertical gridline is drawn exactly ONCE (not once per cell)', async () => {

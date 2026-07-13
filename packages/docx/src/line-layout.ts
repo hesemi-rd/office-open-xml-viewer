@@ -247,6 +247,9 @@ export interface LayoutImageSeg extends LayoutSegSource {
   mimeType: string;
   widthPt: number;
   heightPt: number;
+  rotation?: number;
+  flipH?: boolean;
+  flipV?: boolean;
   /** true = wp:anchor: skip inline flow, draw at absolute page coords */
   anchor: boolean;
   anchorXPt: number;
@@ -2405,6 +2408,9 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         mimeType: img.mimeType,
         widthPt: img.widthPt,
         heightPt: img.heightPt,
+        rotation: img.rotation,
+        flipH: img.flipH,
+        flipV: img.flipV,
         anchor: img.anchor ?? false,
         anchorXPt: img.anchorXPt ?? 0,
         anchorYPt: img.anchorYPt ?? 0,

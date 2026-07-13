@@ -3948,22 +3948,32 @@ export function computePages(
           : colX() + indPt;
       }
       const tblRightPt = tblLeftPt + tblWidthPt;
-      const tableTopAbsPt = bodyTopPt() + y;
-      const tableBottomAbsPt = tableTopAbsPt + measuredRowHs.reduce((sum, height) => sum + height, 0);
-      let clearToAbsPt = tableTopAbsPt;
-      for (const float of measureState.floats) {
-        if (float.kind !== 'table') continue;
-        const overlapsX =
-          tblRightPt - float.xLeft > FLOAT_OVERLAP_EPS &&
-          float.xRight - tblLeftPt > FLOAT_OVERLAP_EPS;
-        const overlapsY =
-          tableBottomAbsPt - float.yTop > FLOAT_OVERLAP_EPS &&
-          float.yBottom - tableTopAbsPt > FLOAT_OVERLAP_EPS;
-        if (overlapsX && overlapsY) clearToAbsPt = Math.max(clearToAbsPt, float.yBottom);
+      const tableHeightPt = measuredRowHs.reduce((sum, height) => sum + height, 0);
+      const initialTopAbsPt = bodyTopPt() + y;
+      let candidateTopAbsPt = initialTopAbsPt;
+      // Moving below one exclusion can create a new overlap with a staggered
+      // lower float that did not intersect the original box. Re-evaluate the
+      // translated rectangle until its top is stable. Each iteration advances
+      // to at least one finite float bottom, so the loop is monotonic/bounded.
+      for (;;) {
+        const candidateBottomAbsPt = candidateTopAbsPt + tableHeightPt;
+        let clearToAbsPt = candidateTopAbsPt;
+        for (const float of measureState.floats) {
+          if (float.kind !== 'table') continue;
+          const overlapsX =
+            tblRightPt - float.xLeft > FLOAT_OVERLAP_EPS &&
+            float.xRight - tblLeftPt > FLOAT_OVERLAP_EPS;
+          const overlapsY =
+            candidateBottomAbsPt - float.yTop > FLOAT_OVERLAP_EPS &&
+            float.yBottom - candidateTopAbsPt > FLOAT_OVERLAP_EPS;
+          if (overlapsX && overlapsY) clearToAbsPt = Math.max(clearToAbsPt, float.yBottom);
+        }
+        if (clearToAbsPt <= candidateTopAbsPt + FLOAT_OVERLAP_EPS) break;
+        candidateTopAbsPt = clearToAbsPt;
       }
-      if (clearToAbsPt > tableTopAbsPt + FLOAT_OVERLAP_EPS) {
-        y = clearToAbsPt - bodyTopPt();
-        measureState.y = clearToAbsPt;
+      if (candidateTopAbsPt > initialTopAbsPt + FLOAT_OVERLAP_EPS) {
+        y = candidateTopAbsPt - bodyTopPt();
+        measureState.y = candidateTopAbsPt;
       }
       // effContentH() respects any reserve already accumulated on this page; the
       // table's own footnote reserve is subtracted on top so the note clears the
@@ -5816,8 +5826,12 @@ function tableBreakAllowedBefore(table: DocTable, ri: number): boolean {
 /** The cell whose gridSpan covers logical column `targetCi` in `row`, or `null`.
  *  Pure grid walk (gridSpan-aware), mirroring {@link findMergeEndRow}'s column
  *  scan (ECMA-376 §17.4.85). */
-function cellAtGridColumn(row: DocTableRow, targetCi: number): DocTableCell | null {
-  let ci = rowGridBefore(row, Number.MAX_SAFE_INTEGER);
+function cellAtGridColumn(
+  row: DocTableRow,
+  targetCi: number,
+  columnCount: number,
+): DocTableCell | null {
+  let ci = rowGridBefore(row, columnCount);
   for (const cell of row.cells) {
     if (targetCi >= ci && targetCi < ci + cell.colSpan) return cell;
     ci += cell.colSpan;
@@ -5849,9 +5863,10 @@ function reopenMergedCellsInRow(
   start: number,
   headerCount: number,
   headersPrepended: boolean,
+  columnCount: number,
 ): DocTableRow {
   const row = rows[start];
-  let ci = rowGridBefore(row, Number.MAX_SAFE_INTEGER);
+  let ci = rowGridBefore(row, columnCount);
   const cells = row.cells.map((cell) => {
     const gridCi = ci;
     ci += cell.colSpan;
@@ -5860,7 +5875,7 @@ function reopenMergedCellsInRow(
     let restartRi = -1;
     let restartCell: DocTableCell | null = null;
     for (let r = start - 1; r >= 0; r--) {
-      const above = cellAtGridColumn(rows[r], gridCi);
+      const above = cellAtGridColumn(rows[r], gridCi, columnCount);
       if (!above) break;
       if (above.vMerge === true) { restartRi = r; restartCell = above; break; }
       if (above.vMerge !== false) break; // column left the span — malformed; bail
@@ -6732,7 +6747,16 @@ export function splitTableAcrossPages(
     // column already re-opened by a prepended repeated header is left untouched.
     const reopenedBody =
       start > 0 && bodyRows.length > 0 && bodyRows[0].cells.some((c) => c.vMerge === false)
-        ? [reopenMergedCellsInRow(workRows, start, headerCount, isContinuation), ...bodyRows.slice(1)]
+        ? [
+            reopenMergedCellsInRow(
+              workRows,
+              start,
+              headerCount,
+              isContinuation,
+              workTable.colWidths.length,
+            ),
+            ...bodyRows.slice(1),
+          ]
         : bodyRows;
     const sliceRows = isContinuation ? [...headerRows, ...reopenedBody] : reopenedBody;
     const sliceEl = { ...workTable, type: 'table', rows: sliceRows } as PaginatedBodyElement;
@@ -9864,8 +9888,32 @@ function renderInlineImage(
     ctx.save();
     ctx.globalAlpha *= seg.alpha as number;
   }
-  paint((dx, dy, dw, dh) => drawImageCropped(ctx, bmp, seg.srcRect, dx, dy, dw, dh));
+  paint((dx, dy, dw, dh) => drawImageRunBitmap(ctx, bmp, seg, dx, dy, dw, dh));
   if (hasAlpha) ctx.restore();
+}
+
+/** Paint a picture with the effective DrawingML rotation/reflection composed
+ * by the parser according to Annex L §L.4.7.4–§L.4.7.6. */
+function drawImageRunBitmap(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  bmp: DecodedImage,
+  image: Pick<ImageRun, 'srcRect' | 'rotation' | 'flipH' | 'flipV'>,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+): void {
+  const rotation = image.rotation ?? 0;
+  if (rotation === 0 && !image.flipH && !image.flipV) {
+    drawImageCropped(ctx, bmp, image.srcRect ?? undefined, x, y, w, h);
+    return;
+  }
+  ctx.save();
+  ctx.translate(x + w / 2, y + h / 2);
+  ctx.rotate((rotation * Math.PI) / 180);
+  ctx.scale(image.flipH ? -1 : 1, image.flipV ? -1 : 1);
+  drawImageCropped(ctx, bmp, image.srcRect ?? undefined, -w / 2, -h / 2, w, h);
+  ctx.restore();
 }
 
 /** Collect and draw anchor images with wrapMode='none' (or unspecified).
@@ -9983,10 +10031,10 @@ function renderAnchorImages(
       // §17.6.20 (tbRl) — an anchored image is not text: keep it UPRIGHT inside
       // the +90°-rotated page by counter-rotating about its box centre.
       drawUprightBox(state.ctx, pageX, pageY, w, h, (dx, dy, dw, dh) =>
-        drawImageCropped(state.ctx, bmp, img.srcRect ?? undefined, dx, dy, dw, dh),
+        drawImageRunBitmap(state.ctx, bmp, img, dx, dy, dw, dh),
       );
     } else {
-      drawImageCropped(state.ctx, bmp, img.srcRect ?? undefined, pageX, pageY, w, h);
+      drawImageRunBitmap(state.ctx, bmp, img, pageX, pageY, w, h);
     }
     if (hasAlpha) state.ctx.restore();
   }
@@ -10306,6 +10354,7 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
           color: shape.stroke,
           width: shape.strokeWidth ?? 0,
           dashStyle: shape.strokeDash ?? undefined,
+          lineCap: shape.strokeCap ?? undefined,
           headEnd: lineEndToArrowEnd(shape.headEnd),
           tailEnd: lineEndToArrowEnd(shape.tailEnd),
         }
@@ -12111,10 +12160,10 @@ function registerImageFloat(
       if (state.verticalCJK) {
         // §17.6.20 (tbRl) — keep the floated image UPRIGHT inside the rotated page.
         drawUprightBox(state.ctx, rect.imageX, rect.imageY, rect.imageW, rect.imageH, (dx, dy, dw, dh) =>
-          drawImageCropped(state.ctx, bmp, img.srcRect ?? undefined, dx, dy, dw, dh),
+          drawImageRunBitmap(state.ctx, bmp, img, dx, dy, dw, dh),
         );
       } else {
-        drawImageCropped(state.ctx, bmp, img.srcRect ?? undefined, rect.imageX, rect.imageY, rect.imageW, rect.imageH);
+        drawImageRunBitmap(state.ctx, bmp, img, rect.imageX, rect.imageY, rect.imageW, rect.imageH);
       }
       if (hasAlpha) state.ctx.restore();
     }
@@ -12544,7 +12593,7 @@ function drawTableRows(
     // Using only the restart borders incorrectly falls through to table insideH
     // and paints a rule that Word suppresses.
     const terminalCell = j.lastRi > j.ri
-      ? (cellAtGridColumn(table.rows[j.lastRi], j.ci) ?? j.cell)
+      ? (cellAtGridColumn(table.rows[j.lastRi], j.ci, colWidths.length) ?? j.cell)
       : j.cell;
     const ownBottom = terminalCell === j.cell
       ? own.bottom
@@ -12562,19 +12611,75 @@ function drawTableRows(
     // logical `ci + span` in LTR, logical `ci - 1` under mirror.
     const physLeftOuter = mirror ? j.edges.rightCol : j.edges.leftCol;
     const physRightOuter = mirror ? j.edges.leftCol : j.edges.rightCol;
+    const physLeftCi = mirror ? j.ci + j.span : j.ci - 1;
     const physRightCi = mirror ? j.ci - 1 : j.ci + j.span;
 
-    // TOP: only the outer top row draws its own top; interior tops are owned by
-    // the cell above (its bottom). (Vertical direction is unaffected by mirror.)
+    // TOP: the outer top row draws its own top. Interior tops are normally owned
+    // by the cell above (its bottom), but a row omission can leave individual
+    // grid slots empty. No neighbour owns those sub-segments, so this cell must
+    // paint its own resolved top there.
     if (j.edges.topRow) {
       const spec = paintable(own.top?.spec ?? null);
       if (spec) drawBorderLine(ctx, x, y, x + w, y, spec, scale, dpr);
+    } else {
+      const spec = paintable(own.top?.spec ?? null);
+      if (spec) {
+        let cj = j.ci;
+        while (cj < j.ci + j.span) {
+          const idx = occupancy[j.ri - 1]?.[cj] ?? -1;
+          let cEnd = cj + 1;
+          while (
+            cEnd < j.ci + j.span &&
+            (occupancy[j.ri - 1]?.[cEnd] ?? -1) === idx
+          ) cEnd++;
+          if (idx < 0) {
+            drawBorderLine(
+              ctx,
+              colBoundaryX(cj),
+              y,
+              colBoundaryX(cEnd),
+              y,
+              spec,
+              scale,
+              dpr,
+            );
+          }
+          cj = cEnd;
+        }
+      }
     }
-    // PHYSICAL LEFT: only the outer-left column draws its own left; interior lefts
-    // are owned by the physically-left neighbour (its right edge).
+    // PHYSICAL LEFT: outer-left draws its own edge. An interior left is normally
+    // owned by the physically-left neighbour, except where gridBefore/gridAfter
+    // leaves that slot empty for all or part of a vertically merged cell.
     if (physLeftOuter) {
       const spec = paintable(own.left?.spec ?? null);
       if (spec) drawBorderLine(ctx, x, y, x, y + h, spec, scale, dpr);
+    } else {
+      const spec = paintable(own.left?.spec ?? null);
+      if (spec) {
+        let rj = j.ri;
+        while (rj <= j.lastRi) {
+          const idx = occupancy[rj]?.[physLeftCi] ?? -1;
+          let rEnd = rj;
+          while (
+            rEnd + 1 <= j.lastRi &&
+            (occupancy[rEnd + 1]?.[physLeftCi] ?? -1) === idx
+          ) rEnd++;
+          if (idx < 0) {
+            drawBorderLine(
+              ctx,
+              x,
+              rowBoundaryY(rj),
+              x,
+              rowBoundaryY(rEnd + 1),
+              spec,
+              scale,
+              dpr,
+            );
+          }
+          rj = rEnd + 1;
+        }
+      }
     }
     // BOTTOM: outer bottom → own spec; interior → resolve vs each below neighbour's
     // top and draw the winner (this ABOVE cell owns the shared horizontal line).

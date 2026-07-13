@@ -262,6 +262,21 @@ describe('computePages — floating-table page-fit / row-split (§17.4.57, Word 
     expect(pages[2].filter((el) => el.type === 'table' && !isFloatTable(el))).toHaveLength(1);
   });
 
+  it('rechecks the block-table position after each staggered float collision', () => {
+    const body = [
+      floatTableRows(tblp({ vertAnchor: 'text', tblpY: 0 }), 1, 15),
+      // The block table does not initially intersect this second band. Moving it
+      // below the first float creates the second collision.
+      floatTableRows(tblp({ vertAnchor: 'text', tblpY: 20 }), 1, 15),
+      blockTable(10),
+    ];
+    const pages = computePages(body, section({ pageHeight: 80 }), makeCtx());
+
+    expect(pages.length).toBe(2);
+    expect(pages[0].filter((el) => el.type === 'table' && !isFloatTable(el))).toHaveLength(0);
+    expect(pages[1].filter((el) => el.type === 'table' && !isFloatTable(el))).toHaveLength(1);
+  });
+
   it('(b) splits a tall floating table across pages until every row is placed (sample-21 shape)', () => {
     // A single leading 20pt line (anchor at y=20) then an 8-row table (20pt each ⇒
     // 160pt total, > the 100pt content area, so it needs 2 pages). Page 1's band

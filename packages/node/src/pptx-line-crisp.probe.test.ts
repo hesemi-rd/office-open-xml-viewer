@@ -85,6 +85,9 @@ function buildTableSlide(): Presentation {
     y: TABLE_Y_PX * EMU_PER_PX,
     width: COL_W_PX * EMU_PER_PX,
     height: ROW_H_PX * EMU_PER_PX,
+    rotation: 0,
+    flipH: false,
+    flipV: false,
     cols: [COL_W_PX * EMU_PER_PX],
     rows: [{ height: ROW_H_PX * EMU_PER_PX, cells: [cell] }],
   };

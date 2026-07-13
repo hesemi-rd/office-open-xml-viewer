@@ -56,6 +56,9 @@ pub(crate) fn parse_legacy_chart(
         y: 0,
         width: 0,
         height: 0,
+        rotation: 0.0,
+        flip_h: false,
+        flip_v: false,
         chart,
     })
 }
@@ -84,6 +87,9 @@ pub(crate) fn parse_chartex(
         y: 0,
         width: 0,
         height: 0,
+        rotation: 0.0,
+        flip_h: false,
+        flip_v: false,
         chart,
     })
 }
