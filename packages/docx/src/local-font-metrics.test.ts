@@ -28,6 +28,46 @@ describe('docxLocalMetricRequests', () => {
     expect(docxLocalMetricRequests(model(['Meiryo UI']))).toEqual([]);
   });
 
+  it('keeps an embedded regular face authoritative over terminal-local probing and aliases', () => {
+    const doc = {
+      ...model(['メイリオ']),
+      embeddedFonts: [{
+        fontName: 'メイリオ', style: 'regular',
+        partPath: 'word/fonts/font1.odttf', fontKey: '{00000000-0000-0000-0000-000000000000}',
+      }],
+      body: [paragraphWithFamily('メイリオ')],
+    } as unknown as DocxDocumentModel;
+
+    const requests = docxLocalMetricRequests(doc);
+    expect(requests).toEqual([]);
+    // Model the runtime hand-off from selected local-metric requests to the
+    // segment resolver. If the embedded family leaked into `requests`, its
+    // terminal alias would replace the embedded face during normal-run layout.
+    const resolvedLocalFonts = Object.fromEntries(requests.map(({ family }) => [
+      family.trim().toLowerCase(),
+      { family: '__terminal_local_alias', lineHeightRatio: 1.5 },
+    ]));
+    const [segment] = buildSegments(
+      (doc.body[0] as { runs: DocRun[] }).runs,
+      { pageIndex: 0, totalPages: 1, resolvedLocalFonts },
+    );
+    expect('text' in segment && segment.fontFamily).toBe('メイリオ');
+  });
+
+  it('still probes a normal face when only a non-regular embedded face exists', () => {
+    const doc = {
+      ...model(['メイリオ']),
+      embeddedFonts: [{
+        fontName: 'メイリオ', style: 'bold',
+        partPath: 'word/fonts/font1.odttf', fontKey: '{00000000-0000-0000-0000-000000000000}',
+      }],
+    } as unknown as DocxDocumentModel;
+
+    expect(docxLocalMetricRequests(doc)).toEqual([
+      { family: 'メイリオ', localNames: ['Meiryo'], lineHeightMultiplier: 1.3 },
+    ]);
+  });
+
   it('discovers a directly-authored run family absent from fontTable and the theme', () => {
     const doc = {
       body: [paragraphWithFamily('メイリオ')],

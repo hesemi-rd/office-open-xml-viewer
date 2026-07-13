@@ -382,6 +382,11 @@ export interface WrapLayoutCtx {
   /** Absolute px width of the paragraph's raw COLUMN band. See columnXPt. */
   columnWidthPt: number;
   floats: FloatRect[];  // legacy float geometry supplied directly by renderer paths
+  /** Minimum clear side-gap for an anchor-host-only paragraph mark. Such a
+   *  zero-advance metric placeholder preserves the anchor character's line box,
+   *  but is not inline content and therefore keeps the pilcrow-em threshold
+   *  instead of the 1-inch content-line threshold (issue #676). */
+  paragraphMarkLineStartWidth?: number;
   /** Placement-aware wrap boundary used by paragraph measurement. */
   lineWindow?: (input: {
     topYPt: number;
@@ -1250,9 +1255,14 @@ export function paragraphMarkLineMetrics(
   ctx?: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   fontFamilyClasses: Record<string, string> = {},
   effectiveLineSpacing: LineSpacing | null = para.lineSpacing,
+  resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>> = {},
 ): MarkLineMetrics {
   const fs = getDefaultFontSize(para);
-  const family = getDefaultFontFamily(para, eastAsian);
+  const authoredFamily = getDefaultFontFamily(para, eastAsian);
+  const resolvedLocalFont = authoredFamily
+    ? resolvedLocalFonts[normalizeLocalFontMetricFamily(authoredFamily)]
+    : undefined;
+  const measuredFamily = resolvedLocalFont?.family ?? authoredFamily;
   let asc: number;
   let desc: number;
   if (ctx) {
@@ -1275,15 +1285,19 @@ export function paragraphMarkLineMetrics(
     // (intendedSingleLinePx, via emptyIntendedSinglePx below) then raises tabled
     // fonts — Latin included — to Word's line height.
     const prevFont = ctx.font;
-    ctx.font = buildFont(false, false, fs * scale, family, fontFamilyClasses);
+    ctx.font = buildFont(false, false, fs * scale, measuredFamily, fontFamilyClasses);
     const m = ctx.measureText(eastAsian ? 'あ' : 'x');
     ctx.font = prevFont;
     // A mark line carries no smallCaps/vertAlign, so fallback == correction size.
-    ({ ascent: asc, descent: desc } = correctedLineMetrics(m, family, fs * scale, fs * scale, eastAsian));
+    ({ ascent: asc, descent: desc } = correctedLineMetrics(
+      m, measuredFamily, fs * scale, fs * scale, eastAsian,
+    ));
   } else {
     ({ asc, desc } = emptyLineNaturalPx(fs, scale));
   }
-  const intendedSingle = emptyIntendedSingleForScriptPx(para, scale, eastAsian);
+  const intendedSingle = resolvedLocalFont
+    ? fs * scale * resolvedLocalFont.lineHeightRatio
+    : emptyIntendedSingleForScriptPx(para, scale, eastAsian);
   const gridCountSingle = eastAsian
     ? eastAsianGridCountSinglePx(intendedSingle, fs * scale)
     : undefined;
@@ -1310,9 +1324,11 @@ export function paragraphMarkLineHeight(
   ctx?: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   fontFamilyClasses: Record<string, string> = {},
   effectiveLineSpacing: LineSpacing | null = para.lineSpacing,
+  resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>> = {},
 ): number {
   return paragraphMarkLineMetrics(
     para, scale, grid, paraHasRuby, eastAsian, ctx, fontFamilyClasses, effectiveLineSpacing,
+    resolvedLocalFonts,
   ).advancePx;
 }
 
@@ -1348,10 +1364,12 @@ export function paragraphMarkBelowBaselinePt(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | undefined,
   fontFamilyClasses: Record<string, string>,
   effectiveLineSpacing: LineSpacing | null,
+  resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>> = {},
 ): number {
   // Measured at scale 1 so the returned px value is already in points.
   const m = paragraphMarkLineMetrics(
     para, 1, grid, paraHasRuby, eastAsian, ctx, fontFamilyClasses, effectiveLineSpacing,
+    resolvedLocalFonts,
   );
   return lineBelowBaselinePx(m.advancePx, m.ascentPx, m.descentPx);
 }
@@ -2756,16 +2774,21 @@ export function layoutLines(
   // paginator's two mirror layouts (they call layoutLines with scale 1), so the
   // flow/beside decision agrees across passes.
   //
-  // NOTE — this 1-inch rule is the CONTENT-line threshold. A literally-empty /
-  // anchor-only paragraph's pilcrow is placed by resolveEmptyMarkTop /
-  // flowMarkLine (renderer.ts) against the NARROWER pilcrow-em threshold
-  // (paragraphMarkEmPx): Word keeps such a mark beside a float down to a
-  // sub-inch gap and drops it below only for a full-width band. #676
-  // over-generalized 1 inch onto empty marks and pushed sample-12's caption
-  // to the next page. Lines routed through layoutLines carry inline content
-  // (or a content paragraph's trailing-break final line) and keep the 1-inch
-  // rule.
+  // NOTE — this 1-inch rule is the CONTENT-line threshold. A literally-empty
+  // paragraph's pilcrow is placed by resolveEmptyMarkTop / flowMarkLine
+  // (renderer.ts) against the NARROWER pilcrow-em threshold. An anchorHost-only
+  // paragraph still enters layoutLines so its anchor-character metrics size the
+  // mark line, but `isParagraphMarkOnlyFlow` selects the same narrow threshold
+  // for its first line. Word keeps either mark beside a float down to a sub-inch
+  // gap and drops it below only for a full-width band. #676 over-generalized 1
+  // inch onto marks and pushed sample-12's caption to the next page. Inline
+  // content (including a content paragraph's trailing-break final line) keeps
+  // the 1-inch rule.
   const minLineStartWidth = (): number => wordMinLineStartPx(scale);
+  const isParagraphMarkOnlyFlow = segs.length > 0 && segs.every((segment) =>
+    ('text' in segment && segment.metricOnly === true)
+    || ('imagePath' in segment && Boolean(segment.anchor)),
+  );
 
   // Compute wrap constraints for a new line about to start. Mutates
   // lineXOffset/lineMaxWidth/currentLineTopY. `minWidth` is the smallest clear
@@ -3183,7 +3206,11 @@ export function layoutLines(
   let trailingBreakFontSize: number | null = null;
 
   // Establish the first line's wrap window now that the content queue exists.
-  startLine(minLineStartWidth());
+  startLine(
+    isParagraphMarkOnlyFlow
+      ? (wrapCtx?.paragraphMarkLineStartWidth ?? minLineStartWidth())
+      : minLineStartWidth(),
+  );
 
   while (queue.length > 0) {
     const seg = queue.shift()!;

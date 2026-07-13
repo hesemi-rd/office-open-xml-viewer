@@ -239,6 +239,31 @@ describe('layoutLines — 1-inch line-start rule end to end (issue #676)', () =>
     expect(firstLinePlacement(emptyBeside)).toBe('beside');
   });
 
+  it('keeps an anchor-host metric-only line on the paragraph-mark threshold', () => {
+    const markWrap = {
+      ...wrapCtx(bandFor(62)),
+      paragraphMarkLineStartWidth: 10,
+    };
+    const lines = layoutLines(
+      makeLinearCtx(),
+      [textSeg('', 10, { metricOnly: true })],
+      colW,
+      0,
+      scale,
+      [],
+      markWrap,
+      {},
+      0,
+    );
+
+    // A zero-advance anchor-character placeholder preserves the run's line
+    // metrics, but it does not turn the pilcrow into inline content. The 62pt
+    // side gap holds the 10pt mark even though it is below the 1-inch content
+    // threshold, so the host line stays beside the float.
+    expect(firstLinePlacement(lines)).toBe('beside');
+    expect(lines[0].ascent + lines[0].descent).toBe(10);
+  });
+
   it('(c) a text line makes the SAME below/beside decision as the empty line', () => {
     const textBelow = layoutLines(makeLinearCtx(), [textSeg('hi', 10)], colW, 0, scale, [], wrapCtx(bandFor(70)), {}, 0);
     const textBeside = layoutLines(makeLinearCtx(), [textSeg('hi', 10)], colW, 0, scale, [], wrapCtx(bandFor(72)), {}, 0);

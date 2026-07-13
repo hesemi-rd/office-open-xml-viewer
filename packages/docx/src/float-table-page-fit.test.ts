@@ -147,6 +147,38 @@ function floatTableRows(tp: TblpPr, n: number, rowHPt: number): BodyElement {
   return { type: 'table', ...t } as unknown as BodyElement;
 }
 
+function borderedFloatTableRows(
+  tp: TblpPr,
+  n: number,
+  rule: 'auto' | 'atLeast',
+): BodyElement {
+  const rows = Array.from({ length: n }, (_value, index) => ({
+    ...row(20, `r${index + 1}`),
+    rowHeightRule: rule,
+  } as DocTableRow));
+  const outer = { style: 'single', width: 4, color: '#000000' } as const;
+  const inside = { style: 'single', width: 1, color: '#000000' } as const;
+  const table: DocTable = {
+    colWidths: [80],
+    rows,
+    borders: {
+      top: outer,
+      bottom: outer,
+      left: null,
+      right: null,
+      insideH: inside,
+      insideV: null,
+    },
+    cellMarginTop: 0,
+    cellMarginBottom: 0,
+    cellMarginLeft: 0,
+    cellMarginRight: 0,
+    jc: 'left',
+    tblpPr: tp,
+  };
+  return { type: 'table', ...table } as unknown as BodyElement;
+}
+
 /** A floating table (`w:tblpPr`) of total height `tableHPt`, laid out as one
  *  exact-height row so its measured extent is deterministic. */
 function floatTable(tp: TblpPr, tableHPt: number): BodyElement {
@@ -233,6 +265,30 @@ describe('computePages — floating-table page-fit / row-split (§17.4.57, Word 
       'r1', 'r2', 'r3', 'r4', 'r5',
     ]);
   });
+
+  it.each(['auto', 'atLeast'] as const)(
+    're-resolves outer border footprints for every %s floating-table slice',
+    (rule) => {
+      const body = [
+        borderedFloatTableRows(tblp({ vertAnchor: 'text', tblpY: 0 }), 3, rule),
+        para({ text: 'anchor' }),
+      ];
+
+      // The body band is 44pt. In the unsliced table, the first two rows appear
+      // to total 43.5pt (outer/2 + inside + content). Once emitted as a page
+      // slice, however, their last edge is the 4pt outer bottom and the pair is
+      // 45pt, so only one row fits. Each one-row slice is 20 + 4/2 + 4/2 = 24pt.
+      const pages = computePages(body, section({ pageHeight: 84 }), makeCtx());
+      const slices = pages
+        .flatMap((page) => page.filter(isFloatTable));
+
+      expect(slices).toHaveLength(3);
+      expect(pages.map(floatRowsOn).filter((labels) => labels.length > 0))
+        .toEqual([['r1'], ['r2'], ['r3']]);
+      expect(slices.map((slice) => slice.tableRowHeightsPt))
+        .toEqual([[24], [24], [24]]);
+    },
+  );
 
   it('moves a following block table past a page-filling float across a continuous section', () => {
     const body = [

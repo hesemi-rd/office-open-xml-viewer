@@ -94,12 +94,11 @@ export const FLOAT_PAGE_RIGHT_SLACK = 0.5;
  *  (a ~62pt side-gap, below 1 inch, where the nine authoring blank-line marks
  *  after the figure stay BESIDE the float — flowing them below at 1 inch (the
  *  regression #676 introduced) pushed the caption + CONCLUSION onto the next
- *  page). The empty-mark
- *  threshold is `paragraphMarkEmPx` (renderer.ts); it governs the literally-empty
- *  / anchor-only paragraph paths — the paint pass `resolveEmptyMarkTop` and the
- *  paginator's mirror `flowMarkLine` — while every CONTENT line (including a
- *  content paragraph's trailing-break empty final line inside `layoutLines`)
- *  passes `wordMinLineStartPx` below. */
+ *  page). The narrow threshold is the paragraph-mark em; it governs the
+ *  literally-empty paths — the paint pass `resolveEmptyMarkTop` and paginator
+ *  mirror `flowMarkLine` — plus the anchorHost-only metric line inside
+ *  `layoutLines`. Every CONTENT line (including a content paragraph's
+ *  trailing-break empty final line) passes `wordMinLineStartPx` below. */
 export const WORD_MIN_LINE_START_PT = 72;
 
 /** Tolerance (pt) subtracted from the 1-inch requirement when testing a side

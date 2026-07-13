@@ -3747,8 +3747,9 @@ export function computePages(
         //
         // Lay the table out against the CURRENT column band and resolve its box +
         // per-row heights (B2 stage 1b: computeTableLayout is the ONE heavy
-        // measurement — its rowHeights drive the overflow test, the row-split
-        // greedy fit, and the paint-reuse stamp below; never re-measured). `tp` is
+        // measurement — whole-table rowHeights drive the overflow test, while
+        // rowContentHeights let each emitted slice resolve its own boundaries for
+        // fit, paint-reuse stamp, and FloatRect; cell content is never re-measured). `tp` is
         // the tblpPr under which the FIRST slice is placed (at the in-flow anchor);
         // continuation slices clone it with tblpY=0 so their box sits at body top.
         const tp = tbl.tblpPr;
@@ -3874,7 +3875,7 @@ export function computePages(
             tbl,
             tp,
             first.layout.colWidths, // scale-1 (px==pt) column grid, constant across slices
-            first.layout.rowHeights,
+            first.layout.rowContentHeights,
             slice1TopOffset,
             first.contentWPt,
             () => y,
@@ -7047,7 +7048,8 @@ export function splitFloatTableAcrossPages(
   table: DocTable,
   tp: TblpPr,
   colWidthsPt: number[],
-  rowHs: number[],
+  /** Per-row content boxes without horizontal boundary footprints. */
+  rowContentHs: number[],
   /** pt offset of slice 1's top below the flow cursor (`tp.tblpY × scale`; ~0 for
    *  a tblpY=1twip auto-converted float). Continuation slices ignore it (tblpY=0). */
   slice1TopOffset: number,
@@ -7068,9 +7070,39 @@ export function splitFloatTableAcrossPages(
    *  unit tests) ⇒ the slice is dropped (the test asserts geometry via a stub). */
   emitSlice?: (sliceEl: PaginatedBodyElement) => void,
 ): number {
-  const n = rowHs.length;
+  const n = rowContentHs.length;
   let start = 0;
   let firstSlice = true;
+
+  const materializeSlice = (
+    windowStart: number,
+    windowEnd: number,
+    isFirstSlice: boolean,
+  ): { element: PaginatedBodyElement; heightsPt: number[]; usedPt: number } => {
+    const sliceTp: TblpPr = isFirstSlice
+      ? tp
+      : { ...tp, vertAnchor: 'text', tblpY: 0, tblpYSpec: undefined };
+    const sliceTable = {
+      ...table,
+      type: 'table',
+      rows: table.rows.slice(windowStart, windowEnd),
+      tblpPr: sliceTp,
+    } as unknown as PaginatedBodyElement;
+    const contentHeights = rowContentHs.slice(windowStart, windowEnd);
+    // §17.4.66: resolve conflicts against this emitted slice, whose first/last
+    // rows now own outer edges. §17.4.80 exact rows remain complete boxes while
+    // auto/atLeast rows receive the resolved half-boundary footprints.
+    const heightsPt = applyTableRowBoundaryFootprints(
+      sliceTable as unknown as DocTable,
+      contentHeights,
+      1,
+    );
+    return {
+      element: sliceTable,
+      heightsPt,
+      usedPt: heightsPt.reduce((sum, height) => sum + height, 0),
+    };
+  };
 
   while (start < n) {
     // Slice top (content-relative pt): the in-flow anchor for slice 1, else the
@@ -7084,20 +7116,47 @@ export function splitFloatTableAcrossPages(
     // (i.e. slice 1 low on the page); a fresh page's `avail` already equals the max
     // band, so this never loops. (A row taller than a full page still gets placed
     // below, since then `avail == the max band` and the guard is false.)
-    if (rowHs[start] > avail && sliceTopRel > regionTopY()) {
+    const firstRowHeight = materializeSlice(start, start + 1, firstSlice).usedPt;
+    if (firstRowHeight > avail && sliceTopRel > regionTopY()) {
       advancePage();
       firstSlice = false;
       continue;
     }
 
-    // Greedy-fit rows [start, end); always take the first row (forward progress).
+    // Scan content boxes linearly. The selected safe endpoints are materialized
+    // below with their own outer/interior boundaries, avoiding both stale
+    // original-table footprints and per-candidate quadratic resolution.
     let used = 0;
     let end = start;
+    const safeEnds: number[] = [];
     while (end < n) {
-      const h = rowHs[end];
+      const h = rowContentHs[end];
       if (end > start && used + h > avail && tableBreakAllowedBefore(table, end)) break;
       used += h;
       end++;
+      if (end === n || tableBreakAllowedBefore(table, end)) safeEnds.push(end);
+    }
+
+    let materialized = materializeSlice(start, end, firstSlice);
+    if (materialized.usedPt > avail && safeEnds.length > 1) {
+      let low = 0;
+      let high = safeEnds.length - 1;
+      let best = materializeSlice(start, safeEnds[0], firstSlice);
+      let bestEnd = safeEnds[0];
+      while (low <= high) {
+        const mid = Math.floor((low + high) / 2);
+        const candidateEnd = safeEnds[mid];
+        const candidate = materializeSlice(start, candidateEnd, firstSlice);
+        if (candidate.usedPt <= avail || mid === 0) {
+          best = candidate;
+          bestEnd = candidateEnd;
+          low = mid + 1;
+        } else {
+          high = mid - 1;
+        }
+      }
+      materialized = best;
+      end = bestEnd;
     }
 
     // Build the slice element: a subset of rows, its own tblpPr (slice 1 keeps the
@@ -7115,20 +7174,12 @@ export function splitFloatTableAcrossPages(
     // table), and sample-18/21 have no header rows — so the safe, observed behaviour
     // is to carry each row exactly once (UNOBSERVED for headers; revisit with a
     // header fixture if one surfaces).
-    const sliceTp: TblpPr = firstSlice
-      ? tp
-      : { ...tp, vertAnchor: 'text', tblpY: 0, tblpYSpec: undefined };
-    const sliceEl = {
-      ...table,
-      type: 'table',
-      rows: table.rows.slice(start, end),
-      tblpPr: sliceTp,
-    } as unknown as PaginatedBodyElement;
+    const sliceEl = materialized.element;
     // B2 stage 1b — stamp the full column grid (constant across slices) + this
     // slice's own rows so the paint pass (renderFloatTable → computeTableLayout)
     // reuses them 1:1 instead of re-measuring, and emitSlice's box math below reuses
     // the same stamp.
-    stampTableLayout(sliceEl, colWidthsPt, rowHs.slice(start, end), contentWPt);
+    stampTableLayout(sliceEl, colWidthsPt, materialized.heightsPt, contentWPt);
 
     emitSlice?.(sliceEl);
 
@@ -7793,7 +7844,10 @@ function renderEmptyMarkParagraph(
   const flowShift = Math.max(0, markTop - textAreaTopY);
   if (markTop > state.y) state.y = markTop;
   const markRectTop = state.y;
-  const emptyH = paragraphMarkLineHeight(para, scale, grid, paraHasRuby, state.docEastAsian, ctx, state.fontFamilyClasses);
+  const emptyH = paragraphMarkLineHeight(
+    para, scale, grid, paraHasRuby, state.docEastAsian, ctx, state.fontFamilyClasses,
+    para.lineSpacing, state.resolvedLocalFonts,
+  );
   if (para.shading && !dryRun) {
     ctx.fillStyle = `#${para.shading}`;
     const sb = paraShadingRect(borderX, markRectTop, borderW, emptyH, para.borders, borderMerge, scale);
@@ -7852,6 +7906,8 @@ function frameAnchorLineHeightPx(
       state.docEastAsian,
       state.ctx,
       state.fontFamilyClasses,
+      p.lineSpacing,
+      state.resolvedLocalFonts,
     );
   }
   const fp = frameEl as unknown as DocParagraph;
@@ -7863,6 +7919,8 @@ function frameAnchorLineHeightPx(
     state.docEastAsian,
     state.ctx,
     state.fontFamilyClasses,
+    fp.lineSpacing,
+    state.resolvedLocalFonts,
   );
 }
 
@@ -8346,6 +8404,7 @@ function renderParagraph(
     columnXPt: contentX,
     columnWidthPt: contentW,
     floats: state.floats,
+    paragraphMarkLineStartWidth: paragraphMarkEmPx(para, scale),
     lineBoxH: (a, d, _h, is, ea, gc) => lineBoxHeight(
       para.lineSpacing,
       a,
@@ -12595,8 +12654,21 @@ function computeTableLayout(
   table: DocTable,
   contentWPx: number,
   state: RenderState,
-): { colWidths: number[]; tableW: number; rowHeights: number[] } {
+): {
+  colWidths: number[];
+  tableW: number;
+  rowContentHeights: number[];
+  rowHeights: number[];
+} {
   const { scale } = state;
+  const contentHeightsFromResolved = (rowHeights: number[]): number[] => {
+    const footprints = applyTableRowBoundaryFootprints(
+      table,
+      new Array<number>(table.rows.length).fill(0),
+      scale,
+    );
+    return rowHeights.map((height, index) => height - (footprints[index] ?? 0));
+  };
 
   // B2 table stage 1b — compute-once reuse. When the paginator laid this table
   // out it stamped the scale-1 pt column widths and per-row heights it resolved
@@ -12640,7 +12712,12 @@ function computeTableLayout(
     const fragment = placedFragment.fragment;
     const colWidths = fragment.columnWidthsPt.map((w) => w * scale);
     const rowHeights = fragment.rows.map((r) => r.heightPt * scale);
-    return { colWidths, tableW: colWidths.reduce((s, w) => s + w, 0), rowHeights };
+    return {
+      colWidths,
+      tableW: colWidths.reduce((s, w) => s + w, 0),
+      rowContentHeights: contentHeightsFromResolved(rowHeights),
+      rowHeights,
+    };
   }
   const reuseInputs = stamped.tableLayoutInputs;
   const reuse =
@@ -12654,7 +12731,12 @@ function computeTableLayout(
   if (reuse) {
     const colWidths = (stamped.tableColWidthsPt as number[]).map((w) => w * scale);
     const rowHeights = (stamped.tableRowHeightsPt as number[]).map((h) => h * scale);
-    return { colWidths, tableW: colWidths.reduce((s, w) => s + w, 0), rowHeights };
+    return {
+      colWidths,
+      tableW: colWidths.reduce((s, w) => s + w, 0),
+      rowContentHeights: contentHeightsFromResolved(rowHeights),
+      rowHeights,
+    };
   }
 
   // Resolve column widths in pt (autofit by preferred widths, or fixed grid),
@@ -12666,11 +12748,12 @@ function computeTableLayout(
   // with the paint pass's px cell measurer. The restart-span extension is part of
   // the skeleton now — calculateRowHeight already excludes restart cells per-row,
   // and the resolver re-measures them via the same callback to grow the last row.
-  const rowHeights = resolveTableRowHeights(table, colWidths, scale, (cell, cellW) =>
+  const rowContentHeights = resolveTableRowContentHeights(table, colWidths, scale, (cell, cellW) =>
     measureCellContentHeightPx(cell, table, cellW, scale, state),
   );
+  const rowHeights = applyTableRowBoundaryFootprints(table, rowContentHeights, scale);
 
-  return { colWidths, tableW, rowHeights };
+  return { colWidths, tableW, rowContentHeights, rowHeights };
 }
 
 /** Content height of a table cell laid out at total width `cellW`, in the target
@@ -13377,6 +13460,8 @@ function measureCellParagraphWindow(
           state.docEastAsian,
           state.ctx,
           state.fontFamilyClasses,
+          paragraphContext.lineSpacing,
+          state.resolvedLocalFonts,
         ),
         totalLines,
       };

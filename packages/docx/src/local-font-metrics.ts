@@ -1,5 +1,6 @@
 import {
   loadLocalFontMetrics,
+  normalizeLocalFontMetricFamily,
   type LoadedLocalFontMetrics,
   type LocalFontMetricRequest,
 } from '@silurus/ooxml-core';
@@ -14,6 +15,16 @@ import { docxRenderedFontFamilies } from './document-content.js';
  * version-specific number. Meiryo UI is deliberately excluded: it is a distinct
  * family with different metrics and has no equivalent Word measurement here. */
 export function docxLocalMetricRequests(doc: DocxDocumentModel): LocalFontMetricRequest[] {
+  // ECMA-376 §17.8.3.3: an embedded regular face is the document's authored
+  // normal face for that family. Registering a terminal-local alias afterwards
+  // would replace it during normal-run layout, so embedded families never enter
+  // local probing. Bold/italic-only embeddings do not suppress a missing normal
+  // face because they cannot satisfy the normal style slot.
+  const embeddedRegularFamilies = new Set(
+    (doc.embeddedFonts ?? [])
+      .filter((font) => font.style === 'regular')
+      .map((font) => normalizeLocalFontMetricFamily(font.fontName)),
+  );
   const names = new Set<string>([
     ...Object.keys(doc.fontFamilyClasses ?? {}),
     ...(doc.majorFont ? [doc.majorFont] : []),
@@ -22,7 +33,8 @@ export function docxLocalMetricRequests(doc: DocxDocumentModel): LocalFontMetric
   ]);
   const requests: LocalFontMetricRequest[] = [];
   for (const family of names) {
-    const normalized = family.trim().toLowerCase();
+    const normalized = normalizeLocalFontMetricFamily(family);
+    if (embeddedRegularFamilies.has(normalized)) continue;
     const isMeiryo = normalized === 'meiryo' || family.trim() === 'メイリオ';
     if (!isMeiryo) continue;
     requests.push({
