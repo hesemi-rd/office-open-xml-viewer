@@ -237,6 +237,22 @@ describe('table-cell line grid compatibility', () => {
 // 20 pt; the mock font box is a flat 1.0×em, so every height difference below
 // comes from the line-height / script routing alone.
 describe('docGrid line-cell integration through the cell measure path', () => {
+  it('does not whole-cell round tall East Asian design metrics for explicit atLeast', () => {
+    const para = paragraphWithRuns([{
+      text: 'あ',
+      fontSize: 14,
+      fontFamily: 'Meiryo',
+      fontFamilyEastAsia: 'Meiryo',
+    }]);
+    para.lineSpacing = { value: 0, rule: 'atLeast', explicit: true };
+
+    // Meiryo's established design line is 3269/2048 em. At 14pt it is
+    // 22.35pt, taller than the 20pt table grid pitch. Explicit atLeast expands
+    // to that content height; automatic grid layout would round it to 40pt.
+    expect(calculateRowHeight(rowWith(para), table(), [100], 1, makeMeasureState(true)))
+      .toBeCloseTo(14 * 3269 / 2048, 12);
+  });
+
   it('a manual line break in a SMALLER run does not shrink the line height (tallest governs)', () => {
     // Line 1: 'あ' at 24 pt + 'い' at 10 pt, terminated by a <w:br> whose
     // nearby size resolves to 10 pt (§17.3.3.1; findNearbyFontSize looks at the

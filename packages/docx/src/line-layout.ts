@@ -1133,10 +1133,15 @@ export function lineBoxHeight(
   }
   if (ls.rule === 'exact') return ls.value * scale;
   if (ls.rule === 'atLeast') {
+    // §17.18.48 makes the authored value a minimum that expands to fit content;
+    // §17.6.5 contributes one active line pitch as another minimum. Unlike the
+    // automatic/null rule, explicit atLeast does not snap a tall plain line to
+    // an integer cell count. Ruby keeps the established whole-cell reservation
+    // because its measured base + annotation box must fit without clipping.
     return Math.max(
       natural,
       ls.value * scale,
-      hasGrid ? gridSingleCell() : 0,
+      hasGrid ? (hasRuby || inheritedOnly ? gridSingleCell() : pitchPx) : 0,
     );
   }
   return natural;
