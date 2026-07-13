@@ -9,9 +9,9 @@ use ooxml_common::zip::read_zip_string;
 mod markdown;
 
 mod worksheet_reference;
-use worksheet_reference::{
-    extract_reference_cells, resolve_worksheet_reference, ReferencedCellValue, MAX_REFERENCE_CELLS,
-};
+#[cfg(test)]
+use worksheet_reference::{extract_reference_cells, MAX_REFERENCE_CELLS};
+use worksheet_reference::{resolve_worksheet_reference, ReferencedCellValue};
 
 mod types;
 pub use types::*;
@@ -2119,8 +2119,10 @@ fn parse_sqref(s: &str) -> Vec<CellRange> {
 /// `Vec` and the sparkline is simply not drawn (the renderer iterates the value
 /// slice by index, so an empty slice draws nothing — graceful degradation, not
 /// a hard error).
+#[cfg(test)]
 const MAX_SPARKLINE_CELLS: usize = MAX_REFERENCE_CELLS;
 
+#[cfg(test)]
 fn extract_range_values(sheet_xml: &str, range: &CellRange) -> Vec<Option<f64>> {
     extract_reference_cells(sheet_xml, range, &[])
         .into_iter()
