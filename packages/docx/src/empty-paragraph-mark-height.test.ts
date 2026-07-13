@@ -160,4 +160,34 @@ describe('empty paragraph mark line height (§17.3.1.29 / §17.3.1.33)', () => {
     expect(paragraphMarkLineHeight(p, 1, { type: null, linePitchPt: null }, false, false, ctx, {})).toBe(10);
     expect(paragraphMarkLineHeight(p, 1, { type: null, linePitchPt: null }, false, true, ctx, {})).toBe(30);
   });
+
+  it('counts an untabled 20pt East Asian mark as two cells on a 20pt grid', () => {
+    const p = {
+      ...para(''),
+      defaultFontSize: 20,
+      defaultFontFamilyEastAsia: 'ＭＳ 明朝',
+    } as DocParagraph;
+    let font = '';
+    const ctx = {
+      get font() { return font; },
+      set font(v: string) { font = v; },
+      measureText: () => ({
+        width: 0,
+        fontBoundingBoxAscent: 18,
+        fontBoundingBoxDescent: 2,
+        actualBoundingBoxAscent: 18,
+        actualBoundingBoxDescent: 2,
+      } as TextMetrics),
+    } as unknown as CanvasRenderingContext2D;
+
+    expect(paragraphMarkLineHeight(
+      p,
+      1,
+      { type: 'lines', linePitchPt: 20 },
+      false,
+      true,
+      ctx,
+      {},
+    )).toBe(40);
+  });
 });

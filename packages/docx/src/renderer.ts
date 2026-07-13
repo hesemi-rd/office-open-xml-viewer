@@ -10516,7 +10516,17 @@ export function measureShapeTextAutoFitHeight(
     const eastAsian = lineEa;
     // Ruby lines reserve real furigana height, so use the measured glyph box,
     // mirroring the body path.
-    return lineBoxHeight(ls, c.ascent, c.descent, scale, effState.docGrid, line.hasRuby ?? false, floorPx, eastAsian);
+    return lineBoxHeight(
+      ls,
+      c.ascent,
+      c.descent,
+      scale,
+      effState.docGrid,
+      line.hasRuby ?? false,
+      floorPx,
+      eastAsian,
+      line.gridCountSingle,
+    );
   };
 
   const spBefore = blocks.map((b) => (b.spaceBefore ?? 0) * scale);
@@ -10828,6 +10838,8 @@ export function renderShapeText(
     // floor falls back to this run's own ascii+eastAsia faces. Either way it is a
     // FLOOR (0 for all-untabled lines ⇒ unchanged).
     lineFloorPx?: number,
+    // Deterministic per-line docGrid count height produced by layoutLines.
+    gridCountSinglePx?: number,
     grid?: DocGridCtx,
     eastAsian = false,
     hasRuby = false,
@@ -10878,7 +10890,17 @@ export function renderShapeText(
       : null;
     // Ruby lines reserve real furigana height, so use the measured glyph box,
     // mirroring the body path.
-    const lineH = lineBoxHeight(ls, c.ascent, c.descent, scale, grid, hasRuby, intended, eastAsian);
+    const lineH = lineBoxHeight(
+      ls,
+      c.ascent,
+      c.descent,
+      scale,
+      grid,
+      hasRuby,
+      intended,
+      eastAsian,
+      gridCountSinglePx,
+    );
     // Baseline placement inside the line box, mirroring the body draw path
     // (~7859). §17.3.1.33 sizes the box; the placement is Word's OBSERVED
     // behaviour (#990), not an ECMA rule:
@@ -10952,6 +10974,7 @@ export function renderShapeText(
       // passed explicitly, so a shorter tabled segment still raises the box.
       tallest?.eaFloorFamily ?? b.fontFamily,
       floorPx,
+      line.gridCountSingle,
       effState.docGrid,
       eastAsian,
       line.hasRuby ?? false,
