@@ -4,6 +4,24 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.72.1 — 2026-07-13
+
+Patch (fix on v0.72.0). Preserves authored OOXML layout and grouped-drawing
+geometry that had been discarded or reconstructed from incomplete state before
+rendering, which shifted anchored content, lost legacy VML form shapes, and
+introduced pagination/border artifacts.
+
+- **docx:** preserve omitted-grid table borders, floating-layout constraints,
+  and line metrics consistently across measurement, pagination, and painting;
+  implement the legacy VML stroke/fill cascade (default colors, units, dashes,
+  endcaps, arrows, geometry) so authored form shapes render (ECMA-376 §17.4.14,
+  §17.4.15, §17.4.66, §17.4.85; Part 4 VML §19.1.2.21).
+- **DrawingML (docx / xlsx / pptx):** centralize group transforms in the shared
+  layer and propagate Annex L scale / rotation / flip semantics consistently
+  across all three formats (Annex L §L.4.7.4–L.4.7.6); carry pptx table, chart,
+  and media frame transforms through the parser contracts into rendering. No
+  document-path or sample-specific thresholds. (#1032)
+
 ## 0.72.0 — 2026-07-13
 
 Minor. A large docx fidelity cycle centered on **vertical writing (縦書き)** and
