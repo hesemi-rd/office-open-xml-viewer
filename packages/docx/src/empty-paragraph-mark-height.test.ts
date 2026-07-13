@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { renderDocumentToCanvas } from './renderer.js';
-import { paragraphMarkLineHeight } from './line-layout.js';
+import {
+  clearResolvedLocalFonts,
+  paginateDocument,
+  renderDocumentToCanvas,
+  setResolvedLocalFonts,
+} from './renderer.js';
+import { paragraphMarkBelowBaselinePt, paragraphMarkLineHeight } from './line-layout.js';
 import type {
   BodyElement,
   DocParagraph,
@@ -26,6 +31,7 @@ import type {
 // two code paths would coincide and the regression would be invisible.
 
 interface FillTextCall { text: string; x: number; y: number; }
+interface FillRectCall { x: number; y: number; width: number; height: number; }
 
 const ASC_RATIO = 0.95;
 const DESC_RATIO = 0.2; // sum = 1.15 em ≠ the old synthetic 0.8 + 0.2 = 1.0 em
@@ -65,6 +71,54 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; calls: FillTextCall
     getContext: () => ctx,
   };
   return { canvas: canvas as unknown as HTMLCanvasElement, calls };
+}
+
+function makeResolvedMetricCanvas(): {
+  canvas: HTMLCanvasElement;
+  textCalls: FillTextCall[];
+  rectCalls: FillRectCall[];
+} {
+  let font = '10px serif';
+  const textCalls: FillTextCall[] = [];
+  const rectCalls: FillRectCall[] = [];
+  const fontPx = () => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
+  const ctx = {
+    get font() { return font; },
+    set font(v: string) { font = v; },
+    letterSpacing: '0px',
+    measureText: (s: string) => {
+      const px = fontPx();
+      const local = font.includes('__ooxml_local_exact');
+      const ascent = px * (local ? 1.2 : 0.8);
+      const descent = px * (local ? 0.3 : 0.2);
+      return {
+        width: [...s].length * px * 0.5,
+        fontBoundingBoxAscent: ascent,
+        fontBoundingBoxDescent: descent,
+        actualBoundingBoxAscent: ascent,
+        actualBoundingBoxDescent: descent,
+      } as TextMetrics;
+    },
+    save() {}, restore() {}, beginPath() {}, closePath() {},
+    moveTo() {}, lineTo() {}, stroke() {}, fill() {}, strokeRect() {},
+    clip() {}, rect() {}, scale() {}, translate() {}, rotate() {},
+    setLineDash() {}, drawImage() {}, clearRect() {}, arc() {}, quadraticCurveTo() {},
+    bezierCurveTo() {}, createLinearGradient() { return { addColorStop() {} }; },
+    fillRect(x: number, y: number, width: number, height: number) {
+      rectCalls.push({ x, y, width, height });
+    },
+    fillText(text: string, x: number, y: number) { textCalls.push({ text, x, y }); },
+    strokeText() {},
+    fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
+    textAlign: 'left' as CanvasTextAlign, direction: 'ltr' as CanvasDirection,
+    globalAlpha: 1, lineCap: 'butt' as CanvasLineCap, lineJoin: 'miter' as CanvasLineJoin,
+  };
+  const canvas = {
+    width: 0, height: 0,
+    style: {} as Record<string, string>,
+    getContext: () => ctx,
+  };
+  return { canvas: canvas as unknown as HTMLCanvasElement, textCalls, rectCalls };
 }
 
 function textRun(text: string): DocxTextRun {
@@ -189,5 +243,99 @@ describe('empty paragraph mark line height (§17.3.1.29 / §17.3.1.33)', () => {
       ctx,
       {},
     )).toBe(40);
+  });
+
+  it('uses the resolved local alias and line ratio for the mark advance and baseline split', () => {
+    const p = {
+      ...para(''),
+      defaultFontSize: 10,
+      defaultFontFamily: 'Authored Family',
+    } as DocParagraph;
+    let font = '';
+    const ctx = {
+      get font() { return font; },
+      set font(v: string) { font = v; },
+      measureText: () => {
+        const local = font.includes('__ooxml_local_exact');
+        return {
+          width: 0,
+          fontBoundingBoxAscent: local ? 12 : 8,
+          fontBoundingBoxDescent: local ? 3 : 2,
+          actualBoundingBoxAscent: local ? 12 : 8,
+          actualBoundingBoxDescent: local ? 3 : 2,
+        } as TextMetrics;
+      },
+    } as unknown as CanvasRenderingContext2D;
+    const resolved = {
+      'authored family': { family: '__ooxml_local_exact', lineHeightRatio: 1.5 },
+    };
+
+    expect(paragraphMarkLineHeight(
+      p, 1, { type: null, linePitchPt: null }, false, false, ctx, {}, null, resolved,
+    )).toBe(15);
+    expect(paragraphMarkBelowBaselinePt(
+      p, { type: null, linePitchPt: null }, false, false, ctx, {}, null, resolved,
+    )).toBe(3);
+    expect(font).toBe('');
+  });
+
+  it('uses the same resolved local mark metrics for pagination and paint', async () => {
+    const authoredFamily = 'Authored Family';
+    const localPara = (text: string, shading?: string): DocParagraph => ({
+      ...para(text),
+      runs: text === ''
+        ? []
+        : [{ type: 'text', ...textRun(text), fontSize: 10, fontFamily: authoredFamily } as DocParagraph['runs'][number]],
+      defaultFontSize: 10,
+      defaultFontFamily: authoredFamily,
+      shading,
+    } as DocParagraph);
+    const model = docOf([
+      localPara('A'),
+      localPara('', 'c0ffee'),
+      localPara('B'),
+    ]);
+    model.section.pageWidth = 200;
+    model.section.pageHeight = 40;
+    model.fontFamilyClasses = {};
+    const resolved = {
+      'authored family': { family: '__ooxml_local_exact', lineHeightRatio: 1.5 },
+    };
+    const globalWithCanvas = globalThis as unknown as { OffscreenCanvas?: unknown };
+    const previousOffscreenCanvas = globalWithCanvas.OffscreenCanvas;
+    globalWithCanvas.OffscreenCanvas = class {
+      getContext() { return makeResolvedMetricCanvas().canvas.getContext('2d'); }
+    };
+    setResolvedLocalFonts(model, resolved);
+
+    try {
+      // Three 15pt local-face line boxes do not fit in the 40pt content band.
+      // Before the fix the empty mark used the authored fallback's 10pt box, so
+      // all three paragraphs were incorrectly packed onto one page.
+      const pages = paginateDocument(model);
+      expect(pages).toHaveLength(2);
+      expect(pages[0]).toHaveLength(2);
+      expect(pages[1]).toHaveLength(1);
+
+      const painted = [] as ReturnType<typeof makeResolvedMetricCanvas>[];
+      for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
+        const recording = makeResolvedMetricCanvas();
+        painted.push(recording);
+        await renderDocumentToCanvas(model, recording.canvas, pageIndex, {
+          dpr: 1,
+          width: 200,
+          prebuiltPages: pages,
+        });
+      }
+
+      expect(painted[0].textCalls.map((call) => call.text)).toContain('A');
+      expect(painted[0].textCalls.map((call) => call.text)).not.toContain('B');
+      expect(painted[1].textCalls.map((call) => call.text)).toContain('B');
+      expect(painted[0].rectCalls.some((call) => Math.abs(call.height - 15) < 1e-6)).toBe(true);
+    } finally {
+      clearResolvedLocalFonts(model);
+      if (previousOffscreenCanvas === undefined) delete globalWithCanvas.OffscreenCanvas;
+      else globalWithCanvas.OffscreenCanvas = previousOffscreenCanvas;
+    }
   });
 });

@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { paraShadingRect, paintedParagraphHeight } from './renderer.js';
+import {
+  paragraphBorderContentBox,
+  paraBorderSegments,
+  paraShadingRect,
+  paintedParagraphHeight,
+} from './renderer.js';
 import type { ParagraphBorders } from './types';
 
 // ECMA-376 §17.3.1.31 — paragraph shading fills the border BOX: it extends to
@@ -48,6 +53,62 @@ describe('paraShadingRect (§17.3.1.31 shading fills the border box)', () => {
     const r = paraShadingRect(0, 0, 100, 10, b, { suppressTop: true, suppressBottom: true }, 1);
     expect(r.y).toBe(-2);            // between space 2 (not top's 9)
     expect(r.h).toBe(10 + 2 + 0);    // top(between) 2 + bottom 0 (suppressed)
+  });
+});
+
+describe('paragraph border joins (§17.3.1.24)', () => {
+  it('includes a hanging first-line/list marker on the paragraph start side', () => {
+    expect(paragraphBorderContentBox(100, 500, 36, 0, -36, false)).toEqual({ x: 100, w: 500 });
+    expect(paragraphBorderContentBox(100, 500, 0, 36, -36, true)).toEqual({ x: 100, w: 500 });
+  });
+
+  it('does not expand toward a positive first-line indent', () => {
+    expect(paragraphBorderContentBox(100, 500, 36, 18, 12, false)).toEqual({ x: 136, w: 446 });
+  });
+
+  it('unions resolved marker bounds on either physical side', () => {
+    expect(paragraphBorderContentBox(
+      100,
+      500,
+      36,
+      18,
+      -18,
+      false,
+      { left: 90, right: 610 },
+    )).toEqual({ x: 90, w: 520 });
+  });
+
+  it('spans horizontal edges to the vertical border positions and vertical edges between them', () => {
+    const borders: ParagraphBorders = {
+      ...noEdges,
+      top: edge(1),
+      bottom: edge(2),
+      left: edge(4),
+      right: edge(5),
+    };
+
+    const segments = paraBorderSegments(10, 20, 100, 30, borders, undefined, 1);
+    expect(segments.map(({ side, x1, y1, x2, y2 }) => ({ side, x1, y1, x2, y2 }))).toEqual([
+      { side: 'top', x1: 6, y1: 19, x2: 115, y2: 19 },
+      { side: 'bottom', x1: 6, y1: 52, x2: 115, y2: 52 },
+      { side: 'left', x1: 6, y1: 19, x2: 6, y2: 52 },
+      { side: 'right', x1: 115, y1: 19, x2: 115, y2: 52 },
+    ]);
+  });
+
+  it('keeps a merged run open at an inner join when no between edge exists', () => {
+    const borders: ParagraphBorders = {
+      ...noEdges,
+      top: edge(1),
+      bottom: edge(2),
+      left: edge(4),
+      right: edge(5),
+    };
+
+    const segments = paraBorderSegments(10, 20, 100, 30, borders, { suppressBottom: true }, 1);
+    expect(segments.find((segment) => segment.side === 'bottom')).toBeUndefined();
+    expect(segments.find((segment) => segment.side === 'left')).toMatchObject({ y1: 19, y2: 50 });
+    expect(segments.find((segment) => segment.side === 'right')).toMatchObject({ y1: 19, y2: 50 });
   });
 });
 

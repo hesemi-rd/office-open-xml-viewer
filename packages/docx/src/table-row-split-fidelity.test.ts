@@ -213,22 +213,21 @@ describe('table row split fidelity — fragment-owned paint geometry', () => {
     const model = documentWithRow(row(splitText, 'top'), 60);
     const pages = paginateDocument(model);
     expect(pages).toHaveLength(2);
-    expect(firstSliceOnPage(pages, 0)).toEqual({ start: 0, end: 3 });
-    expect(firstSliceOnPage(pages, 1)).toEqual({ start: 3, end: 4 });
+    expect(firstSliceOnPage(pages, 0)).toEqual({ start: 0, end: 2 });
+    expect(firstSliceOnPage(pages, 1)).toEqual({ start: 2, end: 4 });
 
     const page2 = await renderPage(model, pages, 1, fragmentPaint);
     const paintedText = page2.texts.map((call) => call.text).join('');
-    expect(paintedText).toBe('丁'.repeat(16));
+    expect(paintedText).toBe('丙'.repeat(16) + '丁'.repeat(16));
     expect(paintedText).not.toContain('甲');
     expect(paintedText).not.toContain('乙');
-    expect(paintedText).not.toContain('丙');
   });
 
   it('keeps every centered continuation baseline at or below its row-top rule', async () => {
     const model = documentWithRow(row(splitText, 'center'), 60);
     const pages = paginateDocument(model);
     expect(pages).toHaveLength(2);
-    expect(firstSliceOnPage(pages, 1)).toEqual({ start: 3, end: 4 });
+    expect(firstSliceOnPage(pages, 1)).toEqual({ start: 2, end: 4 });
 
     const page2 = await renderPage(model, pages, 1, true);
     const topRule = page2.strokes.find(

@@ -46,7 +46,15 @@ import type {
 // migrated paragraph paints with zero measureText calls).
 // ─────────────────────────────────────────────────────────────────────────────
 
-interface Call { op: 'fill' | 'stroke' | 'img'; text: string; x: number; y: number; font: string; }
+interface Call {
+  op: 'fill' | 'stroke' | 'img';
+  text: string;
+  x: number;
+  y: number;
+  font: string;
+  scaleX: number;
+  scaleY: number;
+}
 
 /** `paginateDocument` builds its measure ctx from `new OffscreenCanvas(1,1)`,
  *  which the node test env lacks. Polyfill it with the SAME linear metric the
@@ -91,6 +99,19 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; calls: Call[]; meas
   let font = '10px serif';
   const calls: Call[] = [];
   let measures = 0;
+  let transform = { scaleX: 1, scaleY: 1, translateX: 0, translateY: 0 };
+  const transformStack: typeof transform[] = [];
+  const record = (op: Call['op'], text: string, x: number, y: number): void => {
+    calls.push({
+      op,
+      text,
+      x: transform.translateX + transform.scaleX * x,
+      y: transform.translateY + transform.scaleY * y,
+      font,
+      scaleX: transform.scaleX,
+      scaleY: transform.scaleY,
+    });
+  };
   const ctx = {
     get font() { return font; },
     set font(v: string) { font = v; },
@@ -105,14 +126,29 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; calls: Call[]; meas
         actualBoundingBoxAscent: p * 0.8, actualBoundingBoxDescent: p * 0.2,
       } as TextMetrics;
     },
-    save() {}, restore() {}, beginPath() {}, closePath() {},
+    save() { transformStack.push({ ...transform }); },
+    restore() { transform = transformStack.pop() ?? transform; },
+    beginPath() {}, closePath() {},
     moveTo() {}, lineTo() {}, stroke() {}, fill() {}, fillRect() {},
-    strokeRect() {}, clip() {}, rect() {}, scale() {}, translate() {}, rotate() {},
+    strokeRect() {}, clip() {}, rect() {},
+    scale(sx: number, sy: number) {
+      transform.scaleX *= sx;
+      transform.scaleY *= sy;
+    },
+    translate(x: number, y: number) {
+      transform.translateX += transform.scaleX * x;
+      transform.translateY += transform.scaleY * y;
+    },
+    rotate() {},
     setLineDash() {}, clearRect() {}, arc() {}, quadraticCurveTo() {},
     bezierCurveTo() {}, createLinearGradient() { return { addColorStop() {} }; },
-    drawImage(_img: unknown, x: number, y: number) { calls.push({ op: 'img', text: '', x, y, font }); },
-    fillText(s: string, x: number, y: number) { calls.push({ op: 'fill', text: s, x, y, font }); },
-    strokeText(s: string, x: number, y: number) { calls.push({ op: 'stroke', text: s, x, y, font }); },
+    drawImage(_img: unknown, ...args: number[]) {
+      const x = args.length >= 8 ? args[4] : args[0];
+      const y = args.length >= 8 ? args[5] : args[1];
+      record('img', '', x ?? 0, y ?? 0);
+    },
+    fillText(s: string, x: number, y: number) { record('fill', s, x, y); },
+    strokeText(s: string, x: number, y: number) { record('stroke', s, x, y); },
     fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
     textAlign: 'left' as CanvasTextAlign, direction: 'ltr' as CanvasDirection,
     globalAlpha: 1, lineCap: 'butt' as CanvasLineCap, lineJoin: 'miter' as CanvasLineJoin,
@@ -188,8 +224,8 @@ async function renderVariant(
 /** Render every page at the DEFAULT CSS scale (PT_TO_PX = 4/3, `width` OMITTED so
  *  scale = 4/3 ≠ 1) under an explicit (fragmentPaint, reuse) configuration; restore
  *  the flags after. At this scale the fragment path and the legacy reuse path both
- *  RESCALE their stored scale-1 partition (rescaleLayoutLines re-measures each line at
- *  the paint scale), so their streams must be byte-identical. */
+ *  map their stored scale-1 partition through the canonical viewport transform,
+ *  so their streams must be byte-identical. */
 async function renderVariantScaled(
   model: DocxDocumentModel,
   pages: PaginatedBodyElement[][],
@@ -352,10 +388,10 @@ describe('body paint byte-identity — fragment paint and compute-once line reus
     for (let p = 0; p < production.length; p++) {
       expect(production[p]).toEqual(reuse[p]);
     }
-    // Non-vacuity: the paint really ran at scale 4/3 — a fractional glyph px size in
-    // the recorded font proves the geometry was rescaled off scale 1 (a scale-1 paint
-    // would only ever show the integer '10px').
-    const scaled = production.flat().some((c) => c.op !== 'img' && /\d+\.\d+px/.test(c.font));
+    // Non-vacuity: the glyphs retain their canonical 10px shaping font and are
+    // mapped to the default 4/3 paint scale by the local Canvas transform.
+    const scaled = production.flat().some((c) =>
+      c.op !== 'img' && c.font.includes('10px') && Math.abs(c.scaleX - 4 / 3) < 1e-9);
     expect(scaled).toBe(true);
     expect(production.some((pg) => pg.length > 0)).toBe(true);
   });

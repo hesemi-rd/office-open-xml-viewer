@@ -215,6 +215,44 @@ describe('measureParagraph', () => {
     expect(paragraphOnlyMetrics.contentEndYPt).toBe(22);
   });
 
+  it('matches observed Word spacing for an explicit atLeast line on a body grid', () => {
+    const designRatio = 3269 / 2048;
+    const designMeasurer: TextMeasurer = {
+      context: makeContext(designRatio * 0.8, designRatio * 0.2),
+      fontFamilyClasses: {},
+    };
+    const explicitAtLeast = { value: 0, rule: 'atLeast' as const, explicit: true };
+    const result = measureParagraph(
+      paragraph({
+        spaceBefore: 0,
+        spaceAfter: 0,
+        lineSpacing: explicitAtLeast,
+        runs: [
+          { type: 'text', ...textRun('あ', { fontSize: 14, fontFamilyEastAsia: 'Test CJK' }) },
+          { type: 'break', breakType: 'line' },
+          { type: 'text', ...textRun('い', { fontSize: 10, fontFamilyEastAsia: 'Test CJK' }) },
+        ],
+      }),
+      layoutContext({
+        lineGrid: { active: true, pitchPt: 20 },
+        lineSpacing: explicitAtLeast,
+        spaceBeforePt: 0,
+        spaceAfterPt: 0,
+        hasEastAsianText: true,
+      }),
+      placement({ startYPt: 0 }),
+      designMeasurer,
+      environment({ documentHasEastAsianText: true }),
+    );
+
+    // Windows Word leaves the first explicit-atLeast line at its raw 14pt
+    // design height (slightly over one pitch), then keeps the ordinary line at
+    // one 20pt pitch. This is a compatibility fixture, not a normative claim
+    // that §17.3.1.33 or §17.6.5 defines this exception.
+    expect(result.lines.map((line) => line.advancePt))
+      .toEqual([14 * designRatio, 20]);
+  });
+
   it('treats an anchor-only paragraph as a paragraph mark', () => {
     const anchor: ImageRun = {
       imagePath: 'word/media/anchor.png', mimeType: 'image/png',

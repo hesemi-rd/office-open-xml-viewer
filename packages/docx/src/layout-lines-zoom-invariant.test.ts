@@ -5,7 +5,17 @@ import {
   __test_setLineReuseEnabled,
 } from './renderer.js';
 import { layoutLines, type LayoutSeg } from './line-layout.js';
-import type { BodyElement, DocParagraph, DocxDocumentModel, SectionProps, PaginatedBodyElement } from './types';
+import type {
+  BodyElement,
+  CellElement,
+  DocParagraph,
+  DocTable,
+  DocTableCell,
+  DocTableRow,
+  DocxDocumentModel,
+  SectionProps,
+  PaginatedBodyElement,
+} from './types';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Phase 4-1 B2 Stage 2 — ZOOM-INVARIANT line breaking.
@@ -13,9 +23,9 @@ import type { BodyElement, DocParagraph, DocxDocumentModel, SectionProps, Pagina
 // Word lays text out in the document's own coordinate space and treats the
 // display scale as a viewport transform: the line PARTITION (which glyphs land
 // on which line) is the same at every zoom. Stage 2 realises this by reusing the
-// paginator's scale-1 line PARTITION at ANY paint scale — re-measuring the glyph
-// geometry at the paint scale (so the pen tracks the glyphs) but never
-// re-deciding the wrap points — instead of re-running layoutLines' break
+// paginator's scale-1 line PARTITION at ANY paint scale — mapping ordinary body
+// glyph geometry through a viewport transform without re-deciding wrap points —
+// instead of re-running layoutLines' break
 // decisions at the paint scale, which under a real (hinted) font whose glyph
 // advance is NOT proportional to the font px size would shift wrap points as the
 // zoom changes (documented in layout-lines-scale-invariance.test.ts).
@@ -66,18 +76,22 @@ function makeMeasureStubCtx(): CanvasRenderingContext2D {
   getContext() { return makeMeasureStubCtx(); }
 };
 
-interface Draw { text: string; x: number; y: number; }
+interface Draw { text: string; x: number; y: number; right: number; font: string; scaleX: number; }
 
 /** A recording canvas backed by the SAME sub-linear metric. Records every text
  *  draw with its baseline y so the caller can reconstruct the per-line partition
  *  (glyphs sharing a baseline belong to one line). */
 function makeRecordingCanvas(): { canvas: HTMLCanvasElement; draws: Draw[] } {
   let font = '10px serif';
+  let letterSpacing = '0px';
+  let transform = { scaleX: 1, scaleY: 1, translateX: 0, translateY: 0 };
+  const stack: typeof transform[] = [];
   const draws: Draw[] = [];
   const ctx = {
     get font() { return font; },
     set font(v: string) { font = v; },
-    letterSpacing: '0px',
+    get letterSpacing() { return letterSpacing; },
+    set letterSpacing(v: string) { letterSpacing = v; },
     measureText: (s: string) => {
       const p = parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
       return {
@@ -86,13 +100,40 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; draws: Draw[] } {
         actualBoundingBoxAscent: p * 0.8, actualBoundingBoxDescent: p * 0.2,
       } as TextMetrics;
     },
-    save() {}, restore() {}, beginPath() {}, closePath() {},
+    save() { stack.push({ ...transform }); },
+    restore() { transform = stack.pop() ?? transform; },
+    beginPath() {}, closePath() {},
     moveTo() {}, lineTo() {}, stroke() {}, fill() {}, fillRect() {},
-    strokeRect() {}, clip() {}, rect() {}, scale() {}, translate() {}, rotate() {},
+    strokeRect() {}, clip() {}, rect() {},
+    scale(x: number, y: number) {
+      transform.scaleX *= x;
+      transform.scaleY *= y;
+    },
+    translate(x: number, y: number) {
+      transform.translateX += transform.scaleX * x;
+      transform.translateY += transform.scaleY * y;
+    },
+    rotate() {},
     setLineDash() {}, clearRect() {}, arc() {}, quadraticCurveTo() {},
     bezierCurveTo() {}, createLinearGradient() { return { addColorStop() {} }; },
     drawImage() {},
-    fillText(s: string, x: number, y: number) { if (s) draws.push({ text: s, x, y }); },
+    fillText(s: string, x: number, y: number) {
+      if (!s) return;
+      const p = parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
+      const worldX = transform.translateX + transform.scaleX * x;
+      const worldY = transform.translateY + transform.scaleY * y;
+      const spacing = parseFloat(letterSpacing) || 0;
+      const localAdvance =
+        subLinearWidth(s, p) + Math.max(0, [...s].length - 1) * spacing;
+      draws.push({
+        text: s,
+        x: worldX,
+        y: worldY,
+        right: worldX + transform.scaleX * localAdvance,
+        font,
+        scaleX: transform.scaleX,
+      });
+    },
     strokeText() {},
     fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
     textAlign: 'left' as CanvasTextAlign, direction: 'ltr' as CanvasDirection,
@@ -135,6 +176,41 @@ function doc(body: BodyElement[], pageHeight = 60): DocxDocumentModel {
     fontFamilyClasses: { 'Times New Roman': 'roman' },
     footnotes: [],
   } as unknown as DocxDocumentModel;
+}
+
+function oneCellTable(paragraph: DocParagraph): BodyElement {
+  const border = { style: 'single', color: '000000', width: 0.5 };
+  const cell: DocTableCell = {
+    content: [{ type: 'paragraph', ...paragraph } as CellElement],
+    colSpan: 1,
+    vMerge: null,
+    borders: { top: border, bottom: border, left: border, right: border, insideH: null, insideV: null },
+    background: null,
+    vAlign: 'top',
+    widthPt: 180,
+  } as DocTableCell;
+  const row: DocTableRow = {
+    cells: [cell],
+    rowHeight: null,
+    rowHeightRule: 'auto',
+    isHeader: false,
+  } as DocTableRow;
+  const table: DocTable = {
+    type: 'table',
+    colWidths: [180],
+    rows: [row],
+    borders: { top: border, bottom: border, left: border, right: border, insideH: null, insideV: null },
+    cellMarginTop: 0,
+    cellMarginBottom: 0,
+    cellMarginLeft: 0,
+    cellMarginRight: 0,
+    jc: 'left',
+    // A negative leading indent gate-excludes fragment paint, so the legacy
+    // table layout must share the canonical paragraph contract.
+    tblInd: -5,
+    layout: 'fixed',
+  } as DocTable;
+  return table as unknown as BodyElement;
 }
 
 /** Reconstruct the per-line TEXT partition from a paint stream: group draws by
@@ -190,6 +266,113 @@ describe('zoom-invariant line breaking (Phase 4-1 B2 Stage 2)', () => {
     const at1 = await partitionAtWidth(model, pages, 200);   // scale 1.0
     const at05 = await partitionAtWidth(model, pages, 100);  // scale 0.5
     expect(at05).toEqual(at1);
+  });
+
+  it('keeps a justified CJK line inside its right paragraph border at every scale', async () => {
+    const borderSpacePt = 4;
+    const p = para('あ'.repeat(240), {
+      alignment: 'justify',
+      borders: {
+        top: null,
+        bottom: null,
+        left: null,
+        right: { style: 'single', color: '000000', width: 0.5, space: borderSpacePt },
+        between: null,
+      },
+    });
+    const model = doc([p as unknown as BodyElement]);
+    const pages = paginateDocument(model);
+    expect(pages.length).toBeGreaterThan(1);
+
+    const paintScale = 0.5;
+    const runBoxes: { x: number; w: number; font: string; fontSize: number }[] = [];
+    const glyphDraws: Draw[] = [];
+    for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
+      const rec = makeRecordingCanvas();
+      await renderDocumentToCanvas(model, rec.canvas, pageIndex, {
+        dpr: 1,
+        width: model.section.pageWidth * paintScale,
+        prebuiltPages: pages,
+        onTextRun: ({ x, w, font, fontSize }) => runBoxes.push({ x, w, font, fontSize }),
+      });
+      glyphDraws.push(...rec.draws);
+    }
+
+    expect(runBoxes.length).toBeGreaterThan(0);
+    const rightBorderX =
+      (model.section.pageWidth - model.section.marginRight + borderSpacePt) * paintScale;
+    const rightmostRunX = Math.max(...runBoxes.map(({ x, w }) => x + w));
+    expect(rightmostRunX).toBeLessThanOrEqual(rightBorderX + 1e-6);
+    expect(Math.max(...glyphDraws.map(({ right }) => right))).toBeLessThanOrEqual(rightBorderX + 1e-6);
+    // Top-level body paragraphs intentionally have an empty story-container
+    // chain and still use the canonical document-space glyph transform.
+    expect(glyphDraws.some(({ font, scaleX }) =>
+      font.includes('10px') && Math.abs(scaleX - paintScale) < 1e-9)).toBe(true);
+    expect(runBoxes.every(({ font, fontSize }) => font.includes('5px') && fontSize === 5)).toBe(true);
+  });
+
+  it('keeps justified CJK inside a negative-indent legacy body table cell at every scale', async () => {
+    const model = doc([
+      oneCellTable(para('あ'.repeat(240), { alignment: 'justify' })),
+    ], 600);
+    const pages = paginateDocument(model);
+    expect(pages.length).toBeGreaterThan(0);
+
+    const paintScale = 0.5;
+    const glyphDraws: Draw[] = [];
+    const runRights: number[] = [];
+    for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
+      const rec = makeRecordingCanvas();
+      await renderDocumentToCanvas(model, rec.canvas, pageIndex, {
+        dpr: 1,
+        width: model.section.pageWidth * paintScale,
+        prebuiltPages: pages,
+        onTextRun: ({ x, w }) => runRights.push(x + w),
+      });
+      glyphDraws.push(...rec.draws);
+    }
+
+    expect(glyphDraws.length).toBeGreaterThan(0);
+    const tableRightX =
+      (model.section.marginLeft - 5 + 180) * paintScale;
+    expect(Math.max(...runRights)).toBeLessThanOrEqual(tableRightX + 1e-6);
+    expect(Math.max(...glyphDraws.map(({ right }) => right))).toBeLessThanOrEqual(tableRightX + 1e-6);
+    expect(glyphDraws.some(({ font, scaleX }) =>
+      font.includes('10px') && Math.abs(scaleX - paintScale) < 1e-9)).toBe(true);
+  });
+
+  it.each([
+    ['numbering marker', () => para('body', {
+      numbering: {
+        numId: 1, level: 0, format: 'decimal', text: '1.', indentLeft: 18,
+        tab: 18, suff: 'tab', jc: 'left',
+      },
+    })],
+    ['tab segment', () => para('body\ttail', {
+      tabStops: [{ pos: 60, alignment: 'left', leader: 'dot' }],
+    })],
+    ['math segment', () => {
+      const paragraph = para('body');
+      paragraph.runs.push({
+        type: 'math', display: false, fontSize: 10,
+        nodes: [{ kind: 'run', text: 'x+1', style: 'italic' }],
+      } as DocParagraph['runs'][number]);
+      return paragraph;
+    }],
+  ])('keeps %s on the established paint-scale path', async (_name, makeParagraph) => {
+    const model = doc([makeParagraph() as unknown as BodyElement], 600);
+    const pages = paginateDocument(model);
+    const rec = makeRecordingCanvas();
+    await renderDocumentToCanvas(model, rec.canvas, 0, {
+      dpr: 1,
+      width: model.section.pageWidth * 0.5,
+      prebuiltPages: pages,
+    });
+
+    const body = rec.draws.find((draw) => draw.text === 'body');
+    expect(body).toBeDefined();
+    expect(body!.font).toContain('5px');
+    expect(body!.scaleX).toBe(1);
   });
 
   it('CONTROL: the mock font is genuinely NON-linear — a paint-scale re-layout WOULD wrap differently', () => {

@@ -74,6 +74,8 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; calls: Call[]; meas
   let font = '10px serif';
   const calls: Call[] = [];
   let measures = 0;
+  let transform = { scaleX: 1, scaleY: 1, translateX: 0, translateY: 0 };
+  const stack: typeof transform[] = [];
   const ctx = {
     get font() { return font; },
     set font(v: string) { font = v; },
@@ -88,14 +90,46 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; calls: Call[]; meas
         actualBoundingBoxAscent: p * 0.8, actualBoundingBoxDescent: p * 0.2,
       } as TextMetrics;
     },
-    save() {}, restore() {}, beginPath() {}, closePath() {},
+    save() { stack.push({ ...transform }); },
+    restore() { transform = stack.pop() ?? transform; },
+    beginPath() {}, closePath() {},
     moveTo() {}, lineTo() {}, stroke() {}, fill() {}, fillRect() {},
-    strokeRect() {}, clip() {}, rect() {}, scale() {}, translate() {}, rotate() {},
+    strokeRect() {}, clip() {}, rect() {},
+    scale(x: number, y: number) {
+      transform.scaleX *= x;
+      transform.scaleY *= y;
+    },
+    translate(x: number, y: number) {
+      transform.translateX += transform.scaleX * x;
+      transform.translateY += transform.scaleY * y;
+    },
+    rotate() {},
     setLineDash() {}, clearRect() {}, arc() {}, quadraticCurveTo() {},
     bezierCurveTo() {}, createLinearGradient() { return { addColorStop() {} }; },
-    drawImage(_img: unknown, x: number, y: number) { calls.push({ op: 'img', text: '', x, y, font }); },
-    fillText(s: string, x: number, y: number) { calls.push({ op: 'fill', text: s, x, y, font }); },
-    strokeText(s: string, x: number, y: number) { calls.push({ op: 'stroke', text: s, x, y, font }); },
+    drawImage(_img: unknown, x: number, y: number) {
+      calls.push({
+        op: 'img', text: '',
+        x: transform.translateX + transform.scaleX * x,
+        y: transform.translateY + transform.scaleY * y,
+        font,
+      });
+    },
+    fillText(s: string, x: number, y: number) {
+      calls.push({
+        op: 'fill', text: s,
+        x: transform.translateX + transform.scaleX * x,
+        y: transform.translateY + transform.scaleY * y,
+        font,
+      });
+    },
+    strokeText(s: string, x: number, y: number) {
+      calls.push({
+        op: 'stroke', text: s,
+        x: transform.translateX + transform.scaleX * x,
+        y: transform.translateY + transform.scaleY * y,
+        font,
+      });
+    },
     fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
     textAlign: 'left' as CanvasTextAlign, direction: 'ltr' as CanvasDirection,
     globalAlpha: 1, lineCap: 'butt' as CanvasLineCap, lineJoin: 'miter' as CanvasLineJoin,

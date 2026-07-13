@@ -3,6 +3,7 @@ import { layoutDocument } from './document-layout.js';
 import { bodyFragmentFor, computePages } from './renderer.js';
 import { buildTableFragment } from './table-fragments.js';
 import * as layoutFragments from './layout-fragments.js';
+import { resolvedHorizontalBoundaryWidths } from './table-geometry.js';
 import {
   paragraphFragmentAdvancePt,
   tableFragmentHeightPt,
@@ -125,6 +126,10 @@ function table(rows: DocTableRow[], colWidths: number[], over: Partial<DocTable>
     jc: 'left', layout: 'fixed',
     ...over,
   } as unknown as DocTable;
+}
+
+function singleBorder(width: number) {
+  return { style: 'single', width, color: '#000000' } as const;
 }
 
 function doc(body: BodyElement[], pageHeight = 400): DocxDocumentModel {
@@ -423,6 +428,134 @@ describe('layoutDocument — table fragments', () => {
     expect(seen).toEqual(rows.map((_v, i) => i));
   });
 
+  it('re-resolves outer border footprints for each auto-height page slice', () => {
+    const rows = Array.from({ length: 3 }, (_value, index) =>
+      row([textCell(`row ${index}`)], { rowHeight: 20, rowHeightRule: 'auto' }));
+    const outer = singleBorder(4);
+    const inside = singleBorder(1);
+    const t = table(rows, [120], {
+      borders: {
+        top: outer,
+        bottom: outer,
+        left: null,
+        right: null,
+        insideH: inside,
+        insideV: null,
+      },
+    });
+
+    // The 30pt body band admits one row per page. Every emitted one-row table
+    // paints both horizontal edges as 4pt outer rules, so its 20pt content box
+    // reserves half of each rule: 20 + 2 + 2 = 24pt.
+    const tables = allTables(doc([t as unknown as BodyElement], 50));
+
+    expect(tables).toHaveLength(3);
+    expect(tables.map(({ table: fragment }) => fragment.rows[0].heightPt))
+      .toEqual([24, 24, 24]);
+  });
+
+  it('chooses the largest fitting mixed exact/auto slice endpoint', () => {
+    const outer = singleBorder(12);
+    const rows = [
+      row([cell([])], { rowHeight: 10, rowHeightRule: 'auto' }),
+      row([cell([])], { rowHeight: 1, rowHeightRule: 'exact' }),
+      row([cell([])], { rowHeight: 10, rowHeightRule: 'auto' }),
+      row([cell([])], { rowHeight: 1, rowHeightRule: 'exact' }),
+      row([cell([])], { rowHeight: 10, rowHeightRule: 'auto' }),
+    ];
+    const t = table(rows, [120], {
+      borders: {
+        top: outer,
+        bottom: outer,
+        left: null,
+        right: null,
+        insideH: null,
+        insideV: null,
+      },
+    });
+
+    // Prefix slice heights are non-monotonic because exact rows already contain
+    // their complete §17.4.80 boxes: [22, 17, 33, 28, 44]. The 32pt band must
+    // therefore select the four-row endpoint (28pt), not the two-row endpoint.
+    const tables = allTables(doc([t as unknown as BodyElement], 52));
+
+    expect(tables.map(({ table: fragment }) => fragment.rows.length))
+      .toEqual([4, 1]);
+    expect(tables.map(({ table: fragment }) => tableFragmentHeightPt(fragment)))
+      .toEqual([28, 22]);
+  });
+
+  it('re-resolves repeated-header boundaries for each atLeast page slice', () => {
+    const rows = [
+      row([textCell('header')], {
+        isHeader: true,
+        rowHeight: 20,
+        rowHeightRule: 'atLeast',
+      }),
+      ...Array.from({ length: 3 }, (_value, index) =>
+        row([textCell(`body ${index}`)], { rowHeight: 20, rowHeightRule: 'atLeast' })),
+    ];
+    const outer = singleBorder(4);
+    const inside = singleBorder(1);
+    const t = table(rows, [120], {
+      borders: {
+        top: outer,
+        bottom: outer,
+        left: null,
+        right: null,
+        insideH: inside,
+        insideV: null,
+      },
+    });
+
+    // A header + one body row occupies 45pt in every slice:
+    //   header 20 + outer-top/2 2 + inside/2 0.5 = 22.5
+    //   body   20 + inside/2 0.5 + outer-bottom/2 2 = 22.5
+    const tables = allTables(doc([t as unknown as BodyElement], 70));
+
+    expect(tables).toHaveLength(3);
+    for (const { table: fragment } of tables) {
+      expect(fragment.rows.map((fragmentRow) => fragmentRow.heightPt))
+        .toEqual([22.5, 22.5]);
+    }
+  });
+
+  it('does not charge a repeated header outer-bottom while scanning body rows', () => {
+    const rows = [
+      row([textCell('header')], {
+        isHeader: true,
+        rowHeight: 20,
+        rowHeightRule: 'atLeast',
+      }),
+      ...Array.from({ length: 4 }, (_value, index) =>
+        row([textCell(`body ${index}`)], { rowHeight: 20, rowHeightRule: 'exact' })),
+    ];
+    const outer = singleBorder(4);
+    const inside = singleBorder(1);
+    const t = table(rows, [120], {
+      borders: {
+        top: outer,
+        bottom: outer,
+        left: null,
+        right: null,
+        insideH: inside,
+        insideV: null,
+      },
+    });
+
+    // The 63pt band fits header + two exact body rows: the non-exact header
+    // contributes outer-top/2 + insideH/2, while exact rows already contain
+    // their complete boxes. Treating the header alone during the scan would
+    // incorrectly charge outer-bottom/2 and stop after one body row.
+    const tables = allTables(doc([t as unknown as BodyElement], 83));
+
+    expect(tables).toHaveLength(2);
+    expect(tables.map(({ table: fragment }) => fragment.rows.length))
+      .toEqual([3, 3]);
+    expect(tables.map(({ table: fragment }) => tableFragmentHeightPt(fragment)))
+      .toEqual([62.5, 62.5]);
+  });
+
   it('keeps original row indices when a row taller than the page is split into pieces', () => {
     const tallCell = cell([
       { type: 'paragraph', ...para('あ'.repeat(400)) } as unknown as CellElement,
@@ -440,6 +573,45 @@ describe('layoutDocument — table fragments', () => {
     expect(fragmentRows.slice(0, -1).map((fragment) => fragment.sourceRowIndex))
       .toEqual(Array.from({ length: fragmentRows.length - 1 }, () => 0));
     expect(fragmentRows.at(-1)?.sourceRowIndex).toBe(1);
+  });
+
+  it('uses each split-row slice boundary when sizing its auto-height pieces', () => {
+    const outer = singleBorder(4);
+    const inside = singleBorder(1);
+    const tallCell = cell([
+      { type: 'paragraph', ...para('あ'.repeat(400)) } as unknown as CellElement,
+    ]);
+    const t = table([row([tallCell])], [120], {
+      borders: {
+        top: outer,
+        bottom: outer,
+        left: null,
+        right: null,
+        insideH: inside,
+        insideV: null,
+      },
+    });
+    const tables = allTables(doc([t as unknown as BodyElement], 120));
+    const cellContentHeight = (
+      layoutFragments as unknown as {
+        cellFragmentContentHeightPt: (fragment: CellFragment) => number;
+      }
+    ).cellFragmentContentHeightPt;
+
+    expect(tables.length).toBeGreaterThan(1);
+    for (const { table: fragment } of tables) {
+      const boundaries = resolvedHorizontalBoundaryWidths(fragment.source);
+      fragment.rows.forEach((fragmentRow, rowIndex) => {
+        const contentHeight = Math.max(
+          10,
+          ...fragmentRow.cells.map((fragmentCell) => cellContentHeight(fragmentCell)),
+        );
+        expect(fragmentRow.heightPt).toBeCloseTo(
+          contentHeight + (boundaries[rowIndex] + boundaries[rowIndex + 1]) / 2,
+          8,
+        );
+      });
+    }
   });
 
   it('repeats a leading header row on every continuation slice (§17.4.78)', () => {

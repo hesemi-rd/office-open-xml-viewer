@@ -2,8 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { renderDocumentToCanvas } from './renderer.js';
 import type { BodyElement, DocParagraph, DocxDocumentModel, SectionProps, ShapeRun } from './types';
 
-function makeRecordingCanvas(): { canvas: HTMLCanvasElement; fills: number } {
+function makeRecordingCanvas(): { canvas: HTMLCanvasElement; fills: number; strokes: number } {
   let fills = 0;
+  let strokes = 0;
   let font = '11px serif';
   const px = () => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '11');
   const ctx = {
@@ -25,7 +26,7 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; fills: number } {
     arc() {}, ellipse() {}, rect() {}, clip() {},
     translate() {}, rotate() {}, scale() {}, setLineDash() {},
     clearRect() {}, fillRect() {}, strokeRect() {}, drawImage() {},
-    stroke() {},
+    stroke() { strokes += 1; },
     fill() { fills += 1; },
     fillText() {}, strokeText() {},
     fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
@@ -40,6 +41,7 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; fills: number } {
   return {
     canvas: canvas as unknown as HTMLCanvasElement,
     get fills() { return fills; },
+    get strokes() { return strokes; },
   };
 }
 
@@ -86,6 +88,28 @@ function calloutWithTailArrow(): ShapeRun & { type: 'shape' } {
   } as unknown as ShapeRun & { type: 'shape' };
 }
 
+function plainLine(): ShapeRun & { type: 'shape' } {
+  return {
+    type: 'shape',
+    zOrder: 0,
+    subpaths: [],
+    presetGeometry: 'line',
+    fill: null,
+    stroke: '000000',
+    strokeWidth: 0.5,
+    widthPt: 120,
+    heightPt: 0.75,
+    anchorXPt: 40,
+    anchorYPt: 40,
+    anchorXFromMargin: false,
+    anchorYFromPara: true,
+    anchorXRelativeFrom: 'column',
+    anchorYRelativeFrom: 'paragraph',
+    wrapMode: 'none',
+    behindDoc: false,
+  } as unknown as ShapeRun & { type: 'shape' };
+}
+
 function docWith(body: BodyElement[]): DocxDocumentModel {
   return {
     section: {
@@ -108,6 +132,19 @@ function docWith(body: BodyElement[]): DocxDocumentModel {
 }
 
 describe('callout line-end rendering', () => {
+  it('strokes an undecorated line exactly once', async () => {
+    const rec = makeRecordingCanvas();
+
+    await renderDocumentToCanvas(
+      docWith([para([plainLine()])]),
+      rec.canvas,
+      0,
+      { dpr: 1, width: 300 },
+    );
+
+    expect(rec.strokes).toBe(1);
+  });
+
   it('draws a triangle tailEnd on the callout leader tip', async () => {
     const rec = makeRecordingCanvas();
 
@@ -119,5 +156,7 @@ describe('callout line-end rendering', () => {
     );
 
     expect(rec.fills).toBeGreaterThan(0);
+    // accentBorderCallout2: text-box border + accent bar + retracted leader.
+    expect(rec.strokes).toBe(3);
   });
 });

@@ -86,23 +86,24 @@ describe('lineBoxHeight — atLeast with an active line grid', () => {
     expect(lineBoxHeight(atLeast(24), 10, 2, 1, grid20)).toBe(24);
   });
 
-  // BEHAVIOUR PIN, not Word-verified ground truth. For an East Asian atLeast
-  // line the grid-minimum term is the natural-height cell count
-  // (docGridLineCells): a 12pt Yu Mincho line (design box 17.19px) on an 18pt
-  // pitch resolves to max(natural 17.19 / authored 18 / grid cell 18) = 18.
-  // No corpus sample exercises atLeast inside an active line grid and a Word
-  // fixture export could not be captured when this was pinned, so Word's exact
-  // atLeast-on-grid height is UNVERIFIED; the pin makes any future change to
-  // this resolution deliberate rather than accidental. Ruby lines keep the
-  // measured-glyph-box minimum (they reserve real furigana height).
-  it('[pin] EA atLeast takes max(natural, authored, grid cells) — unverified vs Word', () => {
+  // ECMA-376 defines the authored atLeast minimum and the active grid pitch,
+  // but not this precise tall-line interaction. The unsnapped result below is
+  // retained as observed Windows Word compatibility behavior.
+  it('takes the maximum of content, authored minimum, and one grid pitch', () => {
     expect(lineBoxHeight(atLeast(18), 12 * YU_ASC, 12 * YU_DESC, 1, grid18, false, 12 * YU, true)).toBe(18);
   });
-  it('[pin] EA atLeast still snaps to the grid cells when they exceed natural and authored', () => {
-    // 20pt design line 28.65px on pitch 18 → 2 cells = 36 > authored 18.
-    expect(lineBoxHeight(atLeast(18), 20 * YU_ASC, 20 * YU_DESC, 1, grid18, false, 20 * YU, true)).toBe(36);
+  it('does not round tall East Asian content up to an additional grid cell', () => {
+    // Observed output keeps a 20pt design line at 28.65px on an 18px pitch,
+    // rather than applying automatic grid rounding to 36px.
+    expect(lineBoxHeight(atLeast(18), 20 * YU_ASC, 20 * YU_DESC, 1, grid18, false, 20 * YU, true))
+      .toBeCloseTo(20 * YU, 12);
   });
-  it('[pin] a RUBY EA atLeast line keeps the measured glyph-box minimum', () => {
+  it('preserves automatic whole-cell rounding for inherited-only spacing', () => {
+    const inherited = { ...atLeast(18), explicit: false };
+    expect(lineBoxHeight(inherited, 20 * YU_ASC, 20 * YU_DESC, 1, grid18, false, 20 * YU, true))
+      .toBe(36);
+  });
+  it('keeps ruby atLeast lines rounded to cells that contain the annotation', () => {
     // glyph box 41px (base + furigana reserve) → ceil(41/18) = 3 cells = 54.
     expect(lineBoxHeight(atLeast(18), 33, 8, 1, grid18, true, 0, true)).toBe(54);
   });

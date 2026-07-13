@@ -53,11 +53,16 @@ import {
   drawUnderline,
   renderChart,
 } from '@silurus/ooxml-core';
-import type { MathNode, MathRenderer, KinsokuRules, HyperlinkTarget, NumberFormat, Duotone } from '@silurus/ooxml-core';
+import type { MathNode, MathRenderer, KinsokuRules, HyperlinkTarget, NumberFormat, Duotone, ResolvedLocalFontMetric } from '@silurus/ooxml-core';
 import { computePageNumbering } from './page-numbering.js';
 import { docxUnderlineToDrawingML } from './underline-map.js';
 import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
-import { resolveBorderConflict } from './cell-border-conflict.js';
+import {
+  resolveBorderConflict,
+  resolveCellEdges,
+  type CellEdgeFlags,
+  type ResolvedCellEdges,
+} from './cell-border-conflict.js';
 import {
   segmentsHaveRtl,
   computeLineVisualOrder,
@@ -105,6 +110,8 @@ import {
 import {
   findMergeEndRow,
   rowGridBefore,
+  applyTableRowBoundaryFootprints,
+  resolveTableRowContentHeights,
   resolveTableRowHeights,
   resolveSingleRowHeight,
 } from './table-geometry.js';
@@ -156,6 +163,8 @@ import {
   shapeRenderState,
   shapeRunToDocRun,
   segmentCharacterGridDeltaPx,
+  segmentEastAsiaFloorSingleLinePx,
+  segmentIntendedSingleLinePx,
   splitTextForLayout,
 } from './line-layout.js';
 import type {
@@ -407,6 +416,9 @@ export interface RenderState {
   /** ECMA-376 §17.8.3.10 — font→family map from word/fontTable.xml. Used by
    *  resolveFontFamily as the authoritative source of serif/sans-serif classification. */
   fontFamilyClasses: Record<string, string>;
+  /** Exact local faces and version-adaptive Word line metrics resolved before
+   * pagination. Keyed by normalized authored family. */
+  resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>>;
   /** ECMA-376 §17.15.1.58–.60 — resolved Japanese line-breaking rules
    *  (kinsoku enabled flag + line-start/line-end forbidden character sets).
    *  Default is the application's Japanese kinsoku table with kinsoku ON. */
@@ -588,6 +600,45 @@ function withTableCellStory(state: RenderState): RenderState {
       state.storyContext ?? BODY_STORY_CONTEXT,
     ),
   };
+}
+
+/** Whether a paragraph may use scale-1 glyph geometry as the single layout
+ * authority and map it to the paint viewport with a Canvas transform.
+ *
+ * Keep this predicate shared by paint and table-cell height measurement: row
+ * height / vAlign must reserve the exact line boxes that the glyph path draws.
+ * The excluded paths still have scale-aware layout or decoration behavior —
+ * including marker/tab-leader paint and math fallback — that has not yet been
+ * expressed entirely in canonical document coordinates. */
+function canonicalParagraphTextScaleEligible(
+  storyContext: StoryContext,
+  verticalCJK: boolean | undefined,
+  inFrame: boolean,
+  hasWrapContext: boolean,
+  paragraphContext: Pick<ParagraphLayoutContext, 'hasRuby' | 'baseRtl'>,
+  paragraph: Pick<DocParagraph, 'alignment' | 'numbering'>,
+  segments: readonly LayoutSeg[],
+): boolean {
+  // `containers=[]` is the deliberate top-level body case. Nested body text is
+  // accepted only while every enclosing story container is a table cell; other
+  // stories/containers keep their established paint-space paths.
+  const isSupportedBodyContainerChain =
+    storyContext.story === 'body'
+    && (storyContext.containers.length === 0
+      || storyContext.containers.every((container) => container.kind === 'tableCell'));
+  return !hasWrapContext
+    && !inFrame
+    && isSupportedBodyContainerChain
+    && !verticalCJK
+    && !paragraphContext.hasRuby
+    && !paragraphContext.baseRtl
+    && paragraph.numbering == null
+    && !segmentsHaveRtl(segments)
+    && kashidaLevelOf(paragraph.alignment) === null
+    && segments.every((segment) =>
+      !('isTab' in segment)
+      && !('mathNodes' in segment)
+      && (!('text' in segment) || segment.emphasisMark == null));
 }
 
 /** Information about a rendered text segment for building a transparent selection overlay. */
@@ -1097,6 +1148,31 @@ export async function preloadImages(
  */
 const renderTokens = new WeakMap<HTMLCanvasElement | OffscreenCanvas, number>();
 
+/** Async font resolution is document-scoped runtime state, not parser output.
+ * Keeping it in a WeakMap avoids mutating the public parsed model while both
+ * main-thread and worker renderers consume the same explicit document key. */
+const resolvedLocalFontsByDocument = new WeakMap<
+  DocxDocumentModel,
+  Readonly<Record<string, ResolvedLocalFontMetric>>
+>();
+
+export function setResolvedLocalFonts(
+  doc: DocxDocumentModel,
+  metrics: Readonly<Record<string, ResolvedLocalFontMetric>>,
+): void {
+  resolvedLocalFontsByDocument.set(doc, metrics);
+}
+
+export function clearResolvedLocalFonts(doc: DocxDocumentModel): void {
+  resolvedLocalFontsByDocument.delete(doc);
+}
+
+function resolvedLocalFontsFor(
+  doc: DocxDocumentModel,
+): Readonly<Record<string, ResolvedLocalFontMetric>> {
+  return resolvedLocalFontsByDocument.get(doc) ?? {};
+}
+
 /** True when a section flows VERTICALLY (glyphs stack top→bottom, lines advance
  *  across the page). `<w:sectPr><w:textDirection>` uses the TRANSITIONAL
  *  ST_TextDirection enum (ECMA-376 Part 4 §14.11.7; Word writes these, not the
@@ -1454,6 +1530,7 @@ async function renderDocumentToCanvasLeased(
   // get `doc` unchanged (referential identity ⇒ byte-identical). Text direction
   // is PER-SECTION (issue #1000), so the `vertical` flag is resolved per PAGE
   // below, after the stamped page frame is merged.
+  const resolvedLocalFonts = resolvedLocalFontsFor(doc);
   const layoutDoc = verticalLayoutDoc(doc);
   const layoutSettings = resolveDocumentLayoutSettings(layoutDoc);
   const kinsoku = layoutSettings.kinsoku;
@@ -1463,6 +1540,7 @@ async function renderDocumentToCanvasLeased(
     fontClassesWithPitches(layoutDoc.fontFamilyClasses, layoutDoc.fontFamilyPitches),
     layoutSettings,
     layoutDoc.footnotes ?? [],
+    resolvedLocalFonts,
   );
   const totalPages = Math.max(opts.totalPages ?? pages.length, pages.length);
   const elements = pages[pageIndex] ?? pages[0] ?? [];
@@ -1627,6 +1705,7 @@ async function renderDocumentToCanvasLeased(
     storyContext: BODY_STORY_CONTEXT,
     docEastAsian: layoutSettings.documentHasEastAsianText,
     fontFamilyClasses: fontClassesWithPitches(doc.fontFamilyClasses, doc.fontFamilyPitches),
+    resolvedLocalFonts,
     kinsoku,
     // §17.15.1.25 — automatic tab interval, resolved once and threaded like
     // `kinsoku` so the measure and draw passes agree.
@@ -2256,6 +2335,8 @@ export function computePages(
   settings?: DocSettings,
   /** Pre-resolved policy supplied by production entry points. */
   resolvedLayoutSettings?: DocumentLayoutSettings,
+  /** Exact local faces resolved before pagination; absent in pure unit callers. */
+  resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>> = {},
 ): PaginatedBodyElement[][] {
   // ECMA-376 §17.6.11: the body is inset from each page edge by the margin's MAGNITUDE
   // (a negative margin measures the body |margin| from the edge and overlaps the
@@ -2286,6 +2367,7 @@ export function computePages(
     section,
     fontFamilyClasses,
     documentSettings,
+    resolvedLocalFonts,
   );
   // ECMA-376 §17.6.20 + §17.4.80 (issue #988 batch-3 adjudication ④): in a
   // vertical (tbRl) section a block table is an UPRIGHT block: its cells lay
@@ -3665,8 +3747,9 @@ export function computePages(
         //
         // Lay the table out against the CURRENT column band and resolve its box +
         // per-row heights (B2 stage 1b: computeTableLayout is the ONE heavy
-        // measurement — its rowHeights drive the overflow test, the row-split
-        // greedy fit, and the paint-reuse stamp below; never re-measured). `tp` is
+        // measurement — whole-table rowHeights drive the overflow test, while
+        // rowContentHeights let each emitted slice resolve its own boundaries for
+        // fit, paint-reuse stamp, and FloatRect; cell content is never re-measured). `tp` is
         // the tblpPr under which the FIRST slice is placed (at the in-flow anchor);
         // continuation slices clone it with tblpY=0 so their box sits at body top.
         const tp = tbl.tblpPr;
@@ -3792,7 +3875,7 @@ export function computePages(
             tbl,
             tp,
             first.layout.colWidths, // scale-1 (px==pt) column grid, constant across slices
-            first.layout.rowHeights,
+            first.layout.rowContentHeights,
             slice1TopOffset,
             first.contentWPt,
             () => y,
@@ -3922,7 +4005,11 @@ export function computePages(
       // full content band. Resolve columns + row heights together (one min-content
       // scan) so both can be stamped for the paint pass (B2 table stage 1b).
       const tblContentWPt = colW();
-      const { colWidthsPt: tblColWidthsPt, rowHeightsPt: measuredRowHs } =
+      const {
+        colWidthsPt: tblColWidthsPt,
+        rowContentHeightsPt: measuredRowContentHs,
+        rowHeightsPt: measuredRowHs,
+      } =
         computeTablePtLayout(measureState, tbl, tblContentWPt);
       const tblWidthPt = tblColWidthsPt.reduce((sum, width) => sum + width, 0);
 
@@ -3981,13 +4068,17 @@ export function computePages(
       const tableContentH = effContentH() - tblReservePt;
       const splitRows = splitRowsTallerThanPage(
         tbl,
-        measuredRowHs,
+        measuredRowContentHs,
         tblColWidthsPt,
         tableContentH,
         measureState,
+        true,
       );
       const pageTable = splitRows?.table ?? tbl;
-      const rowHs = splitRows?.rowHs ?? measuredRowHs;
+      const rowContentHs = splitRows?.rowHs ?? measuredRowContentHs;
+      const rowHs = splitRows
+        ? applyTableRowBoundaryFootprints(pageTable, rowContentHs, 1)
+        : measuredRowHs;
       const sourceRowIndexByRow = splitRows?.sourceRowIndexByRow;
       const tableEl = { ...pageTable, type: 'table' } as PaginatedBodyElement;
       const h = rowHs.reduce((s, x) => s + x, 0);
@@ -3999,7 +4090,7 @@ export function computePages(
         // splitter may also divide that row by cell block boundaries, matching
         // Word's default table-row pagination.
         const endY = splitTableAcrossPages(
-          pageTable, rowHs, y, tableContentH, pages,
+          pageTable, rowContentHs, y, tableContentH, pages,
           // Table slices belong to THIS table element, so the new page's
           // pre-scan starts at `i` (this table's body index). The just-filled
           // column bottom folds into `maxColBottomY` so a following continuous
@@ -4015,7 +4106,11 @@ export function computePages(
           // B2 table stage 1b — stamp the scale-1 layout onto each slice so the
           // paint pass reuses it. Each slice records ITS rows' heights; the column
           // widths + contentWPt are constant across the split.
-          { colWidthsPt: tblColWidthsPt, contentWPt: tblContentWPt },
+          {
+            colWidthsPt: tblColWidthsPt,
+            contentWPt: tblContentWPt,
+            rowHeightsAreContent: true,
+          },
           { colWidthsPt: tblColWidthsPt, state: measureState },
           sourceRowIndexByRow,
           // PR 6 — attach each slice's table fragment (byte-identical additive step:
@@ -4280,6 +4375,7 @@ function paginateWithHeaderFooterReserve(
   fontFamilyClasses: Record<string, string>,
   layoutSettings: DocumentLayoutSettings,
   footnotes: DocNote[],
+  resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>> = {},
 ): PaginatedBodyElement[][] {
   // §17.15.1.25 — resolve once here so both pagination passes and the
   // reserve-measure state share the document's automatic tab interval.
@@ -4294,6 +4390,7 @@ function paginateWithHeaderFooterReserve(
     layoutSettings.defaultTabPt,
     doc.settings,
     layoutSettings,
+    resolvedLocalFonts,
   );
   // ECMA-376 §17.6.20 + §17.10.1 (issue #988): a vertical (tbRl) section lays its
   // header/footer out HORIZONTALLY in physical space with NO body reserve (see the
@@ -4314,7 +4411,13 @@ function paginateWithHeaderFooterReserve(
       (e) => e.type === 'sectionBreak' && !isVerticalTextDirection(e.textDirection ?? null),
     );
   if (!anyHorizontalSection) return pass1;
-  const measure = buildMeasureState(ctx, doc.section, fontFamilyClasses, layoutSettings);
+  const measure = buildMeasureState(
+    ctx,
+    doc.section,
+    fontFamilyClasses,
+    layoutSettings,
+    resolvedLocalFonts,
+  );
   // Issue #1000 — a horizontal page's header/footer must be measured against its
   // OWN frame: in a vertical-body mixed document the body-level `measure` is the
   // SWAPPED logical frame, which would wrap header/footer content at the wrong
@@ -4328,6 +4431,7 @@ function paginateWithHeaderFooterReserve(
           { ...doc.section, ...(g ?? {}), textDirection: null },
           fontFamilyClasses,
           layoutSettings,
+          resolvedLocalFonts,
         );
       }
     : (): RenderState => measure;
@@ -4350,6 +4454,7 @@ function paginateWithHeaderFooterReserve(
     layoutSettings.defaultTabPt,
     doc.settings,
     layoutSettings,
+    resolvedLocalFonts,
   );
 }
 
@@ -4381,6 +4486,7 @@ export function paginateDocument(doc: DocxDocumentModel): PaginatedBodyElement[]
   // the swapped doc here keeps the two passes consistent whether the pages are
   // prebuilt (this path) or paginated inline. Horizontal docs are unchanged
   // (referential identity).
+  const resolvedLocalFonts = resolvedLocalFontsFor(doc);
   const layoutDoc = verticalLayoutDoc(doc);
   const layoutSettings = resolveDocumentLayoutSettings(layoutDoc);
   return paginateWithHeaderFooterReserve(
@@ -4389,6 +4495,7 @@ export function paginateDocument(doc: DocxDocumentModel): PaginatedBodyElement[]
     fontClassesWithPitches(layoutDoc.fontFamilyClasses, layoutDoc.fontFamilyPitches),
     layoutSettings,
     layoutDoc.footnotes ?? [],
+    resolvedLocalFonts,
   );
 }
 
@@ -4414,6 +4521,7 @@ export function paginateDocument(doc: DocxDocumentModel): PaginatedBodyElement[]
 export function layoutDocument(doc: DocxDocumentModel): DocumentLayout {
   const ctx = new OffscreenCanvas(1, 1).getContext('2d');
   if (!ctx) return Object.freeze({ pages: Object.freeze([]) });
+  const resolvedLocalFonts = resolvedLocalFontsFor(doc);
   const layoutDoc = verticalLayoutDoc(doc);
   const layoutSettings = resolveDocumentLayoutSettings(layoutDoc);
   const pages = paginateWithHeaderFooterReserve(
@@ -4422,6 +4530,7 @@ export function layoutDocument(doc: DocxDocumentModel): DocumentLayout {
     fontClassesWithPitches(layoutDoc.fontFamilyClasses, layoutDoc.fontFamilyPitches),
     layoutSettings,
     layoutDoc.footnotes ?? [],
+    resolvedLocalFonts,
   );
   const layoutPages: LayoutPage[] = pages.map((elements, pageIndex) => {
     const firstEl = elements[0] as PaginatedBodyElement | undefined;
@@ -4482,6 +4591,7 @@ function buildMeasureState(
   section: SectionProps,
   fontFamilyClasses: Record<string, string> = {},
   layoutSettings: DocumentLayoutSettings,
+  resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>> = {},
 ): RenderState {
   const sectionLayout = resolveSectionLayoutContext(layoutSettings, section);
   return {
@@ -4525,6 +4635,7 @@ function buildMeasureState(
     storyContext: BODY_STORY_CONTEXT,
     docEastAsian: layoutSettings.documentHasEastAsianText,
     fontFamilyClasses,
+    resolvedLocalFonts,
     kinsoku: layoutSettings.kinsoku,
     defaultTabPt: layoutSettings.defaultTabPt,
     characterSpacingControl: layoutSettings.characterSpacingControl,
@@ -4577,6 +4688,7 @@ function paragraphMeasurementEnvironment(
     | 'verticalCJK'
     | 'verticalAllRotated'
     | 'docEastAsian'
+    | 'resolvedLocalFonts'
   >,
 ): ParagraphMeasurementEnvironment {
   return {
@@ -4593,6 +4705,7 @@ function paragraphMeasurementEnvironment(
     // "upright vertical" one. tbRl (no verticalAllRotated) is unchanged.
     verticalCJK: state.verticalCJK && !state.verticalAllRotated,
     documentHasEastAsianText: state.docEastAsian,
+    resolvedLocalFonts: state.resolvedLocalFonts,
   };
 }
 
@@ -5489,12 +5602,13 @@ function computeTablePtLayout(
   state: RenderState,
   table: DocTable,
   contentWPt: number,
-): { colWidthsPt: number[]; rowHeightsPt: number[] } {
+): { colWidthsPt: number[]; rowContentHeightsPt: number[]; rowHeightsPt: number[] } {
   const colWidthsPt = resolveColumnWidths(table, contentWPt, state);
-  const rowHeightsPt = resolveTableRowHeights(table, colWidthsPt, 1, (cell, cellW) =>
+  const rowContentHeightsPt = resolveTableRowContentHeights(table, colWidthsPt, 1, (cell, cellW) =>
     measureCellContentHeightPx(cell, table, cellW, 1, state),
   );
-  return { colWidthsPt, rowHeightsPt };
+  const rowHeightsPt = applyTableRowBoundaryFootprints(table, rowContentHeightsPt, 1);
+  return { colWidthsPt, rowContentHeightsPt, rowHeightsPt };
 }
 
 function estimateTableHeight(state: RenderState, table: DocTable, contentWPt: number): number {
@@ -6474,6 +6588,7 @@ function splitRowsTallerThanPage(
   colWidthsPt: number[],
   pageContentHeightPt: number,
   state: RenderState,
+  rowHeightsAreContent = false,
 ): { table: DocTable; rowHs: number[]; sourceRowIndexByRow: number[] } | null {
   let changed = false;
   const rows: DocTableRow[] = [];
@@ -6483,8 +6598,18 @@ function splitRowsTallerThanPage(
   for (let ri = 0; ri < table.rows.length; ri++) {
     const row = table.rows[ri];
     const rowH = rowHeightsPt[ri];
-    if (rowH > pageContentHeightPt) {
-      const split = splitRowForHeight(table, row, colWidthsPt, pageContentHeightPt, state);
+    const singleRowHeight = rowHeightsAreContent
+      ? applyTableRowBoundaryFootprints({ ...table, rows: [row] }, [rowH], 1)[0]
+      : rowH;
+    if (singleRowHeight > pageContentHeightPt) {
+      const boundaryFootprint = Math.max(0, singleRowHeight - rowH);
+      const split = splitRowForHeight(
+        table,
+        row,
+        colWidthsPt,
+        Math.max(0, pageContentHeightPt - boundaryFootprint),
+        state,
+      );
       if (split) {
         rows.push(...split.rows);
         heights.push(...split.heights);
@@ -6508,6 +6633,32 @@ function splitRowsTallerThanPage(
     );
   }
   return { table: outTable, rowHs: heights, sourceRowIndexByRow };
+}
+
+/** Pick the greatest safe slice endpoint whose fully materialized height fits.
+ * Endpoint heights are not monotonic: appending an exact §17.4.80 row can
+ * replace the preceding auto row's wide outer-bottom footprint with a narrow
+ * insideH boundary and make the longer slice shorter. The content-height scan
+ * performed by each paginator already limits `endpoints` to the tentative tail;
+ * walking that tail backwards therefore preserves the largest-fit contract and
+ * normally resolves only the already-known last candidate. The first safe
+ * endpoint is the forward-progress fallback even when one atomic row/span is
+ * taller than the page. */
+function selectLastFittingSliceEndpoint<T extends { usedPt: number }>(
+  endpoints: readonly number[],
+  availablePt: number,
+  materialize: (endpoint: number) => T,
+  knownLast?: { endpoint: number; value: T },
+): { endpoint: number; value: T } {
+  if (endpoints.length === 0) throw new Error('expected at least one safe table endpoint');
+  for (let index = endpoints.length - 1; index >= 0; index--) {
+    const endpoint = endpoints[index];
+    const value = knownLast?.endpoint === endpoint
+      ? knownLast.value
+      : materialize(endpoint);
+    if (value.usedPt <= availablePt || index === 0) return { endpoint, value };
+  }
+  throw new Error('unreachable table endpoint selection');
 }
 
 /**
@@ -6562,7 +6713,13 @@ export function splitTableAcrossPages(
    *  gets ITS rows' heights (sliced from `rowHs`, with the repeated header rows
    *  prepended on continuations so the stamp aligns 1:1 with the slice's rows).
    *  Omitted (direct unit tests) ⇒ slices carry no table stamp and paint recomputes. */
-  tableStamp?: { colWidthsPt: number[]; contentWPt: number },
+  tableStamp?: {
+    colWidthsPt: number[];
+    contentWPt: number;
+    /** Incoming row heights exclude horizontal rule footprints. Each emitted
+     * slice must resolve those footprints from its own first/last boundaries. */
+    rowHeightsAreContent?: boolean;
+  },
   /** Optional row-block splitter used by computePages. Direct unit tests can omit
    *  this and exercise only row-boundary splitting. */
   rowSplit?: { colWidthsPt: number[]; state: RenderState },
@@ -6601,8 +6758,44 @@ export function splitTableAcrossPages(
   while (headerCount < n && workRows[headerCount].isHeader) headerCount++;
   const headerRows = workRows.slice(0, headerCount);
   const headerSourceRowIndices = workSourceRowIndices.slice(0, headerCount);
-  const headerH = workRowHs.slice(0, headerCount).reduce((s, h) => s + h, 0);
   const headerHeightsPt = workRowHs.slice(0, headerCount);
+  const headerContentHeightPt = headerHeightsPt.reduce((sum, height) => sum + height, 0);
+
+  const materializeSlice = (
+    windowStart: number,
+    windowEnd: number,
+    isContinuation: boolean,
+  ): { rows: DocTableRow[]; heightsPt: number[]; usedPt: number } => {
+    const bodyRows = workRows.slice(windowStart, windowEnd);
+    // §17.4.85 — a slice that starts inside a vMerge span re-opens the merged
+    // cell so both paint and page-local boundary resolution see the same row.
+    const reopenedBody =
+      windowStart > 0 && bodyRows.length > 0 && bodyRows[0].cells.some((c) => c.vMerge === false)
+        ? [
+            reopenMergedCellsInRow(
+              workRows,
+              windowStart,
+              headerCount,
+              isContinuation,
+              workTable.colWidths.length,
+            ),
+            ...bodyRows.slice(1),
+          ]
+        : bodyRows;
+    const rows = isContinuation ? [...headerRows, ...reopenedBody] : reopenedBody;
+    const baseHeights = isContinuation
+      ? [...headerHeightsPt, ...workRowHs.slice(windowStart, windowEnd)]
+      : workRowHs.slice(windowStart, windowEnd);
+    const sliceTable = { ...workTable, rows };
+    const heightsPt = tableStamp?.rowHeightsAreContent
+      ? applyTableRowBoundaryFootprints(sliceTable, baseHeights, 1)
+      : baseHeights;
+    return {
+      rows,
+      heightsPt,
+      usedPt: heightsPt.reduce((sum, height) => sum + height, 0),
+    };
+  };
 
   let y = startY;
   let start = 0;
@@ -6611,9 +6804,9 @@ export function splitTableAcrossPages(
   while (start < n) {
     const isContinuation = !firstSlice && headerCount > 0 && start >= headerCount;
     const avail = contentH - y;
-    const firstRowH = (isContinuation ? headerH : 0) + workRowHs[start];
+    const firstRowH = materializeSlice(start, start + 1, isContinuation).usedPt;
     const freshAvail = contentH - colTop();
-    const rowAvail = avail - (isContinuation ? headerH : 0);
+    const rowAvail = Math.max(0, workRowHs[start] + avail - firstRowH);
     // The vMerge group starting at `start`: a restart row chained to its continue
     // rows. This renderer keeps such a group together across page breaks (Word's
     // observed behavior; ECMA-376 §17.4.85 defines the merge STRUCTURE but does not
@@ -6636,8 +6829,7 @@ export function splitTableAcrossPages(
     //     full page rather than splitting inside the region.
     let groupEnd = start;
     while (groupEnd + 1 < n && !tableBreakAllowedBefore(workTable, groupEnd + 1)) groupEnd++;
-    let groupH = isContinuation ? headerH : 0;
-    for (let r = start; r <= groupEnd; r++) groupH += workRowHs[r];
+    const groupH = materializeSlice(start, groupEnd + 1, isContinuation).usedPt;
     const relaxSpanBreak = groupH > contentH;
     const breakAllowedBefore = (ri: number): boolean =>
       tableBreakAllowedBefore(workTable, ri) ||
@@ -6678,16 +6870,34 @@ export function splitTableAcrossPages(
       firstSlice = false;
       continue;
     }
-    let used = isContinuation ? headerH : 0;
+    // In content-height mode the repeated header's bottom is not an outer edge
+    // once a body row is appended. Start from header CONTENT only; the exact
+    // endpoint materialization below supplies the header/body insideH and final
+    // outer-bottom footprints. Using a header-only materialization here can
+    // overestimate mixed atLeast/exact slices and stop one row early.
+    let used = tableStamp?.rowHeightsAreContent
+      ? (isContinuation ? headerContentHeightPt : 0)
+      : materializeSlice(start, start, isContinuation).usedPt;
     let end = start;
     let lastSafeEnd = start;
     let lastSafeUsed = used;
+    const safeEnds: number[] = [];
     // Always place at least one row to guarantee forward progress.
     while (end < n) {
-      const h = workRowHs[end];
-      if (end > start && used + h > avail) {
+      // Scan content heights linearly. Page-local boundary footprints are
+      // resolved only for the selected safe endpoints below; resolving the
+      // whole candidate slice for every row would make long-table pagination
+      // quadratic.
+      const candidateUsed = used + workRowHs[end];
+      if (end > start && candidateUsed > avail) {
         if (breakAllowedBefore(end)) {
-          const remainingForNextRow = avail - used;
+          const candidateWithBoundaries = tableStamp?.rowHeightsAreContent
+            ? materializeSlice(start, end + 1, isContinuation).usedPt
+            : candidateUsed;
+          const remainingForNextRow = Math.max(
+            0,
+            workRowHs[end] + avail - candidateWithBoundaries,
+          );
           if (rowSplit && remainingForNextRow > 0 && end >= headerCount) {
             const split = splitRowForHeight(
               workTable,
@@ -6734,31 +6944,34 @@ export function splitTableAcrossPages(
       if (end > start && breakAllowedBefore(end)) {
         lastSafeEnd = end;
         lastSafeUsed = used;
+        safeEnds.push(end);
       }
-      used += h;
+      used = candidateUsed;
       end++;
     }
 
-    const bodyRows = workRows.slice(start, end);
-    // §17.4.85 — a slice that STARTS inside a vMerge span (its first body row is a
-    // `vMerge=continue` row, because an over-tall span was broken at an interior
-    // boundary above) re-opens the merged cell so the paint pass draws its box on
-    // this page. Runtime-only clone; only the leading body row is rewritten, and a
-    // column already re-opened by a prepended repeated header is left untouched.
-    const reopenedBody =
-      start > 0 && bodyRows.length > 0 && bodyRows[0].cells.some((c) => c.vMerge === false)
-        ? [
-            reopenMergedCellsInRow(
-              workRows,
-              start,
-              headerCount,
-              isContinuation,
-              workTable.colWidths.length,
-            ),
-            ...bodyRows.slice(1),
-          ]
-        : bodyRows;
-    const sliceRows = isContinuation ? [...headerRows, ...reopenedBody] : reopenedBody;
+    // Content-only scanning can tentatively include a row whose page-local
+    // outer/inside rule footprint crosses the available band. Find the largest
+    // safe endpoint whose exact slice geometry fits.
+    let materialized = materializeSlice(start, end, isContinuation);
+    if (materialized.usedPt > avail && end > start + 1) {
+      const candidates = [
+        start + 1,
+        ...safeEnds.filter(
+          (candidateEnd) => candidateEnd > start + 1 && candidateEnd < end,
+        ),
+        ...(end > start + 1 ? [end] : []),
+      ];
+      const selected = selectLastFittingSliceEndpoint(
+        candidates,
+        avail,
+        (candidateEnd) => materializeSlice(start, candidateEnd, isContinuation),
+        { endpoint: end, value: materialized },
+      );
+      end = selected.endpoint;
+      materialized = selected.value;
+    }
+    const sliceRows = materialized.rows;
     const sliceEl = { ...workTable, type: 'table', rows: sliceRows } as PaginatedBodyElement;
     if (tagColIndex) sliceEl.colIndex = tagColIndex();
     if (colGeom) sliceEl.colGeom = colGeom;
@@ -6772,9 +6985,7 @@ export function splitTableAcrossPages(
     // B2 table stage 1b — stamp this slice's own row heights (repeated header rows
     // prepended on continuations, matching `sliceRows`) so the paint pass reuses
     // them 1:1 instead of re-measuring the slice.
-    const sliceHeightsPt = isContinuation
-      ? [...headerHeightsPt, ...workRowHs.slice(start, end)]
-      : workRowHs.slice(start, end);
+    const sliceHeightsPt = materialized.heightsPt;
     if (tableStamp) {
       stampTableLayout(sliceEl, tableStamp.colWidthsPt, sliceHeightsPt, tableStamp.contentWPt);
     }
@@ -6800,6 +7011,7 @@ export function splitTableAcrossPages(
     }
     pages[pages.length - 1].push(sliceEl);
 
+    used = materialized.usedPt;
     y += used;
     start = end;
     firstSlice = false;
@@ -6851,7 +7063,8 @@ export function splitFloatTableAcrossPages(
   table: DocTable,
   tp: TblpPr,
   colWidthsPt: number[],
-  rowHs: number[],
+  /** Per-row content boxes without horizontal boundary footprints. */
+  rowContentHs: number[],
   /** pt offset of slice 1's top below the flow cursor (`tp.tblpY × scale`; ~0 for
    *  a tblpY=1twip auto-converted float). Continuation slices ignore it (tblpY=0). */
   slice1TopOffset: number,
@@ -6872,9 +7085,39 @@ export function splitFloatTableAcrossPages(
    *  unit tests) ⇒ the slice is dropped (the test asserts geometry via a stub). */
   emitSlice?: (sliceEl: PaginatedBodyElement) => void,
 ): number {
-  const n = rowHs.length;
+  const n = rowContentHs.length;
   let start = 0;
   let firstSlice = true;
+
+  const materializeSlice = (
+    windowStart: number,
+    windowEnd: number,
+    isFirstSlice: boolean,
+  ): { element: PaginatedBodyElement; heightsPt: number[]; usedPt: number } => {
+    const sliceTp: TblpPr = isFirstSlice
+      ? tp
+      : { ...tp, vertAnchor: 'text', tblpY: 0, tblpYSpec: undefined };
+    const sliceTable = {
+      ...table,
+      type: 'table',
+      rows: table.rows.slice(windowStart, windowEnd),
+      tblpPr: sliceTp,
+    } as unknown as PaginatedBodyElement;
+    const contentHeights = rowContentHs.slice(windowStart, windowEnd);
+    // §17.4.66: resolve conflicts against this emitted slice, whose first/last
+    // rows now own outer edges. §17.4.80 exact rows remain complete boxes while
+    // auto/atLeast rows receive the resolved half-boundary footprints.
+    const heightsPt = applyTableRowBoundaryFootprints(
+      sliceTable as unknown as DocTable,
+      contentHeights,
+      1,
+    );
+    return {
+      element: sliceTable,
+      heightsPt,
+      usedPt: heightsPt.reduce((sum, height) => sum + height, 0),
+    };
+  };
 
   while (start < n) {
     // Slice top (content-relative pt): the in-flow anchor for slice 1, else the
@@ -6888,20 +7131,37 @@ export function splitFloatTableAcrossPages(
     // (i.e. slice 1 low on the page); a fresh page's `avail` already equals the max
     // band, so this never loops. (A row taller than a full page still gets placed
     // below, since then `avail == the max band` and the guard is false.)
-    if (rowHs[start] > avail && sliceTopRel > regionTopY()) {
+    const firstRowHeight = materializeSlice(start, start + 1, firstSlice).usedPt;
+    if (firstRowHeight > avail && sliceTopRel > regionTopY()) {
       advancePage();
       firstSlice = false;
       continue;
     }
 
-    // Greedy-fit rows [start, end); always take the first row (forward progress).
+    // Scan content boxes linearly. The selected safe endpoints are materialized
+    // below with their own outer/interior boundaries, avoiding both stale
+    // original-table footprints and per-candidate quadratic resolution.
     let used = 0;
     let end = start;
+    const safeEnds: number[] = [];
     while (end < n) {
-      const h = rowHs[end];
+      const h = rowContentHs[end];
       if (end > start && used + h > avail && tableBreakAllowedBefore(table, end)) break;
       used += h;
       end++;
+      if (end === n || tableBreakAllowedBefore(table, end)) safeEnds.push(end);
+    }
+
+    let materialized = materializeSlice(start, end, firstSlice);
+    if (materialized.usedPt > avail && safeEnds.length > 1) {
+      const selected = selectLastFittingSliceEndpoint(
+        safeEnds,
+        avail,
+        (candidateEnd) => materializeSlice(start, candidateEnd, firstSlice),
+        { endpoint: end, value: materialized },
+      );
+      materialized = selected.value;
+      end = selected.endpoint;
     }
 
     // Build the slice element: a subset of rows, its own tblpPr (slice 1 keeps the
@@ -6919,20 +7179,12 @@ export function splitFloatTableAcrossPages(
     // table), and sample-18/21 have no header rows — so the safe, observed behaviour
     // is to carry each row exactly once (UNOBSERVED for headers; revisit with a
     // header fixture if one surfaces).
-    const sliceTp: TblpPr = firstSlice
-      ? tp
-      : { ...tp, vertAnchor: 'text', tblpY: 0, tblpYSpec: undefined };
-    const sliceEl = {
-      ...table,
-      type: 'table',
-      rows: table.rows.slice(start, end),
-      tblpPr: sliceTp,
-    } as unknown as PaginatedBodyElement;
+    const sliceEl = materialized.element;
     // B2 stage 1b — stamp the full column grid (constant across slices) + this
     // slice's own rows so the paint pass (renderFloatTable → computeTableLayout)
     // reuses them 1:1 instead of re-measuring, and emitSlice's box math below reuses
     // the same stamp.
-    stampTableLayout(sliceEl, colWidthsPt, rowHs.slice(start, end), contentWPt);
+    stampTableLayout(sliceEl, colWidthsPt, materialized.heightsPt, contentWPt);
 
     emitSlice?.(sliceEl);
 
@@ -7577,6 +7829,8 @@ function renderEmptyMarkParagraph(
     contentX: number;
     indLeft: number;
     paraW: number;
+    borderX: number;
+    borderW: number;
     textAreaTopY: number;
     paragraphStartY: number;
     /** Flowed top of the mark line (output of resolveEmptyMarkTop). */
@@ -7589,21 +7843,24 @@ function renderEmptyMarkParagraph(
   },
 ): void {
   const { ctx, scale, dryRun } = state;
-  const { grid, paraHasRuby, contentX, indLeft, paraW, textAreaTopY,
+  const { grid, paraHasRuby, contentX, indLeft, paraW, borderX, borderW, textAreaTopY,
     paragraphStartY, markTop, totalLines, lineSlice, borderMerge } = markCtx;
   // Displacement applied by the float-flow (0 when the mark fits where it is).
   const flowShift = Math.max(0, markTop - textAreaTopY);
   if (markTop > state.y) state.y = markTop;
   const markRectTop = state.y;
-  const emptyH = paragraphMarkLineHeight(para, scale, grid, paraHasRuby, state.docEastAsian, ctx, state.fontFamilyClasses);
+  const emptyH = paragraphMarkLineHeight(
+    para, scale, grid, paraHasRuby, state.docEastAsian, ctx, state.fontFamilyClasses,
+    para.lineSpacing, state.resolvedLocalFonts,
+  );
   if (para.shading && !dryRun) {
     ctx.fillStyle = `#${para.shading}`;
-    const sb = paraShadingRect(contentX + indLeft, markRectTop, paraW, emptyH, para.borders, borderMerge, scale);
+    const sb = paraShadingRect(borderX, markRectTop, borderW, emptyH, para.borders, borderMerge, scale);
     ctx.fillRect(sb.x, sb.y, sb.w, sb.h);
   }
   state.y += emptyH;
   if (para.borders && !dryRun) {
-    drawParaBorders(ctx, contentX + indLeft, markRectTop, paraW, emptyH, para.borders, scale, state.dpr, borderMerge);
+    drawParaBorders(ctx, borderX, markRectTop, borderW, emptyH, para.borders, scale, state.dpr, borderMerge);
   }
   // Only the slice covering the FINAL line emits spaceAfter. With no inline
   // lines there is a single slice, so this is the whole paragraph. §17.3.1.7: a
@@ -7654,6 +7911,8 @@ function frameAnchorLineHeightPx(
       state.docEastAsian,
       state.ctx,
       state.fontFamilyClasses,
+      p.lineSpacing,
+      state.resolvedLocalFonts,
     );
   }
   const fp = frameEl as unknown as DocParagraph;
@@ -7665,6 +7924,8 @@ function frameAnchorLineHeightPx(
     state.docEastAsian,
     state.ctx,
     state.fontFamilyClasses,
+    fp.lineSpacing,
+    state.resolvedLocalFonts,
   );
 }
 
@@ -7811,6 +8072,9 @@ interface NumberingMarkerLayout {
   picBullet: { bmp: DecodedImage; w: number; h: number } | null;
   numBodyOffset: number;
   markerJcShiftPx: number;
+  /** Resolved marker ink width in px. Uses the decoded picture-bullet width when
+   *  present, otherwise the marker glyph measurement in its resolved font. */
+  markerWidthPx: number;
   hasMarker: boolean;
 }
 
@@ -7839,6 +8103,7 @@ function resolveNumberingMarker(
   // 0 = left (default); −markerW = right (period-aligned numerals: right edge at
   // firstLineX); −markerW/2 = centre. Set in the numbering block below.
   let markerJcShiftPx = 0;
+  let markerWidthPx = 0;
   if (para.numbering) {
     numMarker = para.numbering.text;
     numTab = para.numbering.tab * scale;
@@ -7864,6 +8129,7 @@ function resolveNumberingMarker(
       ctx.font = buildFont(false, false, getDefaultFontSize(para) * scale, markerFontFamily(para.numbering), fontFamilyClasses);
       markerW = ctx.measureText(markerDisplayText(para.numbering)).width;
     }
+    markerWidthPx = markerW;
     // §17.9.8 lvlJc: shift the marker so its left/right/centre aligns at
     // firstLineX (the hanging-indent reference). The marker's RIGHT edge measured
     // from paraX (the indentLeft tab) is then `indFirst + shift + markerW`.
@@ -7905,7 +8171,40 @@ function resolveNumberingMarker(
   }
   // True when the paragraph has any marker to draw (text glyph OR picture bullet).
   const hasMarker = numMarker !== '' || picBullet !== null;
-  return { numTab, picBullet, numBodyOffset, markerJcShiftPx, hasMarker };
+  return { numTab, picBullet, numBodyOffset, markerJcShiftPx, markerWidthPx, hasMarker };
+}
+
+/** Resolved numbering-marker bounds in the paragraph's physical coordinate
+ * space. §17.9.7 applies lvlJc at the logical first-line margin; the RTL result
+ * is therefore the physical mirror of LTR. `markerWidthPx` already represents
+ * either measured text ink or the resolved picture-bullet width. */
+function numberingMarkerBorderBounds(
+  contentX: number,
+  contentW: number,
+  physicalIndentLeft: number,
+  physicalIndentRight: number,
+  firstIndent: number,
+  markerJcShiftPx: number,
+  markerWidthPx: number,
+  numTab: number,
+  baseRtl: boolean,
+): { left: number; right: number } {
+  if (!baseRtl) {
+    const left = contentX + physicalIndentLeft + firstIndent + markerJcShiftPx;
+    return { left, right: left + markerWidthPx };
+  }
+  const anchor = contentX + contentW - physicalIndentRight - firstIndent;
+  const mirroredRight = anchor - markerJcShiftPx;
+  const mirroredLeft = mirroredRight - markerWidthPx;
+  // The established RTL draw path anchors the marker's right edge `numTab`
+  // beyond the aligned body start. Its maximum physical-right position is the
+  // paragraph start edge plus numTab (other text alignments can only move it
+  // inward). Union that actual paint envelope with the mirrored lvlJc bounds.
+  const paintedRight = contentX + contentW - physicalIndentRight + numTab;
+  return {
+    left: Math.min(mirroredLeft, paintedRight - markerWidthPx),
+    right: Math.max(mirroredRight, paintedRight),
+  };
 }
 
 function renderParagraph(
@@ -7993,12 +8292,34 @@ function renderParagraph(
   const indFirst = inFrame ? 0 : para.indentFirst * scale;
 
   // Numbering marker layout (§17.9.x): see resolveNumberingMarker.
-  const { numTab, picBullet, numBodyOffset, markerJcShiftPx, hasMarker } =
+  const { numTab, picBullet, numBodyOffset, markerJcShiftPx, markerWidthPx, hasMarker } =
     resolveNumberingMarker(para, state, indLeft, indFirst);
 
   const paraX = contentX + indLeft;
   const firstLineX = paraX + indFirst;
   const paraW = contentW - indLeft - indRight;
+  const markerBounds = hasMarker
+    ? numberingMarkerBorderBounds(
+        contentX,
+        contentW,
+        indLeft,
+        indRight,
+        indFirst,
+        markerJcShiftPx,
+        markerWidthPx,
+        numTab,
+        baseRtl,
+      )
+    : undefined;
+  const borderBox = paragraphBorderContentBox(
+    contentX,
+    contentW,
+    indLeft,
+    indRight,
+    indFirst,
+    baseRtl,
+    markerBounds,
+  );
 
   // ECMA-376 §17.9.28 (`<w:suff>`) governs where a numbering marker's first-line
   // body starts. With suff=tab (default) the body advances to the indentLeft tab
@@ -8069,7 +8390,9 @@ function renderParagraph(
     // Literally-empty paragraph: one paragraph-mark line box, no inline content
     // and (by construction in the paginator) never sliced.
     renderEmptyMarkParagraph(para, state, {
-      grid, paraHasRuby, contentX, indLeft, paraW, textAreaTopY, paragraphStartY,
+      grid, paraHasRuby, contentX, indLeft, paraW,
+      borderX: borderBox.x, borderW: borderBox.w,
+      textAreaTopY, paragraphStartY,
       markTop: resolveEmptyMarkTop(), totalLines: 0, lineSlice: undefined, borderMerge,
     });
     return;
@@ -8086,6 +8409,7 @@ function renderParagraph(
     columnXPt: contentX,
     columnWidthPt: contentW,
     floats: state.floats,
+    paragraphMarkLineStartWidth: paragraphMarkEmPx(para, scale),
     lineBoxH: (a, d, _h, is, ea, gc) => lineBoxHeight(
       para.lineSpacing,
       a,
@@ -8101,6 +8425,21 @@ function renderParagraph(
     ),
     pageH: state.pageH,
   } : undefined;
+  // The canonical scale-1 paint bridge is intentionally limited to ordinary
+  // horizontal paragraphs in the body story, including body-table cells (and
+  // nested body tables). Float wrapping still lays out directly in paint-space;
+  // non-body stories, frames, bidi/kashida, ruby, emphasis marks, and vertical
+  // text retain their established scale-aware draw paths until each has dedicated
+  // canonical-transform coverage.
+  const canonicalTextScale = canonicalParagraphTextScaleEligible(
+    state.storyContext ?? BODY_STORY_CONTEXT,
+    state.verticalCJK,
+    inFrame,
+    wrapCtx !== undefined,
+    paragraphContext,
+    para,
+    segments,
+  );
 
   // ECMA-376 §17.3.1.12 (hanging) + §17.3.1.38 (a hanging indent implicitly
   // creates a tab stop at indentLeft) + §17.9.28 (`<w:suff>`, default "tab"):
@@ -8126,10 +8465,10 @@ function renderParagraph(
   // Phase 4-1 B2 Stage 2 — compute-once, ZOOM-INVARIANT reuse. When the paginator
   // split this paragraph it stamped the scale-1 lines it laid out
   // (splitParagraphAcrossPages). Reuse the scale-1 line PARTITION at ANY paint
-  // scale — skipping this scale's line-BREAK decisions — and rehydrate to the
-  // paint scale by RE-MEASURING each line's glyph geometry at the paint scale
-  // (rescaleLayoutLines: advance + box + tabs, so measure == draw with no hinting
-  // drift; scale 1 returns the stamp unchanged). This is a deliberate BEHAVIOUR
+  // scale — skipping this scale's line-BREAK decisions. Ordinary horizontal body
+  // paragraphs map their complete scale-1 geometry through a Canvas viewport
+  // transform; excluded legacy paths re-measure at paint scale. Scale 1 returns
+  // the stamp unchanged. This is a deliberate BEHAVIOUR
   // CHANGE from Stage 1, which reused only at scale 1 and otherwise re-ran the
   // break decisions at the paint scale: with a real (hinted) font those decisions
   // could move wrap points as the zoom changes, whereas Word lays text out in the
@@ -8188,8 +8527,8 @@ function renderParagraph(
     // references legitimately differ while the rules are identical.
     kinsokuRulesEquivalent(stamped.layoutLinesInputs.kinsoku, state.kinsoku);
   // Zoom-invariant line breaking (Phase 4-1 B2 Stage 2). Three cases, all feeding
-  // the SAME draw loop below; rescaleLayoutLines re-measures the geometry at the
-  // paint scale off the scale-1 PARTITION (so measure == draw, no hinting drift):
+  // the SAME draw loop below; rescaleLayoutLines bridges the scale-1 PARTITION to
+  // paint using canonical geometry when eligible, or legacy paint-scale metrics:
   //  1. reuse — the paginator's scale-1 stamp.
   //  2. no float context — recompute the partition in the paginator's SAME scale-1
   //     space (paraW1 / firstIndent1 / indLeft1 / gridDelta1). A paragraph that
@@ -8216,14 +8555,14 @@ function renderParagraph(
     // paint scale via the same bridge the reuse gate uses. No re-layout, so paint
     // scales stored geometry only (scale 1 returns the partition unchanged, so a
     // scale-1 paint invokes no measureText).
-    ? rescaleLayoutLines([...suppliedScale1Lines], scale, ctx, state.fontFamilyClasses, paintGridDeltaPx)
+    ? rescaleLayoutLines([...suppliedScale1Lines], scale, ctx, state.fontFamilyClasses, paintGridDeltaPx, canonicalTextScale)
     : reuse
-    ? rescaleLayoutLines(stamped.layoutLines as LayoutLine[], scale, ctx, state.fontFamilyClasses, paintGridDeltaPx)
+    ? rescaleLayoutLines(stamped.layoutLines as LayoutLine[], scale, ctx, state.fontFamilyClasses, paintGridDeltaPx, canonicalTextScale)
     : wrapCtx
       ? layoutLines(ctx, segments, paraW, firstLineIndent, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, paintGridDeltaPx, state.defaultTabPt, marginRightPx, baseRtl, jcIsFullyJustified(para.alignment), jcStretchesLastLine(para.alignment))
       : rescaleLayoutLines(
           layoutLines(ctx, segments, paraW1, firstIndent1, 1, para.tabStops, undefined, state.fontFamilyClasses, indLeft1, state.kinsoku, gridDelta1, state.defaultTabPt, marginRightPx1, baseRtl, jcIsFullyJustified(para.alignment), jcStretchesLastLine(para.alignment)),
-          scale, ctx, state.fontFamilyClasses, paintGridDeltaPx,
+          scale, ctx, state.fontFamilyClasses, paintGridDeltaPx, canonicalTextScale,
         );
 
   // Decimal-tab auto-alignment. ECMA-376 (§17.3.1.37 tabs / §17.18.84 ST_TabJc
@@ -8267,7 +8606,9 @@ function renderParagraph(
     // honor a paginator-split slice (spaceAfter on the final slice, anchor
     // images on the first).
     renderEmptyMarkParagraph(para, state, {
-      grid, paraHasRuby, contentX, indLeft, paraW, textAreaTopY, paragraphStartY,
+      grid, paraHasRuby, contentX, indLeft, paraW,
+      borderX: borderBox.x, borderW: borderBox.w,
+      textAreaTopY, paragraphStartY,
       markTop: resolveEmptyMarkTop(), totalLines: lines.length, lineSlice, borderMerge,
     });
     return;
@@ -8303,16 +8644,11 @@ function renderParagraph(
   // must not fill to the full-paragraph height past the slice's bottom border.
   const sliceStart = lineSlice ? lineSlice.start : 0;
   const sliceEnd = lineSlice ? lineSlice.end : lines.length;
-  // The slice is authoritative for WHICH lines land on this page, but THIS
-  // pass's `lines` array is authoritative for how many lines the text actually
-  // occupies at this scale (pagination lays out at scale 1; ctx.measureText is
-  // not perfectly scale-invariant, so a long narrow paragraph can wrap to a
-  // slightly different line count here than the scale-1 slice assumed). Cap the
-  // iteration at lines.length so we paint every real line and never index a
-  // phantom line that only existed in the scale-1 measurement (lines[i] would be
-  // undefined → "Cannot read properties of undefined"). The overflow is bounded
-  // (at most a line or two), so all the paragraph's text is still painted across
-  // its slices. `paintEnd` also bounds the shading height below.
+  // The slice is authoritative for WHICH lines land on this page. Canonically
+  // scaled body paragraphs retain the exact scale-1 count; excluded float/legacy
+  // paths may still lay out at paint scale, so cap against their actual line array
+  // and never index a phantom slice line. `paintEnd` also bounds the shading
+  // height below.
   const paintEnd = Math.min(sliceEnd, lines.length);
 
   if (para.shading && !dryRun) {
@@ -8323,7 +8659,7 @@ function renderParagraph(
     // in the float-clearance and page-slice cases too, not just top/left/right.
     const paintedH = paintedParagraphHeight(lines, sliceStart, paintEnd, textAreaTopY, lineHForLine);
     ctx.fillStyle = `#${para.shading}`;
-    const sb = paraShadingRect(contentX + indLeft, textAreaTopY, paraW, paintedH, para.borders, borderMerge, scale);
+    const sb = paraShadingRect(borderBox.x, textAreaTopY, borderBox.w, paintedH, para.borders, borderMerge, scale);
     ctx.fillRect(sb.x, sb.y, sb.w, sb.h);
   }
 
@@ -8354,7 +8690,7 @@ function renderParagraph(
   // glyph lands on the box edge, so the painted advance equals measuredWidth by
   // construction. See the gridCharDeltaPx / gridSegDeltaPx header.
   const drawGridDeltaPx = gridCharDeltaPx(grid, scale);
-  const drawCtx: ParagraphLineDrawCtx = { ctx, scale, state, para, dryRun, defaultColor, fontFamilyClasses, contentX, contentW, lines, grid, paraHasRuby, paraX, firstLineX, paraW, indLeft, indFirst, continuesParagraph: lineSlice?.continues === true, baseRtl, hasMarker, markerUsesBodyOffset, numTab, numBodyOffset, markerJcShiftPx, picBullet, isJustified, stretchLastLine, alignEdge, paraNeedsBidi, decimalAutoTabPx, drawGridDeltaPx, lineHForLine };
+  const drawCtx: ParagraphLineDrawCtx = { ctx, scale, state, para, dryRun, defaultColor, fontFamilyClasses, contentX, contentW, lines, grid, paraHasRuby, paraX, firstLineX, paraW, indLeft, indFirst, continuesParagraph: lineSlice?.continues === true, baseRtl, hasMarker, markerUsesBodyOffset, numTab, numBodyOffset, markerJcShiftPx, picBullet, isJustified, stretchLastLine, alignEdge, paraNeedsBidi, decimalAutoTabPx, drawGridDeltaPx, canonicalTextScale, lineHForLine };
   for (let li = sliceStart; li < paintEnd; li++) {
     drawParagraphLine(li, drawCtx);
   }
@@ -8367,7 +8703,7 @@ function renderParagraph(
     // used above — the fill meets this bottom border by construction, in the
     // normal, float-clearance and page-slice cases alike.
     const textH = state.y - textAreaTopY;
-    drawParaBorders(ctx, contentX + indLeft, textAreaTopY, paraW, textH, para.borders, scale, state.dpr, borderMerge);
+    drawParaBorders(ctx, borderBox.x, textAreaTopY, borderBox.w, textH, para.borders, scale, state.dpr, borderMerge);
   }
 
   // spaceAfter is paragraph-level; only emit it on the slice that covers
@@ -8514,6 +8850,7 @@ interface ParagraphLineDrawCtx {
   paraNeedsBidi: boolean;
   decimalAutoTabPx: number | null;
   drawGridDeltaPx: number;
+  canonicalTextScale: boolean;
   lineHForLine: (l: LayoutLine) => number;
 }
 
@@ -8526,7 +8863,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
     contentX, contentW, lines, grid, paraHasRuby, paraX, firstLineX, paraW, indLeft,
     indFirst, continuesParagraph, baseRtl, hasMarker, markerUsesBodyOffset, numTab, numBodyOffset, markerJcShiftPx,
     picBullet, isJustified, stretchLastLine, alignEdge, paraNeedsBidi,
-    decimalAutoTabPx, drawGridDeltaPx, lineHForLine,
+    decimalAutoTabPx, drawGridDeltaPx, canonicalTextScale, lineHForLine,
   } = c;
     const line = lines[li];
     // ECMA-376 §17.6.20 + Part 4 §14.11.7 (#988 re-adjudication): only an
@@ -8571,7 +8908,15 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
     // centred below-baseline extent that is deliberately left unchanged; see
     // lineBelowBaselinePx in line-layout.ts.)
     const lineH = lineHForLine(line);
-    const glyphNatural = line.ascent + line.descent;
+    // A floating-anchor host can reserve line/grid height while painting no
+    // glyph. Keep that reservation in `lineH`, but position visible ink from
+    // the segments that actually draw. This preserves the host paragraph's
+    // advance without letting a differently-sized zero-ink run lower adjacent
+    // caption text (Word-compatible mixed-anchor behavior).
+    const visibleAscent = line.visibleAscent ?? line.ascent;
+    const visibleDescent = line.visibleDescent ?? line.descent;
+    const visibleIntendedSingle = line.visibleIntendedSingle ?? line.intendedSingle;
+    const glyphNatural = visibleAscent + visibleDescent;
     const autoMultiple =
       para.lineSpacing?.rule === 'auto' && !paraHasRuby && !isGridLineRule(grid);
     // For auto multiple spacing at or above 1×, centre the glyph only within
@@ -8580,9 +8925,9 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
     // 1×, centre against the authored compressed line box itself.
     const compressedAuto = autoMultiple && (para.lineSpacing?.value ?? 1) < 1;
     const centerBox = autoMultiple && !compressedAuto
-      ? Math.max(glyphNatural, line.intendedSingle)
+      ? Math.max(glyphNatural, visibleIntendedSingle)
       : lineH;
-    const baseline = state.y + (centerBox - glyphNatural) / 2 + line.ascent;
+    const baseline = state.y + (centerBox - glyphNatural) / 2 + visibleAscent;
 
     // Per-line X range (may be narrower than paraW when wrapping around floats).
     const lineLeft = paraX + line.xOffset;
@@ -8970,7 +9315,9 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
       const trailingDistributionGap = distributedStretch?.trailingGap ?? false;
       const internalStretch = (stretch?.internalStretch ?? 0) + (kashida?.advanceDeltaPx ?? 0);
       if (!dryRun) {
+        const useCanonicalTransform = canonicalTextScale && scale !== 1;
         const effSizePx = calcEffectiveFontPx(s, scale);
+        const glyphSizePx = calcEffectiveFontPx(s, useCanonicalTransform ? 1 : scale);
         // ECMA-376 §17.3.2.24 `<w:position>` — baseline raise(+)/lower(−) in pt.
         // Canvas y grows DOWNWARD, so a positive (raised) position subtracts from
         // y. It layers ON TOP of the super/sub offset (a positioned superscript
@@ -8982,7 +9329,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
             : s.vertAlign === 'sub'
               ? s.fontSize * scale * 0.15
               : 0) + positionOffset;
-        ctx.font = buildFont(s.bold, s.italic, effSizePx, s.fontFamily, fontFamilyClasses);
+        ctx.font = buildFont(s.bold, s.italic, glyphSizePx, s.fontFamily, fontFamilyClasses);
 
         // ECMA-376 §17.3.2.43 `<w:w>` horizontal glyph scale (1 = 100%) and
         // §17.3.2.35 `<w:spacing>` per-code-point character pitch in px. Both were
@@ -9199,6 +9546,15 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
             glyphDrawX = x + rtlWsShiftPx;
           }
         }
+        const glyphUnitScale = useCanonicalTransform ? scale : 1;
+        const glyphBaseline = useCanonicalTransform ? 0 : baseline + yOffset;
+        const glyphLocalX = (absolutePaintX: number): number =>
+          useCanonicalTransform ? (absolutePaintX - x) / scale : absolutePaintX;
+        if (useCanonicalTransform) {
+          ctx.save();
+          ctx.translate(x, baseline + yOffset);
+          ctx.scale(scale, scale);
+        }
         if (verticalUpright && s.tateChuYoko) {
           // ECMA-376 §17.3.2.10 縦中横 (horizontal-in-vertical): draw the whole run
           // horizontally, side by side, inside ONE cell of the vertical column.
@@ -9278,9 +9634,10 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           const fitDrawX = x + (fitRtl ? fitPad : 0) + rtlWsShiftPx;
           const scaled = segCharScale !== 1;
           const prevLetterSpacing = ctx.letterSpacing;
-          if (scaled) { ctx.save(); ctx.translate(fitDrawX, 0); ctx.scale(segCharScale, 1); }
-          ctx.letterSpacing = `${s.fitTextPerGapPx / segCharScale}px`;
-          ctx.fillText(glyphText, scaled ? 0 : fitDrawX, baseline + yOffset);
+          const fitLocalX = glyphLocalX(fitDrawX);
+          if (scaled) { ctx.save(); ctx.translate(fitLocalX, 0); ctx.scale(segCharScale, 1); }
+          ctx.letterSpacing = `${s.fitTextPerGapPx / glyphUnitScale / segCharScale}px`;
+          ctx.fillText(glyphText, scaled ? 0 : fitLocalX, glyphBaseline);
           ctx.letterSpacing = prevLetterSpacing;
           if (scaled) ctx.restore();
         } else if (segGridDelta !== 0) {
@@ -9328,16 +9685,17 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           const pieces = justifiedPiecePositions(
             cps,
             stretch?.splitBefore ?? [],
-            distPerGap / segCharScale,
+            distPerGap / glyphUnitScale / segCharScale,
             measure,
-            gridPlusSpacing / segCharScale,
+            gridPlusSpacing / glyphUnitScale / segCharScale,
           );
           const prevLetterSpacing = ctx.letterSpacing;
-          if (scaled) { ctx.save(); ctx.translate(x, 0); ctx.scale(segCharScale, 1); }
-          const originX = scaled ? 0 : x;
-          ctx.letterSpacing = `${gridPlusSpacing / segCharScale}px`;
+          const lineLocalX = glyphLocalX(x);
+          if (scaled) { ctx.save(); ctx.translate(lineLocalX, 0); ctx.scale(segCharScale, 1); }
+          const originX = scaled ? 0 : lineLocalX;
+          ctx.letterSpacing = `${gridPlusSpacing / glyphUnitScale / segCharScale}px`;
           for (const { text: piece, dx } of pieces) {
-            ctx.fillText(piece, originX + dx, baseline + yOffset);
+            ctx.fillText(piece, originX + dx, glyphBaseline);
           }
           ctx.letterSpacing = prevLetterSpacing;
           if (scaled) ctx.restore();
@@ -9362,9 +9720,10 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           // exactly: no transform, pieces at `x + dx`, pitch un-divided.
           const cps = [...drawText]; // code points (handles surrogate pairs)
           const scaled = segCharScale !== 1;
-          const originX = scaled ? 0 : x;
+          const lineLocalX = glyphLocalX(x);
+          const originX = scaled ? 0 : lineLocalX;
           const prevLetterSpacing = ctx.letterSpacing;
-          if (scaled) { ctx.save(); ctx.translate(x, 0); ctx.scale(segCharScale, 1); }
+          if (scaled) { ctx.save(); ctx.translate(lineLocalX, 0); ctx.scale(segCharScale, 1); }
           if (stretch.splitBefore.length === cps.length - 1) {
             // FULLY distributed: a gap was opened at EVERY inter-glyph boundary
             // (pure-CJK justify), so the pitch is UNIFORM. Drawing one glyph per
@@ -9387,8 +9746,8 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
             // Both fixed pitches are divided by `segCharScale` (see the arm header)
             // so the ×scale frame reproduces their un-scaled magnitude (a no-op
             // divide by 1 on the common non-w:w path).
-            ctx.letterSpacing = `${(distPerGap + segCharSpacingPx) / segCharScale}px`;
-            ctx.fillText(drawText, originX, baseline + yOffset);
+            ctx.letterSpacing = `${(distPerGap + segCharSpacingPx) / glyphUnitScale / segCharScale}px`;
+            ctx.fillText(drawText, originX, glyphBaseline);
           } else {
             const measure = (str: string): number => ctx.measureText(str).width;
             // Partial justify split: pass the char-spacing pitch both as the
@@ -9400,12 +9759,12 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
             for (const { text: piece, dx } of justifiedPiecePositions(
               cps,
               stretch.splitBefore,
-              distPerGap / segCharScale,
+              distPerGap / glyphUnitScale / segCharScale,
               measure,
-              segCharSpacingPx / segCharScale,
+              segCharSpacingPx / glyphUnitScale / segCharScale,
             )) {
-              ctx.letterSpacing = `${segCharSpacingPx / segCharScale}px`;
-              ctx.fillText(piece, originX + dx, baseline + yOffset);
+              ctx.letterSpacing = `${segCharSpacingPx / glyphUnitScale / segCharScale}px`;
+              ctx.fillText(piece, originX + dx, glyphBaseline);
             }
           }
           ctx.letterSpacing = prevLetterSpacing;
@@ -9420,13 +9779,13 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           // (The docGrid and justify arms above compose the SAME transform when a
           // grid / distributed run also carries w:w — issue #816.)
           ctx.save();
-          ctx.translate(glyphDrawX, 0);
+          ctx.translate(glyphLocalX(glyphDrawX), 0);
           ctx.scale(segCharScale, 1);
           const prevLetterSpacing = ctx.letterSpacing;
           if (segCharSpacingPx !== 0) {
-            ctx.letterSpacing = `${segCharSpacingPx / segCharScale}px`;
+            ctx.letterSpacing = `${segCharSpacingPx / glyphUnitScale / segCharScale}px`;
           }
-          ctx.fillText(glyphText, 0, baseline + yOffset);
+          ctx.fillText(glyphText, 0, glyphBaseline);
           ctx.letterSpacing = prevLetterSpacing;
           ctx.restore();
         } else if (segCharSpacingPx !== 0) {
@@ -9434,11 +9793,18 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           // whole run draws with a uniform per-glyph letter-spacing pitch that the
           // layout already folded into `s.measuredWidth` (measure==paint).
           const prevLetterSpacing = ctx.letterSpacing;
-          ctx.letterSpacing = `${segCharSpacingPx}px`;
-          ctx.fillText(glyphText, glyphDrawX, baseline + yOffset);
+          ctx.letterSpacing = `${segCharSpacingPx / glyphUnitScale}px`;
+          ctx.fillText(glyphText, glyphLocalX(glyphDrawX), glyphBaseline);
           ctx.letterSpacing = prevLetterSpacing;
         } else {
-          ctx.fillText(glyphText, glyphDrawX, baseline + yOffset);
+          ctx.fillText(glyphText, glyphLocalX(glyphDrawX), glyphBaseline);
+        }
+        if (useCanonicalTransform) {
+          ctx.restore();
+          // Overlay consumers receive paint-space geometry and must see the
+          // corresponding paint-size font even though the glyphs themselves were
+          // shaped at scale 1 and mapped through the local viewport transform.
+          ctx.font = buildFont(s.bold, s.italic, effSizePx, s.fontFamily, fontFamilyClasses);
         }
         // §17.3.2.19 — restore the inherited font-kerning now the run's glyphs are
         // painted (the following ruby / emphasis-mark draws are separate glyphs at
@@ -10380,7 +10746,9 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
       // A retractable connector leader is re-stroked retracted below; suppress
       // the preset engine's full-length leader stroke to avoid a double line /
       // a cap poking through the arrow tip.
-      isRetractableLeader ? { skipTrailingStroke: true } : undefined,
+      isRetractableLeader && (coreStroke?.headEnd || coreStroke?.tailEnd)
+        ? { skipTrailingStroke: true }
+        : undefined,
     );
   } else {
     ctx.beginPath();
@@ -10581,8 +10949,8 @@ export function measureShapeTextAutoFitHeight(
       const segPx = ts.fontSize * scale;
       floorPx = Math.max(
         floorPx,
-        intendedSingleLinePx(ts.fontFamily ?? null, segPx, segEa),
-        intendedSingleLinePx(ts.eaFloorFamily ?? null, segPx, segEa),
+        segmentIntendedSingleLinePx(ts, segPx, segEa),
+        segmentEastAsiaFloorSingleLinePx(ts, segPx, segEa),
       );
     }
     const lineEa = EAST_ASIAN_RE.test(lineText);
@@ -10593,8 +10961,12 @@ export function measureShapeTextAutoFitHeight(
     // METRIC hint = the tallest segment's own script (a Latin tallest segment
     // keeps its Canvas box even on a CJK-bearing line); GRID participation
     // stays line-wide (any EA content on the line makes it cell-rounded).
-    const asciiIntended = intendedSingleLinePx(family, fontPx, tallestEa);
-    const eaIntended = intendedSingleLinePx(eaFamily, fontPx, tallestEa);
+    const asciiIntended = tallest
+      ? segmentIntendedSingleLinePx(tallest, fontPx, tallestEa)
+      : intendedSingleLinePx(family, fontPx, tallestEa);
+    const eaIntended = tallest
+      ? segmentEastAsiaFloorSingleLinePx(tallest, fontPx, tallestEa)
+      : intendedSingleLinePx(eaFamily, fontPx, tallestEa);
     const measureFamily = eaIntended > asciiIntended ? eaFamily : family;
     ctx.font = buildFont(
       tallest?.bold ?? b.bold ?? false,
@@ -11053,8 +11425,8 @@ export function renderShapeText(
       }
       floorPx = Math.max(
         floorPx,
-        intendedSingleLinePx(ts.fontFamily ?? null, segPx, segEa),
-        intendedSingleLinePx(ts.eaFloorFamily ?? null, segPx, segEa),
+        segmentIntendedSingleLinePx(ts, segPx, segEa),
+        segmentEastAsiaFloorSingleLinePx(ts, segPx, segEa),
       );
     }
     const fontPx = (tallest?.fontSize ?? b.fontSizePt) * scale;
@@ -12287,8 +12659,21 @@ function computeTableLayout(
   table: DocTable,
   contentWPx: number,
   state: RenderState,
-): { colWidths: number[]; tableW: number; rowHeights: number[] } {
+): {
+  colWidths: number[];
+  tableW: number;
+  rowContentHeights: number[];
+  rowHeights: number[];
+} {
   const { scale } = state;
+  const contentHeightsFromResolved = (rowHeights: number[]): number[] => {
+    const footprints = applyTableRowBoundaryFootprints(
+      table,
+      new Array<number>(table.rows.length).fill(0),
+      scale,
+    );
+    return rowHeights.map((height, index) => height - (footprints[index] ?? 0));
+  };
 
   // B2 table stage 1b — compute-once reuse. When the paginator laid this table
   // out it stamped the scale-1 pt column widths and per-row heights it resolved
@@ -12332,7 +12717,12 @@ function computeTableLayout(
     const fragment = placedFragment.fragment;
     const colWidths = fragment.columnWidthsPt.map((w) => w * scale);
     const rowHeights = fragment.rows.map((r) => r.heightPt * scale);
-    return { colWidths, tableW: colWidths.reduce((s, w) => s + w, 0), rowHeights };
+    return {
+      colWidths,
+      tableW: colWidths.reduce((s, w) => s + w, 0),
+      rowContentHeights: contentHeightsFromResolved(rowHeights),
+      rowHeights,
+    };
   }
   const reuseInputs = stamped.tableLayoutInputs;
   const reuse =
@@ -12346,7 +12736,12 @@ function computeTableLayout(
   if (reuse) {
     const colWidths = (stamped.tableColWidthsPt as number[]).map((w) => w * scale);
     const rowHeights = (stamped.tableRowHeightsPt as number[]).map((h) => h * scale);
-    return { colWidths, tableW: colWidths.reduce((s, w) => s + w, 0), rowHeights };
+    return {
+      colWidths,
+      tableW: colWidths.reduce((s, w) => s + w, 0),
+      rowContentHeights: contentHeightsFromResolved(rowHeights),
+      rowHeights,
+    };
   }
 
   // Resolve column widths in pt (autofit by preferred widths, or fixed grid),
@@ -12358,11 +12753,12 @@ function computeTableLayout(
   // with the paint pass's px cell measurer. The restart-span extension is part of
   // the skeleton now — calculateRowHeight already excludes restart cells per-row,
   // and the resolver re-measures them via the same callback to grow the last row.
-  const rowHeights = resolveTableRowHeights(table, colWidths, scale, (cell, cellW) =>
+  const rowContentHeights = resolveTableRowContentHeights(table, colWidths, scale, (cell, cellW) =>
     measureCellContentHeightPx(cell, table, cellW, scale, state),
   );
+  const rowHeights = applyTableRowBoundaryFootprints(table, rowContentHeights, scale);
 
-  return { colWidths, tableW, rowHeights };
+  return { colWidths, tableW, rowContentHeights, rowHeights };
 }
 
 /** Content height of a table cell laid out at total width `cellW`, in the target
@@ -12769,50 +13165,6 @@ function drawTableRows(
   return y;
 }
 
-/** ECMA-376 §17.4.66 — the resolved physical edge specs of one cell (top / bottom
- *  / left / right), each folding the cell's own edge → cell inside → table
- *  inside/outer precedence (§17.4.38/§17.4.39), with `mirror` swapping the logical
- *  left/right onto physical sides for a bidiVisual table. `null` = the edge paints
- *  nothing at the cell level (before the neighbour conflict is considered).
- *  A `source` tag ('cell' | 'table') travels with each spec for §17.4.66 rule #1. */
-interface ResolvedCellEdges {
-  top: { spec: BorderSpec; source: 'cell' | 'table' } | null;
-  bottom: { spec: BorderSpec; source: 'cell' | 'table' } | null;
-  left: { spec: BorderSpec; source: 'cell' | 'table' } | null;
-  right: { spec: BorderSpec; source: 'cell' | 'table' } | null;
-}
-
-function resolveCellEdges(
-  cell: CellBorders,
-  table: TableBorders,
-  edges: CellEdgeFlags,
-  mirror: boolean,
-): ResolvedCellEdges {
-  // Per-edge cascade: the cell's own explicit edge (source 'cell') wins; else an
-  // interior edge falls to the cell's insideH/insideV then the table inside spec;
-  // an outer edge falls to the table outer spec (all source 'table').
-  const horiz = (own: BorderSpec | null, outer: boolean, tableOuter: BorderSpec | null) => {
-    if (own) return { spec: own, source: 'cell' as const };
-    const t = outer ? tableOuter : (cell.insideH ?? table.insideH);
-    return t ? { spec: t, source: 'table' as const } : null;
-  };
-  const vert = (own: BorderSpec | null, outer: boolean, tableOuter: BorderSpec | null) => {
-    if (own) return { spec: own, source: 'cell' as const };
-    const t = outer ? tableOuter : (cell.insideV ?? table.insideV);
-    return t ? { spec: t, source: 'table' as const } : null;
-  };
-  const top = horiz(cell.top, edges.topRow, table.top);
-  const bottom = horiz(cell.bottom, edges.bottomRow, table.bottom);
-  // bidiVisual mirrors which logical edge maps to each physical side (§17.4.1).
-  const left = mirror
-    ? vert(cell.right, edges.rightCol, table.right)
-    : vert(cell.left, edges.leftCol, table.left);
-  const right = mirror
-    ? vert(cell.left, edges.leftCol, table.left)
-    : vert(cell.right, edges.rightCol, table.right);
-  return { top, bottom, left, right };
-}
-
 /** Resolve the neighbour cell at grid slot (ri, ci) and return its resolved
  *  edges, or `null` when the slot is empty/out of range. */
 function neighbourEdges(
@@ -13026,12 +13378,11 @@ function measureCellParagraphHeight(
 
 /** Slice-aware twin of {@link measureCellParagraphHeight}: measures only the
  *  `[range.start, range.end)` line window (a mid-row split piece's slice) with
- *  the SAME real-scale rescale machinery, and reports the paragraph's total
+ *  the SAME canonical/legacy scale bridge as paint, and reports the paragraph's total
  *  line count so the caller can tell whether the window covers the paragraph
  *  end (trailing-spacing ownership). No range ⇒ the full paragraph — byte-
- *  identical to the historical behavior. The rescale (not a geometric ×scale)
- *  is the Finding-1 invariant: the vAlign centring height must equal what
- *  paint actually draws at this scale. */
+ *  identical to the historical behavior. The invariant is that vAlign and row
+ *  sizing consume the same line boxes that paint actually draws. */
 function measureCellParagraphWindow(
   state: RenderState,
   para: DocParagraph,
@@ -13075,16 +13426,11 @@ function measureCellParagraphWindow(
         },
       );
     }
-    // measureParagraph works in scale-1 points (its contract). A geometric
-    // `× scale` of that height is the exact anti-pattern rescaleLayoutLines
-    // exists to avoid: a real (hinted) font's Canvas metrics are NOT scale-linear
-    // (`metric(pt·s) ≠ s·metric(pt)`; see rescaleLayoutLines' header and
-    // layout-lines-scale-invariance.test.ts), so `scale1Height × scale` drifts
-    // from the height the paint pass (renderParagraph) actually draws. Reproduce
-    // the SAME scale-1-partition → paint-scale bridge paint uses, so the measured
-    // cell height equals the painted height at `scale` — the height that feeds
-    // vAlign centring (renderCell) and the content-driven row-height fallback
-    // (computeTableLayout → resolveTableRowHeights).
+    // measureParagraph works in scale-1 points (its contract). Reproduce the
+    // SAME scale bridge as renderParagraph: ordinary body-table text keeps these
+    // canonical line boxes and paint maps them through the Canvas viewport;
+    // excluded legacy paths re-measure their line geometry at paint scale. This
+    // keeps vAlign and content-driven row sizing equal to the painted glyph box.
     const scale1ContentHeight = measured.contentEndYPt - measured.placement.startYPt;
     const totalLines = measured.markOnly ? 0 : measured.lines.length;
     const windowStart = range ? Math.max(0, range.start) : 0;
@@ -13119,13 +13465,26 @@ function measureCellParagraphWindow(
           state.docEastAsian,
           state.ctx,
           state.fontFamilyClasses,
+          paragraphContext.lineSpacing,
+          state.resolvedLocalFonts,
         ),
         totalLines,
       };
     }
-    // Rehydrate the scale-1 line PARTITION to the paint scale exactly as
-    // renderParagraph does (re-measure every line's glyph geometry), then advance
-    // by the per-line box height with the SAME ruby/docGrid/lineSpacing resolver
+    const segments = buildSegments(para.runs, segmentEnvironmentOf(state));
+    const canonicalTextScale = canonicalParagraphTextScaleEligible(
+      state.storyContext ?? BODY_STORY_CONTEXT,
+      state.verticalCJK,
+      false,
+      false,
+      paragraphContext,
+      para,
+      segments,
+    );
+    // Rehydrate the scale-1 line PARTITION exactly as renderParagraph does:
+    // canonical body-table text scales stored geometry, while excluded legacy
+    // paths re-measure it. Then advance by the per-line box height with the SAME
+    // ruby/docGrid/lineSpacing resolver
     // (§17.3.1.33). A table cell carries no page-level float wrap oracle, so no
     // line has a topY jump; the painted content height is Σ lineHForLine over the
     // whole, unsliced paragraph.
@@ -13135,6 +13494,7 @@ function measureCellParagraphWindow(
       state.ctx,
       state.fontFamilyClasses,
       gridCharDeltaPx(grid, scale),
+      canonicalTextScale,
     );
     const uniformLineH = paraHasRuby
       ? snapParaLineToGrid(
@@ -13576,16 +13936,6 @@ export function renderTableFragment(fragment: TableFragment, state: RenderState)
   state.y = drawTableRows(table, colWidths, tableW, rowHeights, tableX, state.y, state, fragment);
 }
 
-/** Which grid edges of the table this cell touches, so {@link resolveCellEdges}
- *  can pick the OUTER (table.top/bottom/left/right) vs the INNER
- *  (table.insideH/insideV) spec per physical edge (ECMA-376 §17.4.38/§17.4.39). */
-interface CellEdgeFlags {
-  topRow: boolean;     // cell sits in the table's first row → its top is the table outer top
-  bottomRow: boolean;  // cell's bottom edge is the table outer bottom (vMerge-span aware)
-  leftCol: boolean;    // cell's left edge is the table outer left
-  rightCol: boolean;   // cell's right edge is the table outer right
-}
-
 /** Resolve a `nil`/`none` border to "no ink". A `null` means "not set" — the
  *  caller already substituted a fallback before reaching here. */
 function paintable(b: BorderSpec | null): BorderSpec | null {
@@ -13752,6 +14102,97 @@ export function paraShadingRect(
   return { x: x - l, y: y - t, w: w + l + r, h: h + t + b };
 }
 
+export interface ParaBorderSegment {
+  side: 'top' | 'bottom' | 'left' | 'right';
+  edge: ParaBorderEdge;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+
+/**
+ * Horizontal paragraph content extent used by shading and `w:pBdr`.
+ *
+ * ECMA-376 §17.3.1.24 applies pBdr to the paragraph. A
+ * hanging first line (including a list marker from §17.9) is part of that
+ * paragraph, so its start position must be inside the box. The normal body edge
+ * remains authoritative for a positive first-line indent because later lines
+ * still begin at the body edge. `physicalIndentLeft/Right` have already been
+ * mirrored for bidi; `firstIndent` remains logical, so the expansion is applied
+ * to the physical left for LTR and physical right for RTL. Resolved marker bounds
+ * are then unioned so lvlJc-shifted text and picture markers remain inside the box.
+ */
+export function paragraphBorderContentBox(
+  contentX: number,
+  contentW: number,
+  physicalIndentLeft: number,
+  physicalIndentRight: number,
+  firstIndent: number,
+  baseRtl: boolean,
+  markerBounds?: { left: number; right: number },
+): { x: number; w: number } {
+  let left = contentX + physicalIndentLeft;
+  let right = contentX + contentW - physicalIndentRight;
+  if (firstIndent < 0) {
+    if (baseRtl) right -= firstIndent;
+    else left += firstIndent;
+  }
+  if (markerBounds) {
+    left = Math.min(left, markerBounds.left);
+    right = Math.max(right, markerBounds.right);
+  }
+  return { x: left, w: Math.max(0, right - left) };
+}
+
+/**
+ * Resolve paragraph-border strokes into one connected box.
+ *
+ * ECMA-376 §17.3.1.17 requires a left paragraph border to run between the
+ * top/between border above and the bottom/between border below. The same
+ * geometry applies symmetrically to the right side: horizontal strokes reach
+ * the vertical-border positions, and vertical strokes use the horizontal
+ * strokes as their endpoints. Computing the four segments together prevents
+ * the independent `w:space` offsets from leaving open corners.
+ */
+export function paraBorderSegments(
+  x: number, y: number, w: number, h: number,
+  borders: ParagraphBorders,
+  merge?: ParaBorderMerge,
+  scale = 1,
+): ParaBorderSegment[] {
+  const visible = (edge: ParaBorderEdge | null): edge is ParaBorderEdge =>
+    edge != null && edge.style !== 'none';
+  const sp = (edge: ParaBorderEdge | null): number =>
+    visible(edge) ? (edge.space ?? 0) * scale : 0;
+  // §17.3.1.7 top edge: on a non-first paragraph of a shared run, the `top` edge
+  // gives way to the `between` edge drawn at the join (nothing when `between` is
+  // absent — the box has no internal rules).
+  const topEdge = merge?.suppressTop ? borders.between : borders.top;
+  const bottomEdge = merge?.suppressBottom ? null : borders.bottom;
+  const leftX = x - sp(borders.left);
+  const rightX = x + w + sp(borders.right);
+  const topY = y - sp(topEdge);
+  const bottomY = y + h + sp(bottomEdge);
+  const segments: ParaBorderSegment[] = [];
+  if (visible(topEdge)) {
+    segments.push({ side: 'top', edge: topEdge, x1: leftX, y1: topY, x2: rightX, y2: topY });
+  }
+  // The `bottom` edge is skipped entirely when a same-border paragraph follows
+  // (the box continues into it; its own join is handled by that paragraph's
+  // suppressed-top `between`).
+  if (visible(bottomEdge)) {
+    segments.push({ side: 'bottom', edge: bottomEdge, x1: leftX, y1: bottomY, x2: rightX, y2: bottomY });
+  }
+  if (visible(borders.left)) {
+    segments.push({ side: 'left', edge: borders.left, x1: leftX, y1: topY, x2: leftX, y2: bottomY });
+  }
+  if (visible(borders.right)) {
+    segments.push({ side: 'right', edge: borders.right, x1: rightX, y1: topY, x2: rightX, y2: bottomY });
+  }
+  return segments;
+}
+
 function drawParaBorders(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   x: number, y: number, w: number, h: number,
@@ -13760,25 +14201,11 @@ function drawParaBorders(
   dpr = 1,
   merge?: ParaBorderMerge,
 ): void {
-  const drawEdge = (edge: ParaBorderEdge | null, x1: number, y1: number, x2: number, y2: number) => {
-    if (!edge || edge.style === 'none') return;
+  for (const segment of paraBorderSegments(x, y, w, h, borders, merge, scale)) {
+    const { edge } = segment;
     const spec: BorderSpec = { width: edge.width, color: edge.color, style: edge.style };
-    drawBorderLine(ctx, x1, y1, x2, y2, spec, scale, dpr);
-  };
-  const sp = (edge: ParaBorderEdge | null) => (edge?.space ?? 0) * scale;
-  // §17.3.1.7 top edge: on a non-first paragraph of a shared run, the `top` edge
-  // gives way to the `between` edge drawn at the join (nothing when `between` is
-  // absent — the box has no internal rules).
-  const topEdge = merge?.suppressTop ? borders.between : borders.top;
-  drawEdge(topEdge, x, y - sp(topEdge), x + w, y - sp(topEdge));
-  // The `bottom` edge is skipped entirely when a same-border paragraph follows
-  // (the box continues into it; its own join is handled by that paragraph's
-  // suppressed-top `between`).
-  if (!merge?.suppressBottom) {
-    drawEdge(borders.bottom, x, y + h + sp(borders.bottom), x + w, y + h + sp(borders.bottom));
+    drawBorderLine(ctx, segment.x1, segment.y1, segment.x2, segment.y2, spec, scale, dpr);
   }
-  drawEdge(borders.left,   x - sp(borders.left), y,        x - sp(borders.left), y + h);
-  drawEdge(borders.right,  x + w + sp(borders.right), y,   x + w + sp(borders.right), y + h);
 }
 
 /** ECMA-376 §17.3.1.7 — the vertical extent (in scale-1 points) a paragraph's

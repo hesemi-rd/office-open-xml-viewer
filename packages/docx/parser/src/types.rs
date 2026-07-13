@@ -871,6 +871,11 @@ pub enum DocRun {
     // keeps the enum compact (clippy::large_enum_variant). Serde flattens the
     // Box, so the JSON tag/shape is unchanged.
     Text(Box<TextRun>),
+    /// Zero-advance formatting contribution of the WordprocessingML run that
+    /// hosts a floating DrawingML object. Kept independent of the drawing kind
+    /// because the same `<wp:anchor>` can contain a picture, chart, shape, or
+    /// group, while the host character participates in line sizing exactly once.
+    AnchorHost(AnchorHostMetrics),
     Image(ImageRun),
     /// ECMA-376 §21.2 DrawingML chart embedded in a `<w:drawing>` whose
     /// `<a:graphicData uri=".../chart">` carries a `<c:chart r:id>`. The chart
@@ -947,6 +952,27 @@ pub struct LineEnd {
     pub w: String,
     /// ST_LineEndLength (§20.1.10.31). Absent in source ⇒ "med".
     pub len: String,
+}
+
+/// Resolved character formatting of the WordprocessingML run that hosts a
+/// floating drawing. The drawing is out of inline flow, but Word still uses its
+/// anchor character's run metrics when sizing the containing text line.
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AnchorHostMetrics {
+    /// Effective run size in points (§17.3.2.38 `<w:sz>`).
+    pub font_size: f64,
+    /// Resolved ascii/hAnsi font face (§17.3.2.26 `<w:rFonts>`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<String>,
+    /// Resolved East Asian font face, kept separately so document-grid line
+    /// allocation can use the Far East design metrics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_east_asia: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub bold: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub italic: bool,
 }
 
 /// A drawn shape (wps:wsp inside wp:anchor). Positioned like an anchor image

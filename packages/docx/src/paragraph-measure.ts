@@ -216,6 +216,7 @@ export function measureParagraph(
       measurer.context,
       fontFamilyClasses,
       context.lineSpacing,
+      environment.resolvedLocalFonts,
     );
     return {
       lines: [],
@@ -233,6 +234,7 @@ export function measureParagraph(
         measurer.context,
         fontFamilyClasses,
         context.lineSpacing,
+        environment.resolvedLocalFonts,
       ),
       placement: recordedPlacement,
     };
@@ -251,6 +253,7 @@ export function measureParagraph(
         columnXPt: placement.paragraphXPt,
         columnWidthPt: placement.availableWidthPt,
         floats: [],
+        paragraphMarkLineStartWidth: getDefaultFontSize(paragraph),
         lineWindow: (input) => placement.wrap!.lineWindow(input),
         lineBoxH: (ascent, descent, _hasRuby, intendedSingle, eastAsian, gridCountSingle) => lineBoxHeight(
           context.lineSpacing,

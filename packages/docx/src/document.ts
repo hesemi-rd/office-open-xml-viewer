@@ -3,6 +3,7 @@ import wasmAssetUrl from './wasm/docx_parser_bg.wasm?url';
 import {
   preloadGoogleFonts,
   unloadGoogleFonts,
+  unloadLocalFontMetrics,
   unregisterEmbeddedFonts,
   WorkerBridge,
   defaultDpr,
@@ -14,10 +15,11 @@ import {
   type MathRenderer,
 } from '@silurus/ooxml-core';
 import type { PaginatedBodyElement, DocxDocumentModel, RenderPageOptions, WorkerRequest, WorkerResponse, DocComment, DocNote } from './types';
-import { renderDocumentToCanvas, documentHasMath, prepareMathRuns, paginateDocument, dropColorReplacedCache, physicalPageSizeForPage, type DocxTextRunInfo } from './renderer';
+import { renderDocumentToCanvas, documentHasMath, prepareMathRuns, paginateDocument, dropColorReplacedCache, physicalPageSizeForPage, setResolvedLocalFonts, clearResolvedLocalFonts, type DocxTextRunInfo } from './renderer';
 import { buildBookmarkPageMap } from './bookmark-nav';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
+import { loadDocxLocalFontMetrics } from './local-font-metrics';
 import type {
   DocumentMeta,
   RenderWorkerRequest,
@@ -79,6 +81,8 @@ export class DocxDocument {
    *  shared FontFaceSet for the lifetime of the SPA (deduped + refcounted in core,
    *  so a web font shared with another open document survives until both go). */
   private _googleFontFaces: FontFace[] = [];
+  /** Exact local faces used for version-adaptive Office line metrics. */
+  private _localMetricFontFaces: FontFace[] = [];
   /** One stable closure per instance: core's path-keyed SVG cache namespaces on
    *  this identity, so two open documents never swap a shared zip path (e.g.
    *  word/media/image1.svg). Reusing one reference also lets the SVG cache hit
@@ -154,6 +158,11 @@ export class DocxDocument {
     if (mode === 'main' && doc._document?.embeddedFonts?.length) {
       doc._embeddedFontFaces = await loadEmbeddedFonts(doc._document, (p) => doc.getFontBytes(p));
     }
+    if (mode === 'main' && doc._document) {
+      const localMetrics = await loadDocxLocalFontMetrics(doc._document);
+      doc._localMetricFontFaces = localMetrics.faces;
+      setResolvedLocalFonts(doc._document, localMetrics.metrics);
+    }
     // Equations are converted + rasterized before pagination (which reads their
     // extents synchronously). Requires the opt-in `math` engine; without it,
     // equations are skipped (and the engine asset is never bundled). Math is
@@ -192,6 +201,7 @@ export class DocxDocument {
 
   destroy(): void {
     this._bridge.terminate();
+    if (this._document) clearResolvedLocalFonts(this._document);
     this._document = null;
     this._meta = null;
     this._pages = null;
@@ -213,6 +223,10 @@ export class DocxDocument {
     if (this._googleFontFaces.length > 0) {
       unloadGoogleFonts(this._googleFontFaces);
       this._googleFontFaces = [];
+    }
+    if (this._localMetricFontFaces.length > 0) {
+      unloadLocalFontMetrics(this._localMetricFontFaces);
+      this._localMetricFontFaces = [];
     }
     // Release this document's three per-fetchImage image caches: the decoded
     // base raster bitmaps (GPU-backed, shared with pptx/xlsx), the a:clrChange

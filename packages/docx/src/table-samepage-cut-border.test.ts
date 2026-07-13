@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll } from 'vitest';
-import { renderDocumentToCanvas, paginateDocument } from './renderer.js';
+import { renderDocumentToCanvas } from './renderer.js';
 import type {
   BodyElement,
   CellElement,
@@ -176,11 +176,24 @@ const nearFullWidth = (h: StrokeSeg[], y: number, pageW: number, tol = 1.2) =>
 
 describe('#986 same-page intra-row cut border', () => {
   it('draws NO rule at an intra-row cut whose continuation piece shares the page', async () => {
-    // Two tall rows into a 120pt body: the paginator splits both and packs a
-    // continuation piece of each onto one interior page — page 2 carries a
-    // 2-row table with BOTH pieces marked pageCutBottom (mirrors sample-33 p.3).
+    // Build the renderer-facing page slice directly. Pagination geometry is
+    // covered separately; this regression is specifically the paint contract
+    // for two row pieces sharing a page, with the leading piece ending at an
+    // intra-source-row cut.
     const model = twoTallRowsDoc(120);
-    const pages = paginateDocument(model);
+    const sourceTable = model.body[0] as unknown as DocTable;
+    const leading = tallBlockRow(2) as DocTableRow & { pageCutBottom?: boolean };
+    leading.pageCutBottom = true;
+    const slice = {
+      ...sourceTable,
+      type: 'table',
+      rows: [leading, tallBlockRow(2)],
+      colTopPt: 0,
+      tableColWidthsPt: [160],
+      tableRowHeightsPt: [41, 41],
+      tableContentWPt: 160,
+    } as unknown as PaginatedBodyElement;
+    const pages: PaginatedBodyElement[][] = [[slice]];
     const hit = findSamePageCutPage(pages);
 
     // Fixture sanity: the same-page two-piece condition really exists and the

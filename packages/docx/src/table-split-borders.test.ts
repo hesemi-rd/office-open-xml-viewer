@@ -131,7 +131,10 @@ const shortRow = (text: string): DocTableRow => ({
     content: [{ type: 'paragraph', ...para(text) } as unknown as CellElement],
     colSpan: 1, vMerge: null, borders: allEdges(), background: null, vAlign: 'top', widthPt: null,
   }],
-  rowHeight: null, rowHeightRule: 'auto', isHeader: false,
+  // This fixture isolates a page cut that lands exactly on a row boundary.
+  // `exact` makes 20pt the complete §17.4.80 row box; an auto row also reserves
+  // the resolved border footprint and therefore would not be a 20pt row.
+  rowHeight: 20, rowHeightRule: 'exact', isHeader: false,
 } as unknown as DocTableRow);
 
 async function renderPage(model: DocxDocumentModel, pages: PaginatedBodyElement[][], pageIndex: number): Promise<StrokeSeg[]> {
@@ -145,7 +148,9 @@ const horizontals = (strokes: StrokeSeg[]) =>
 
 describe('mid-row page-cut border semantics (§17.4.66 conflict at the cut)', () => {
   it('draws the §17.4.66 winner at the page-1 cut and the continuation top on page 2', async () => {
-    // 4-line cell (80pt) into a 60pt page body: p.1 piece = 3 lines, cut at y=60.
+    // A 4-line cell (80pt) in a 60pt body also needs the page-local top/cut
+    // footprint. Two 20pt lines fit with the two half-rules; a third would make
+    // the complete slice overflow.
     const model = splitDoc([wrappingRow()], 60);
     const pages = paginateDocument(model);
     expect(pages.length).toBeGreaterThan(1);
@@ -160,8 +165,9 @@ describe('mid-row page-cut border semantics (§17.4.66 conflict at the cut)', ()
     const p1H = horizontals(p1);
     // Top frame at y=0 present…
     expect(p1H.some((s) => Math.abs(s.y1 - 0) <= 1)).toBe(true);
-    // …and the cut draws the conflict winner (single ∨ single) at y=60, full width.
-    const cut = p1H.filter((s) => Math.abs(s.y1 - 60) <= 1);
+    // …and the cut draws the conflict winner (single ∨ single) at y=41.5 after
+    // the canvas hairline offset, full width.
+    const cut = p1H.filter((s) => Math.abs(s.y1 - 41.5) <= 0.1);
     expect(cut.length).toBe(1);
     expect(Math.min(cut[0].x1, cut[0].x2)).toBeLessThanOrEqual(1);
     expect(Math.max(cut[0].x1, cut[0].x2)).toBeGreaterThanOrEqual(159);
@@ -181,7 +187,7 @@ describe('mid-row page-cut border semantics (§17.4.66 conflict at the cut)', ()
     const pages = paginateDocument(model);
     expect(pages.length).toBeGreaterThan(1);
     const p1H = horizontals(await renderPage(model, pages, 0));
-    expect(p1H.filter((s) => Math.abs(s.y1 - 60) <= 1)).toHaveLength(1);
+    expect(p1H.filter((s) => Math.abs(s.y1 - 41.5) <= 0.1)).toHaveLength(1);
   });
 
   it('draws NOTHING at the cut of a borderless table', async () => {

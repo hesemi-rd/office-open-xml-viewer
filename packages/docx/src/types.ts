@@ -775,6 +775,7 @@ export interface NumberingInfo {
 
 export type DocRun =
   | { type: 'text' } & DocxTextRun
+  | { type: 'anchorHost' } & AnchorHostMetrics
   | { type: 'image' } & ImageRun
   | { type: 'chart' } & ChartRun
   | { type: 'break'; breakType: 'line' | 'page' | 'column' }
@@ -860,6 +861,20 @@ export type PathCmd =
   | { cmd: 'cubicBezTo'; x1: number; y1: number; x2: number; y2: number; x: number; y: number }
   | { cmd: 'arcTo'; wr: number; hr: number; stAng: number; swAng: number }
   | { cmd: 'close' };
+
+/** Resolved formatting of the WordprocessingML anchor character that hosts a
+ * floating drawing. The drawing has zero inline advance, but these metrics still
+ * participate in the containing line's height and document-grid allocation. */
+export interface AnchorHostMetrics {
+  /** Effective `<w:sz>` in points. */
+  fontSize: number;
+  /** Resolved ascii/hAnsi font face. */
+  fontFamily?: string | null;
+  /** Resolved East Asian font face, retained for Far East line metrics. */
+  fontFamilyEastAsia?: string | null;
+  bold?: boolean;
+  italic?: boolean;
+}
 
 export interface ShapeRun {
   widthPt: number;

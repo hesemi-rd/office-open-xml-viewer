@@ -237,6 +237,33 @@ describe('table-cell line grid compatibility', () => {
 // 20 pt; the mock font box is a flat 1.0×em, so every height difference below
 // comes from the line-height / script routing alone.
 describe('docGrid line-cell integration through the cell measure path', () => {
+  it('matches observed Word spacing for explicit atLeast lines in a table cell', () => {
+    const para = paragraphWithRuns([
+      {
+        text: 'あ',
+        fontSize: 14,
+        fontFamily: 'Meiryo',
+        fontFamilyEastAsia: 'Meiryo',
+      },
+      { type: 'break', breakType: 'line' },
+      {
+        text: 'い',
+        fontSize: 10,
+        fontFamily: 'Meiryo',
+        fontFamilyEastAsia: 'Meiryo',
+      },
+    ]);
+    para.lineSpacing = { value: 0, rule: 'atLeast', explicit: true };
+
+    // Observed Windows Word output keeps the first explicit-atLeast line at
+    // Meiryo's raw 14pt design height (3269/2048 em, slightly over the 20pt
+    // pitch), then keeps the ordinary 10pt line at one pitch. This fixture
+    // records Office compatibility; the standards do not define this precise
+    // tall-line exception.
+    expect(calculateRowHeight(rowWith(para), table(), [100], 1, makeMeasureState(true)))
+      .toBeCloseTo(14 * 3269 / 2048 + 20, 12);
+  });
+
   it('a manual line break in a SMALLER run does not shrink the line height (tallest governs)', () => {
     // Line 1: 'あ' at 24 pt + 'い' at 10 pt, terminated by a <w:br> whose
     // nearby size resolves to 10 pt (§17.3.3.1; findNearbyFontSize looks at the
