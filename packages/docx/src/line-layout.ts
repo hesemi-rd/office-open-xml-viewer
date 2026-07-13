@@ -2781,7 +2781,7 @@ export function layoutLines(
   // mark line, but `isParagraphMarkOnlyFlow` selects the same narrow threshold
   // for its first line. Word keeps either mark beside a float down to a sub-inch
   // gap and drops it below only for a full-width band. #676 over-generalized 1
-  // inch onto marks and pushed sample-12's caption to the next page. Inline
+  // inch onto marks and pushed following content to the next page. Inline
   // content (including a content paragraph's trailing-break final line) keeps
   // the 1-inch rule.
   const minLineStartWidth = (): number => wordMinLineStartPx(scale);
