@@ -949,11 +949,36 @@ pub struct LineEnd {
     pub len: String,
 }
 
+/// Resolved character formatting of the WordprocessingML run that hosts a
+/// floating drawing. The drawing is out of inline flow, but Word still uses its
+/// anchor character's run metrics when sizing the containing text line.
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AnchorHostMetrics {
+    /// Effective run size in points (§17.3.2.38 `<w:sz>`).
+    pub font_size: f64,
+    /// Resolved ascii/hAnsi font face (§17.3.2.26 `<w:rFonts>`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<String>,
+    /// Resolved East Asian font face, kept separately so document-grid line
+    /// allocation can use the Far East design metrics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_east_asia: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub bold: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub italic: bool,
+}
+
 /// A drawn shape (wps:wsp inside wp:anchor). Positioned like an anchor image
 /// and rendered via core's buildCustomPath + paint primitives.
 #[derive(Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeRun {
+    /// Formatting of the `<w:r>` anchor character that contains this floating
+    /// drawing. Absent on legacy/parser-created shapes that predate this field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_host_metrics: Option<AnchorHostMetrics>,
     /// pt
     pub width_pt: f64,
     /// pt

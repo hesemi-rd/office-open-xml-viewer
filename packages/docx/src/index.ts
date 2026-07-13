@@ -58,6 +58,7 @@ export type {
   // DrawingML chart run (reachable via the DocRun union's `chart` arm,
   // ECMA-376 §21.2).
   ChartRun,
+  AnchorHostMetrics,
   ShapeRun,
   // VML `<v:textpath>` watermark text (reachable via ShapeRun.textPath).
   TextPath,

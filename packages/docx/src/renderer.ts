@@ -10380,7 +10380,9 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
       // A retractable connector leader is re-stroked retracted below; suppress
       // the preset engine's full-length leader stroke to avoid a double line /
       // a cap poking through the arrow tip.
-      isRetractableLeader ? { skipTrailingStroke: true } : undefined,
+      isRetractableLeader && (coreStroke?.headEnd || coreStroke?.tailEnd)
+        ? { skipTrailingStroke: true }
+        : undefined,
     );
   } else {
     ctx.beginPath();

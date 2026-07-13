@@ -16,7 +16,7 @@
 // is documented inline (as before the move) — see packages/docx/CLAUDE.md.
 
 import type {
-  DocParagraph, DocRun, DocxTextRun, ImageRun, ShapeTextRun, FieldRun,
+  DocParagraph, DocRun, DocxTextRun, ImageRun, ShapeRun, ShapeTextRun, FieldRun,
   LineSpacing, TabStop, DocxRunBorder, DocSettings, EmphasisMark,
 } from './types';
 import type { MathNode, KinsokuRules, ChartModel, HyperlinkTarget, NumberFormat, Duotone } from '@silurus/ooxml-core';
@@ -67,6 +67,12 @@ interface LayoutSegSource {
 
 export interface LayoutTextSeg extends LayoutSegSource {
   text: string;
+  /** Zero-advance anchor-character placeholder: contributes run metrics to the
+   * line box but paints no glyph. */
+  metricOnly?: true;
+  /** The anchor character uses the run's East Asian font axis, so §17.6.5 grid
+   * allocation must use Far East design metrics despite `text` being empty. */
+  metricEastAsian?: true;
   bold: boolean;
   italic: boolean;
   underline: boolean;
@@ -2484,6 +2490,27 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         leader: run.leader,
         ptab: { alignment: run.alignment, relativeTo: run.relativeTo },
       });
+    } else if (run.type === 'shape') {
+      const host = (run as unknown as ShapeRun).anchorHostMetrics;
+      if (host) {
+        const eastAsian = host.fontFamilyEastAsia != null;
+        segs.push({
+          text: '',
+          metricOnly: true,
+          ...(eastAsian ? { metricEastAsian: true as const } : {}),
+          bold: host.bold ?? false,
+          italic: host.italic ?? false,
+          underline: false,
+          strikethrough: false,
+          fontSize: host.fontSize,
+          color: null,
+          fontFamily: host.fontFamilyEastAsia ?? host.fontFamily ?? null,
+          vertAlign: null,
+          measuredWidth: 0,
+          eaFloorFamily: host.fontFamilyEastAsia ?? null,
+          snapToCharacterGrid: false,
+        });
+      }
     }
   }
 
@@ -2867,7 +2894,8 @@ export function layoutLines(
       const ts = s as LayoutTextSeg;
       if (ts.ruby) lineHasRuby = true;
       if (ts.seaBreaks !== undefined && isDictionarySeaText(ts.text)) lineHasSea = true;
-      if (!lineEastAsian && EAST_ASIAN_RE.test(ts.text)) lineEastAsian = true;
+      const metricEastAsian = ts.metricEastAsian === true || EAST_ASIAN_RE.test(ts.text);
+      if (!lineEastAsian && metricEastAsian) lineEastAsian = true;
       // Intended single-line height for fonts whose substituted Canvas metrics
       // understate Word's line spacing (font-metrics.ts). 0 for untabled fonts.
       // Small caps (non-super/sub) keep the FULL run size here so the line box
@@ -2879,7 +2907,7 @@ export function layoutLines(
       // segments are excluded too: a ruby line reserves its MEASURED base +
       // annotation box (sample-5 calibration) and Word's FE height for a
       // ruby-bearing line is unmeasured, so the pre-#1013 metrics stand.
-      const segScriptHint = EAST_ASIAN_RE.test(ts.text) && !ts.ruby;
+      const segScriptHint = metricEastAsian && !ts.ruby;
       const intended = intendedSingleLinePx(ts.fontFamily, intendedEm, segScriptHint);
       if (intended > lineIntendedSingle) lineIntendedSingle = intended;
       // Only East Asian text is cell-rounded. Both branches are scale-linear:
@@ -3342,7 +3370,13 @@ export function layoutLines(
     }
     // FE design correction for EA segments only; ruby keeps its measured box
     // (see addToLine's segScriptHint note).
-    const corrected = correctedLineMetrics(metricM, s.fontFamily, fullPx, metricEmPx, EAST_ASIAN_RE.test(s.text) && !s.ruby);
+    const corrected = correctedLineMetrics(
+      metricM,
+      s.fontFamily,
+      fullPx,
+      metricEmPx,
+      (s.metricEastAsian === true || EAST_ASIAN_RE.test(s.text)) && !s.ruby,
+    );
     let asc = corrected.ascent;
     const desc = corrected.descent;
     // Ruby annotation: small text rendered above the base. Reserve ascent
@@ -3939,7 +3973,7 @@ export function rescaleLayoutLines(
     }
     // FE design correction for EA segments only; ruby keeps its measured box
     // (see addToLine's segScriptHint note).
-    const segScriptHint = EAST_ASIAN_RE.test(s.text) && !s.ruby;
+    const segScriptHint = (s.metricEastAsian === true || EAST_ASIAN_RE.test(s.text)) && !s.ruby;
     const corrected = correctedLineMetrics(metricM, s.fontFamily, fullPx, metricEmPx, segScriptHint);
     // §17.3.3.12 — ruby reserves hpsRaise when present, same as layoutLines.
     const asc = s.ruby

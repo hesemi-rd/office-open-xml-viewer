@@ -861,7 +861,23 @@ export type PathCmd =
   | { cmd: 'arcTo'; wr: number; hr: number; stAng: number; swAng: number }
   | { cmd: 'close' };
 
+/** Resolved formatting of the WordprocessingML anchor character that hosts a
+ * floating drawing. The drawing has zero inline advance, but these metrics still
+ * participate in the containing line's height and document-grid allocation. */
+export interface AnchorHostMetrics {
+  /** Effective `<w:sz>` in points. */
+  fontSize: number;
+  /** Resolved ascii/hAnsi font face. */
+  fontFamily?: string | null;
+  /** Resolved East Asian font face, retained for Far East line metrics. */
+  fontFamilyEastAsia?: string | null;
+  bold?: boolean;
+  italic?: boolean;
+}
+
 export interface ShapeRun {
+  /** Formatting of the `<w:r>` anchor character containing this floating shape. */
+  anchorHostMetrics?: AnchorHostMetrics | null;
   widthPt: number;
   heightPt: number;
   /** X offset in pt */

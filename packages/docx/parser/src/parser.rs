@@ -3193,6 +3193,29 @@ fn parse_run_inner(
     // renderer can pick per character (CJK glyphs → eastAsia face). `font_family`
     // above keeps the conflated single-font fallback for non-per-char paths.
     let font_family_east_asia = theme.resolve_font_ref(fmt.font_family_east_asia.clone());
+    // A floating drawing remains attached to an anchor character in this run.
+    // ECMA-376 §20.4.2.3 defines the floating placement; Word's line formatter
+    // still sizes that anchor character from the resolved §17.3.2 run
+    // properties. Preserve those metrics on emitted shapes instead of dropping
+    // them at the parser/model boundary.
+    let anchor_host_metrics = AnchorHostMetrics {
+        font_size,
+        font_family: font_family.clone(),
+        font_family_east_asia: font_family_east_asia.clone(),
+        bold,
+        italic,
+    };
+    let attach_anchor_host_metrics = |drawing_runs: &mut [DocRun]| {
+        // A grouped drawing expands into several ShapeRuns, but its containing
+        // `<w:r>` still has one anchor character. Attach the zero-width metric
+        // contribution once, to the first emitted shape.
+        if let Some(shape) = drawing_runs.iter_mut().find_map(|run| match run {
+            DocRun::Shape(shape) => Some(shape),
+            _ => None,
+        }) {
+            shape.anchor_host_metrics = Some(anchor_host_metrics.clone());
+        }
+    };
     let vert_align = fmt.vert_align.clone();
     let all_caps = fmt.all_caps.unwrap_or(false);
     let small_caps = fmt.small_caps.unwrap_or(false);
@@ -3671,11 +3694,10 @@ fn parse_run_inner(
                 }
             }
             "drawing" => {
-                for r in
-                    parse_inline_drawing(style_map, num_map, child, media_map, chart_map, theme)
-                {
-                    runs.push(r);
-                }
+                let mut drawing_runs =
+                    parse_inline_drawing(style_map, num_map, child, media_map, chart_map, theme);
+                attach_anchor_host_metrics(&mut drawing_runs);
+                runs.extend(drawing_runs);
             }
             "footnoteReference" | "endnoteReference" | "footnoteRef" | "endnoteRef" => {
                 // ECMA-376 §17.11.6 / §17.11.7 / §17.11.16 / §17.11.17.
@@ -3763,11 +3785,11 @@ fn parse_run_inner(
                 {
                     for inner in selected.children().filter(|n| n.is_element()) {
                         if inner.tag_name().name() == "drawing" {
-                            for r in parse_inline_drawing(
+                            let mut drawing_runs = parse_inline_drawing(
                                 style_map, num_map, inner, media_map, chart_map, theme,
-                            ) {
-                                runs.push(r);
-                            }
+                            );
+                            attach_anchor_host_metrics(&mut drawing_runs);
+                            runs.extend(drawing_runs);
                         }
                     }
                 }
@@ -3811,11 +3833,11 @@ fn parse_run_inner(
                     .children()
                     .find(|n| n.is_element() && n.tag_name().name() == "drawing");
                 if let Some(drawing) = drawing {
-                    for r in parse_inline_drawing(
+                    let mut drawing_runs = parse_inline_drawing(
                         style_map, num_map, drawing, media_map, chart_map, theme,
-                    ) {
-                        runs.push(r);
-                    }
+                    );
+                    attach_anchor_host_metrics(&mut drawing_runs);
+                    runs.extend(drawing_runs);
                 } else if let Some(img) = parse_object_ole_image(child, media_map) {
                     runs.push(DocRun::Image(img));
                 }
@@ -12625,6 +12647,41 @@ mod anchor_image_relative_from_tests {
         let data = build_docx(body);
         let doc = parse_from_bytes(&data).expect("parse must succeed");
         assert_eq!(first_shape(&doc).z_order, 251651072);
+    }
+
+    #[test]
+    fn anchored_shape_serializes_its_host_run_metrics() {
+        let body = r#"<w:p><w:r>
+  <w:rPr>
+    <w:rFonts w:ascii="Arial" w:eastAsia="Yu Mincho"/>
+    <w:b/><w:i/><w:sz w:val="40"/>
+  </w:rPr>
+  <w:drawing>
+    <wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+               xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+               xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+               behindDoc="0" relativeHeight="1">
+      <wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH>
+      <wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>
+      <wp:extent cx="127000" cy="127000"/>
+      <wp:wrapNone/>
+      <wp:docPr id="1" name="shape"/>
+      <a:graphic><a:graphicData><wps:wsp><wps:spPr>
+        <a:xfrm><a:off x="0" y="0"/><a:ext cx="127000" cy="127000"/></a:xfrm>
+        <a:prstGeom prst="rect"/>
+      </wps:spPr></wps:wsp></a:graphicData></a:graphic>
+    </wp:anchor>
+  </w:drawing>
+</w:r></w:p>"#;
+        let data = build_docx(body);
+        let doc = parse_from_bytes(&data).expect("parse must succeed");
+        let json = serde_json::to_value(first_shape(&doc)).expect("shape serializes");
+
+        assert_eq!(json["anchorHostMetrics"]["fontSize"], 20.0);
+        assert_eq!(json["anchorHostMetrics"]["fontFamily"], "Arial");
+        assert_eq!(json["anchorHostMetrics"]["fontFamilyEastAsia"], "Yu Mincho");
+        assert_eq!(json["anchorHostMetrics"]["bold"], true);
+        assert_eq!(json["anchorHostMetrics"]["italic"], true);
     }
 
     /// ECMA-376 §20.4.2.3/§20.4.3.5 — a standalone `wps:wsp` inside
