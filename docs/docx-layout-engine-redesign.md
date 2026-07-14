@@ -309,8 +309,11 @@ For each migrated feature class:
 6. obtain an independent critical review and resolve every valid finding.
 
 The migration must not add a new production switch between equivalent algorithms.
-A compatibility adapter may preserve an internal test or caller shape only within
-the pull request that removes its remaining consumer.
+Temporary algorithm-selection adapters may preserve an internal test or caller
+shape only within the pull request that removes their remaining consumer. A
+permanent input-normalization boundary is allowed when unchanged public model
+compatibility requires it, provided every normalized input feeds the sole layout
+algorithm and the boundary contains no measurement, pagination, or paint logic.
 
 ## Delivery Series
 

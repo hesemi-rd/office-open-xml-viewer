@@ -116,6 +116,8 @@ export interface BlockLayoutAlgorithms {
   layoutParagraph(input: ParagraphLayoutInput, services: LayoutServices): ParagraphLayout;
   layoutTable(input: TableLayoutInput, services: LayoutServices): TableLayout;
 }
+export type FlowBlockInput = ParagraphLayoutInput | TableLayoutInput;
+export interface FlowLayoutInput { readonly blocks: readonly FlowBlockInput[]; readonly container: FlowContainer; readonly source: SourceRef }
 export function layoutFlowBlocks(input: FlowLayoutInput, services: LayoutServices, algorithms: BlockLayoutAlgorithms): FlowLayout;
 ```
 

@@ -36,8 +36,10 @@
 
 **Interfaces:**
 
-- Consumes: `layoutParagraph`, `layoutTable`, `LayoutPage`, and `PageLayers` from Series A.
-- Produces: `StoryLayoutInput`, `StoryLayout`, `NoteLayout`, `layoutStory`, and converged note reservation.
+- Consumes: `FlowBlockInput`, `layoutFlowBlocks`, `layoutParagraph`,
+  `layoutTable`, `LayoutPage`, and `PageLayers` from Series A.
+- Produces: `StoryBlockInput`, `StoryLayoutInput`, `StoryLayout`, `NoteLayout`,
+  `layoutStory`, and converged note reservation.
 
 **Specification evidence:** ECMA-376 §17.10 header/footer references and
 selection (`w:headerReference`, `w:footerReference`, `w:titlePg`, even/odd
@@ -47,6 +49,8 @@ heuristic; behavior not determined by those facts emits a diagnostic and require
 a separately evidenced compatibility rule.
 
 ```ts
+export type StoryBlockInput = FlowBlockInput;
+export interface StoryLayoutInput { readonly source: SourceRef; readonly container: FlowContainer; readonly blocks: readonly StoryBlockInput[] }
 export interface StoryLayout { readonly story: SourceRef['story']; readonly flowBounds: LayoutRect; readonly inkBounds: LayoutRect; readonly clipBounds?: LayoutRect; readonly blocks: readonly PaintNode[]; readonly advancePt: number }
 export interface NoteLayout { readonly kind: 'note'; readonly id: LayoutNodeId; readonly source: SourceRef; readonly flowBounds: LayoutRect; readonly inkBounds: LayoutRect; readonly separator: readonly BorderSegment[]; readonly story: StoryLayout }
 export function layoutStory(input: StoryLayoutInput, services: LayoutServices): StoryLayout;
@@ -75,6 +79,11 @@ measure story height.
 
 Resolve the active header/footer references from `LayoutPage.section`, lay out
 their blocks through `layoutStory`, and place them into header/footer layers.
+`layoutStory` delegates paragraph/table dispatch and recursive block flow to A1
+`layoutFlowBlocks`, passing the A3/A4 `layoutParagraph` and `layoutTable`
+implementations as `BlockLayoutAlgorithms`; it must not switch on those block
+kinds itself. Story code owns only the container, story identity, reservation,
+and projection of the returned `FlowLayout` into `StoryLayout`.
 Collect note references from retained node metadata, lay out note stories, reduce
 the body band, and call A2 `convergeLayout` until the relevant page fingerprint is
 unchanged. Store note separator geometry on `NoteLayout`; do not create a second
@@ -152,7 +161,7 @@ Run:
 
 ```bash
 cargo test -p docx-parser textbox -- --nocapture
-pnpm vitest run packages/docx/src/layout/textbox.test.ts packages/docx/src/textbox-main-engine.test.ts packages/docx/src/textbox-vertical-render.test.ts packages/docx/src/renderer.textbox-image.test.ts
+pnpm vitest run packages/docx/src/parser-model.test.ts packages/docx/src/layout/textbox-input.test.ts packages/docx/src/layout/textbox.test.ts packages/docx/src/textbox-main-engine.test.ts packages/docx/src/textbox-vertical-render.test.ts packages/docx/src/renderer.textbox-image.test.ts
 ```
 
 Expected: parser assertions fail because the current `ShapeTextBody` tuple and
@@ -160,14 +169,14 @@ Expected: parser assertions fail because the current `ShapeTextBody` tuple and
 
 - [ ] **Step 3: Preserve blocks and delegate to `layoutStory`**
 
-Replace the private Rust tuple alias with a named `ShapeTextBody` struct carrying
-both `legacy_blocks: Vec<ShapeText>` and `content: Vec<TextBoxBlockWire>`. Define
-the parse-time wire enum without using a Rust keyword as a field name:
+In `packages/docx/parser/src/types.rs`, define the parse-time wire enum with
+crate visibility so both the sibling `parser.rs` producer and the `ShapeRun`
+wire field can name it, without using a Rust keyword as a field name:
 
 ```rust
 #[derive(Serialize, Debug, Clone)]
 #[serde(untagged)]
-enum TextBoxBlockWire {
+pub(crate) enum TextBoxBlockWire {
     Body(BodyElement),
     Unsupported {
         #[serde(rename = "type")]
@@ -183,7 +192,10 @@ enum TextBoxBlockWire {
 Set `kind` to the fixed value `"unsupportedTextBoxBlock"`. Build this enum while
 walking `txbxContent`, so an unsupported block's QName, source path, and order are
 retained before serialization rather than reconstructed from a narrowed
-`BodyElement`. Add a
+`BodyElement`; import the `types.rs` enum in `parser.rs` rather than defining a
+second parser-local wire type. Replace the private Rust tuple alias in
+`parser.rs` with a named `ShapeTextBody` struct carrying both
+`legacy_blocks: Vec<ShapeText>` and `content: Vec<TextBoxBlockWire>`. Add a
 `#[serde(skip_serializing_if = "Vec::is_empty")] text_box_content:
 Vec<TextBoxBlockWire>` wire field to Rust `ShapeRun` while retaining and populating
 `text_blocks` exactly as today. Do not add, remove, or rename any exported
@@ -200,8 +212,11 @@ autofit, vertical direction, clipping, and plain-data transform, then call
 `layoutStory`. Paint the nested story from stored geometry. Extend A3's single
 `normalizeTextBoxInput` boundary to prefer internal `ParsedShapeRun.textBoxContent`
 and otherwise convert public `ShapeRun.textBlocks`. Generalize its internal return
-type from paragraph-only input to the `StoryBlockInput` union used by
-`layoutStory`; do not add a second adapter or delete this fallback after parser
+type from paragraph-only input by extending B1's exact `StoryBlockInput` union to
+`FlowBlockInput | ParsedUnsupportedTextBoxBlock`. `layoutStory` emits the
+unsupported diagnostic at the marker's ordered position and delegates all
+supported paragraph/table dispatch to `layoutFlowBlocks`; it does not add another
+block switch. Do not add a second adapter or delete this fallback after parser
 wiring. Add a test that constructs only the exported public `ShapeRun` shape with
 `textBlocks` (no parser-only fields) and asserts the same retained paragraph
 layout as the A3 path. A3 already removed text-box-specific measurement and
@@ -214,7 +229,7 @@ Run:
 ```bash
 pnpm build:wasm
 cargo test -p docx-parser
-pnpm vitest run packages/docx/src/layout/textbox.test.ts packages/docx/src/textbox-*.test.ts packages/docx/src/anchored-textbox-render.test.ts packages/docx/src/renderer.textbox-image.test.ts
+pnpm vitest run packages/docx/src/parser-model.test.ts packages/docx/src/layout/textbox-input.test.ts packages/docx/src/layout/textbox.test.ts packages/docx/src/textbox-*.test.ts packages/docx/src/anchored-textbox-render.test.ts packages/docx/src/renderer.textbox-image.test.ts
 rg -n 'type ShapeTextBody = \(' packages/docx/src packages/docx/parser/src
 pnpm typecheck
 ```
