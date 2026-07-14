@@ -1,6 +1,7 @@
 id: no-docx-layout-in-paint
 valid:
   - "import type { DrawingLayout } from '../layout/types.js';"
+  - "import { orderedPagePaintNodes } from '../layout/page-graph.js';"
   - "ctx.fillText(run.text, run.xPt, run.baselinePt);"
   - "ctx.fillRect(rect.xPt, rect.yPt, rect.widthPt, rect.heightPt);"
 invalid:
