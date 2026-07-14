@@ -45,6 +45,7 @@
 - Read for the audit: `packages/ooxml-common/src/units.rs`
 - Create: `packages/docx/api/public-api-baseline.d.ts`
 - Create: `scripts/check-docx-layout-boundaries.mjs`
+- Create: `scripts/check-docx-layout-boundaries.test.mjs`
 - Create: `scripts/docx-layout-boundary-baseline.json`
 - Create: `scripts/check-docx-public-api.mjs`
 - Create: `rules/no-docx-layout-in-paint.yml`
@@ -54,6 +55,7 @@
 - Create: `rule-tests/no-docx-display-scale-in-layout-test.yml`
 - Create: `rule-tests/no-docx-style-resolution-in-layout-paint-test.yml`
 - Modify: `sgconfig.yml`
+- Modify: `package.json`
 - Modify: `.github/workflows/ci.yml`
 
 **Interfaces:**
@@ -157,6 +159,18 @@ current `@silurus/ooxml/docx` declaration surface as
 baseline only in A1; later invocations omit that flag and fail on any declaration
 change.
 
+For every post-A1 branch, the boundary checker computes `git merge-base
+origin/main HEAD`, reads that commit's baseline with `git show`, and enforces
+`headAllowances ⊆ mergeBaseAllowances` before checking source edges. A changed
+JSON file therefore cannot authorize a new edge. The A1-only
+`--write-transitional-baseline` command is valid only when the merge base has no
+baseline file; it fails once a baseline exists. `package.json` exposes
+`test:docx-boundaries` as `node --test
+scripts/check-docx-layout-boundaries.test.mjs`, and CI runs it with lint. Set the
+CI `actions/checkout` step to `fetch-depth: 0`, so `origin/main`, the merge base,
+and its committed baseline are available to the checker rather than depending on
+a shallow checkout's incidental history.
+
 - [ ] **Step 4: Run focused and static checks**
 
 Run:
@@ -165,6 +179,7 @@ Run:
 pnpm vitest run packages/docx/src/layout/invariants.test.ts packages/docx/src/paint/paint-purity.test.ts
 pnpm lint
 pnpm lint:test
+pnpm test:docx-boundaries
 node scripts/check-docx-layout-boundaries.mjs --write-transitional-baseline
 node scripts/check-docx-layout-boundaries.mjs
 pnpm --filter @silurus/ooxml-docx build
@@ -173,8 +188,10 @@ pnpm typecheck
 ```
 
 Expected: all commands pass; rule tests prove type-only node imports are valid
-and algorithm/measurement/display-scale access fails; the structured-clone test
-contains no live platform objects.
+and algorithm/measurement/display-scale access fails. Node negative fixtures
+prove a new forbidden import edge fails, expanding the head baseline beyond the
+merge-base set fails, and `--final` with a nonempty baseline fails. The
+structured-clone test contains no live platform objects.
 
 - [ ] **Step 5: Commit, independently review, fix, and merge PR A1**
 
@@ -304,7 +321,8 @@ Use the roadmap review gate.
 - Create: `packages/docx/src/layout/paragraph.ts`
 - Create: `packages/docx/src/layout/paragraph.test.ts`
 - Create: `packages/docx/src/layout/run-resources.test.ts`
-- Create: `packages/docx/src/layout/textbox-compat.test.ts`
+- Create: `packages/docx/src/layout/textbox-input.ts`
+- Create: `packages/docx/src/layout/textbox-input.test.ts`
 - Create: `packages/docx/src/paint/canvas-text.ts`
 - Create: `packages/docx/src/paint/canvas-text.test.ts`
 - Modify: `packages/docx/src/paint/canvas-drawing.ts`
@@ -323,7 +341,7 @@ Use the roadmap review gate.
 **Interfaces:**
 
 - Consumes: the stable services, options, convergence primitive, `SourceRef`, and invariant contracts from A1/A2.
-- Produces: `ParagraphLayout`, `TextPlacement`, `InlineResourceLayout`, `DrawingLayout`, `TextBoxLayout`, `shapeTextCompatibilityBlocks`, `layoutParagraph`, and `paintParagraphLayout`.
+- Produces: `ParagraphLayout`, `TextPlacement`, `InlineResourceLayout`, `DrawingLayout`, `TextBoxLayout`, `normalizeTextBoxInput`, `layoutParagraph`, and `paintParagraphLayout`.
 
 **Specification evidence:** ECMA-376 §17.3.1.13 (`w:jc`), §17.3.1.38
 (`w:tabs`), §17.3.1.33 (`w:spacing`), §17.3.1.19/§17.9 numbering,
@@ -346,7 +364,7 @@ export interface ParagraphLayout {
   readonly shading?: FillPaint;
 }
 export function layoutParagraph(input: ParagraphLayoutInput & Readonly<{ exclusions: readonly WrapExclusion[] }>, services: LayoutServices): ParagraphLayout;
-export function shapeTextCompatibilityBlocks(shape: ShapeRun): readonly ParagraphLayoutInput[];
+export function normalizeTextBoxInput(shape: ShapeRun): readonly ParagraphLayoutInput[];
 export function paintParagraphLayout(node: ParagraphLayout, context: CanvasPaintContext): void;
 ```
 
@@ -369,7 +387,7 @@ Add one matrix-driven test covering every `DocRun` arm and associated resource:
 | inline/anchored `chart` | shared chart resource key and bounds | core chart paint + `DrawingLayout` |
 | line/page/column `break` | line or flow event | paragraph/paginator |
 | `field` | resolved text plus field dependency | paragraph + A2 convergence |
-| `shape` / text box | drawing bounds plus existing public `textBlocks` converted to retained paragraph layouts; richer block source replaces only the adapter in B2 | `DrawingLayout` + `TextBoxLayout` |
+| `shape` / text box | drawing bounds plus existing public `textBlocks` converted to retained paragraph layouts; B2 generalizes the same normalizer to richer blocks while preserving this fallback | `DrawingLayout` + `TextBoxLayout` |
 | `math` | stable math resource key and layout bounds | A2 `MathMetadataService` |
 | `ptab` | positioned tab placement | paragraph |
 | picture bullet | image resource key and marker bounds | paragraph/resources |
@@ -395,13 +413,16 @@ font descriptor, advances, offsets, decorations, link/bookmark metadata, and
 resource keys on `TextPlacement`. `canvas-text.ts` and `canvas-drawing.ts` only
 apply stored transforms and call drawing primitives.
 
-For a shape carrying the existing public `ShapeRun.textBlocks`, convert each
-`ShapeText` compatibility block to a `ParagraphLayoutInput`, lay it out through
-the same `layoutParagraph`, and retain those paragraph nodes inside
-`TextBoxLayout`. Delete `renderShapeText` measurement and parser dereference in
-this PR. B2 later replaces only this source adapter with full internal
-`textBoxContent` plus `layoutStory`; it reuses the same paragraph/table nodes and
-paint contract and therefore introduces no temporary second text-box algorithm.
+For a shape carrying the existing public `ShapeRun.textBlocks`,
+`normalizeTextBoxInput` converts each `ShapeText` compatibility block to a
+`ParagraphLayoutInput`, lays it out through the same `layoutParagraph`, and
+retains those paragraph nodes inside `TextBoxLayout`. This function is the single
+permanent input-normalization boundary for both parser-produced and externally
+constructed public models. Delete `renderShapeText` measurement and parser
+dereference in this PR. B2 extends this normalizer to prefer full internal
+`textBoxContent` plus `layoutStory`, while retaining the public `textBlocks`
+fallback. It reuses the same paragraph/table nodes and paint contract and
+therefore introduces no temporary second text-box algorithm.
 
 Paragraph layout consumes only immutable `WrapExclusion` polygons; it does not
 place or retry floats. Until C1, the single existing float placer is adapted to
@@ -418,7 +439,7 @@ paint-facing fragments; retain only `SourceRef` and self-contained paint data.
 Run:
 
 ```bash
-pnpm vitest run packages/docx/src/layout/paragraph.test.ts packages/docx/src/layout/run-resources.test.ts packages/docx/src/layout/textbox-compat.test.ts packages/docx/src/paint/canvas-text.test.ts packages/docx/src/fragment-paint.test.ts packages/docx/src/layout-lines-reuse-identity.test.ts packages/docx/src/layout-lines-scale-invariance.test.ts packages/docx/src/layout-lines-zoom-invariant.test.ts
+pnpm vitest run packages/docx/src/layout/paragraph.test.ts packages/docx/src/layout/run-resources.test.ts packages/docx/src/layout/textbox-input.test.ts packages/docx/src/paint/canvas-text.test.ts packages/docx/src/fragment-paint.test.ts packages/docx/src/layout-lines-reuse-identity.test.ts packages/docx/src/layout-lines-scale-invariance.test.ts packages/docx/src/layout-lines-zoom-invariant.test.ts
 rg -n 'fitMeasureReuseEnabled|fragmentPaintEnabled|lineReuseEnabled|isFragmentPaintableParagraph|layoutLinesInputs|stampParagraphLines|renderBodyParagraphLines|renderShapeText' packages/docx/src
 pnpm lint
 pnpm lint:test

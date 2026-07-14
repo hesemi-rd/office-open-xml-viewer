@@ -282,7 +282,8 @@ Search and selection geometry is projected from layout rather than collected by 
 second dry render. Main and worker modes must produce the same normalized layout
 fingerprint for services with identical text, image, and math resource snapshots.
 
-The worker retains layouts by a structured-clone-safe `LayoutOptions` key. The
+The worker retains layouts by the structured-clone-safe string returned from
+`layoutOptionsKey(options, services)`, including service-owned fingerprints. The
 load-time default key backs synchronous page metadata. A per-call `currentDate`
 selects a keyed variant without mutating the default metadata or changing public
 method signatures; NUMPAGES is converged within that variant.

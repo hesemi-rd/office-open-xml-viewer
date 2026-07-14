@@ -109,6 +109,8 @@ Use the roadmap review gate.
 - Create: `packages/docx/src/parser-model.ts`
 - Create: `packages/docx/src/parser-model.test.ts`
 - Create: `packages/docx/src/layout/textbox.test.ts`
+- Modify: `packages/docx/src/layout/textbox-input.ts`
+- Modify: `packages/docx/src/layout/textbox-input.test.ts`
 - Modify: `packages/docx/src/layout/stories.ts`
 - Modify: `packages/docx/src/layout/types.ts`
 - Modify: `packages/docx/src/paint/canvas-drawing.ts`
@@ -159,9 +161,29 @@ Expected: parser assertions fail because the current `ShapeTextBody` tuple and
 - [ ] **Step 3: Preserve blocks and delegate to `layoutStory`**
 
 Replace the private Rust tuple alias with a named `ShapeTextBody` struct carrying
-both `legacy_blocks: Vec<ShapeText>` and `content: Vec<BodyElement>`. Add a
-`#[serde(untagged)] TextBoxBlockWire` enum with `Body(BodyElement)` and
-`Unsupported { type, q_name, source_path }` variants, then add a
+both `legacy_blocks: Vec<ShapeText>` and `content: Vec<TextBoxBlockWire>`. Define
+the parse-time wire enum without using a Rust keyword as a field name:
+
+```rust
+#[derive(Serialize, Debug, Clone)]
+#[serde(untagged)]
+enum TextBoxBlockWire {
+    Body(BodyElement),
+    Unsupported {
+        #[serde(rename = "type")]
+        kind: String,
+        #[serde(rename = "qName")]
+        q_name: String,
+        #[serde(rename = "sourcePath")]
+        source_path: Vec<usize>,
+    },
+}
+```
+
+Set `kind` to the fixed value `"unsupportedTextBoxBlock"`. Build this enum while
+walking `txbxContent`, so an unsupported block's QName, source path, and order are
+retained before serialization rather than reconstructed from a narrowed
+`BodyElement`. Add a
 `#[serde(skip_serializing_if = "Vec::is_empty")] text_box_content:
 Vec<TextBoxBlockWire>` wire field to Rust `ShapeRun` while retaining and populating
 `text_blocks` exactly as today. Do not add, remove, or rename any exported
@@ -175,11 +197,15 @@ Parse supported paragraph/table `txbxContent` blocks in document order through
 existing body-element parsers and emit an unsupported-block marker for every
 other schema-permitted block. Create a text-box container context containing insets,
 autofit, vertical direction, clipping, and plain-data transform, then call
-`layoutStory`. Paint the nested story from stored geometry. Delete the A3
-`ShapeText[] -> ParagraphLayoutInput[]` compatibility source adapter after the
-internal full block source is wired; A3 already removed text-box-specific
-measurement and `renderShapeText`. Retain the exported `ShapeText` and
-`ShapeTextRun` contracts.
+`layoutStory`. Paint the nested story from stored geometry. Extend A3's single
+`normalizeTextBoxInput` boundary to prefer internal `ParsedShapeRun.textBoxContent`
+and otherwise convert public `ShapeRun.textBlocks`. Generalize its internal return
+type from paragraph-only input to the `StoryBlockInput` union used by
+`layoutStory`; do not add a second adapter or delete this fallback after parser
+wiring. Add a test that constructs only the exported public `ShapeRun` shape with
+`textBlocks` (no parser-only fields) and asserts the same retained paragraph
+layout as the A3 path. A3 already removed text-box-specific measurement and
+`renderShapeText`. Retain the exported `ShapeText` and `ShapeTextRun` contracts.
 
 - [ ] **Step 4: Rebuild and verify Green**
 
@@ -189,12 +215,13 @@ Run:
 pnpm build:wasm
 cargo test -p docx-parser
 pnpm vitest run packages/docx/src/layout/textbox.test.ts packages/docx/src/textbox-*.test.ts packages/docx/src/anchored-textbox-render.test.ts packages/docx/src/renderer.textbox-image.test.ts
-rg -n 'shapeTextCompatibilityBlocks|type ShapeTextBody = \(' packages/docx/src packages/docx/parser/src
+rg -n 'type ShapeTextBody = \(' packages/docx/src packages/docx/parser/src
 pnpm typecheck
 ```
 
 Expected: all checks pass, the public declaration baseline from A1 is unchanged,
-`textBlocks` remains serialized, and `rg` has no production matches.
+`textBlocks` remains serialized, the external-public-model fallback test passes,
+and `rg` has no production matches.
 
 - [ ] **Step 5: Commit, independently review, fix, and merge PR B2**
 
