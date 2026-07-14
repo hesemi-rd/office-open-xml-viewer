@@ -46,11 +46,21 @@ function normalizeDeclaration(source, fileName) {
     true,
     ts.ScriptKind.TS,
   );
+  const transformed = ts.transform(parsed, [(context) => {
+    const visit = (node) => {
+      if (ts.isParenthesizedTypeNode(node)) return ts.visitNode(node.type, visit);
+      if (ts.isStringLiteral(node)) return ts.factory.createStringLiteral(node.text, true);
+      return ts.visitEachChild(node, visit, context);
+    };
+    return (root) => ts.visitNode(root, visit);
+  }]);
   const printer = ts.createPrinter({
     newLine: ts.NewLineKind.LineFeed,
     removeComments: true,
   });
-  return normalizeText(printer.printFile(parsed));
+  const normalized = normalizeText(printer.printFile(transformed.transformed[0]));
+  transformed.dispose();
+  return normalized;
 }
 
 function localSpecifiers(source) {
@@ -113,18 +123,15 @@ function renderBaseline(declarations) {
   return `${header}\n\n${modules.join('\n\n')}\n`;
 }
 
-function resolveBaseRef(root, explicit) {
-  if (explicit) return explicit;
-  for (const candidate of ['origin/main', 'main']) {
+function resolveMergeBase(root, explicit) {
+  for (const candidate of explicit ? [explicit] : ['origin/main', 'main']) {
     try {
       return execFileSync('git', ['merge-base', candidate, 'HEAD'], {
         cwd: root,
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'ignore'],
       }).trim();
-    } catch {
-      // Try the next conventional main ref.
-    }
+    } catch {}
   }
   throw new Error('Cannot resolve the merge base; fetch origin/main or pass --base-ref.');
 }
@@ -141,15 +148,27 @@ function refContains(root, ref, relativePath) {
   }
 }
 
+function readRefFile(root, ref, relativePath) {
+  try {
+    return execFileSync('git', ['show', `${ref}:${relativePath}`], {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+  } catch {
+    return null;
+  }
+}
+
 export function checkPublicApi(options) {
   const typesRoot = path.join(options.root, 'packages/docx/dist/types');
   const baselinePath = path.join(options.root, 'packages/docx/api/public-api-baseline.d.ts');
   const baselineRelative = 'packages/docx/api/public-api-baseline.d.ts';
   const actual = renderBaseline(collectDeclarations(typesRoot, options.entry));
+  const mergeBase = resolveMergeBase(options.root, options.baseRef);
 
   if (options.writeBaseline) {
-    const baseRef = resolveBaseRef(options.root, options.baseRef);
-    if (refContains(options.root, baseRef, baselineRelative)) {
+    if (refContains(options.root, mergeBase, baselineRelative)) {
       throw new Error('--write-baseline is only permitted before the merge base contains the public API baseline.');
     }
     mkdirSync(path.dirname(baselinePath), { recursive: true });
@@ -162,6 +181,10 @@ export function checkPublicApi(options) {
     throw new Error(`Public API baseline is missing (${baselineRelative}).`);
   }
   const expected = normalizeText(readFileSync(baselinePath, 'utf8'));
+  const mergeBaseBaseline = readRefFile(options.root, mergeBase, baselineRelative);
+  if (mergeBaseBaseline != null && normalizeText(mergeBaseBaseline) !== expected) {
+    throw new Error('DOCX public API baseline differs from the merge base and cannot be changed during the layout migration.');
+  }
   if (normalizeText(actual) !== expected) {
     throw new Error(
       'DOCX public API declaration baseline differs. Public API changes are not permitted in this migration; rebuild and inspect the reachable declarations.',

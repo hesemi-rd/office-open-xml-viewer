@@ -59,8 +59,8 @@ export interface DocxHighlightMatch {
     slices: MatchRunSlice[];
     active: boolean;
 }
-export declare const DEFAULT_FIND_HIGHLIGHT = "rgba(255, 214, 0, 0.42)";
-export declare const DEFAULT_FIND_ACTIVE_HIGHLIGHT = "rgba(255, 140, 0, 0.55)";
+export declare const DEFAULT_FIND_HIGHLIGHT = 'rgba(255, 214, 0, 0.42)';
+export declare const DEFAULT_FIND_ACTIVE_HIGHLIGHT = 'rgba(255, 140, 0, 0.55)';
 export interface DocxHighlightColors {
     match?: string;
     active?: string;
@@ -488,8 +488,8 @@ export declare const NASKH_SERIF_ARABIC_FONTS: Set<string>;
 export declare function isArabicSubstituteFont(family: string): boolean;
 export declare function quoteAll(names: readonly string[]): string;
 export declare const ARABIC_TAIL_SANS: readonly [
-    "Noto Naskh Arabic",
-    "Noto Sans Arabic"
+    'Noto Naskh Arabic',
+    'Noto Sans Arabic'
 ];
 export declare function sansTail(cjk: ReturnType<typeof classifyCjkFont>): string;
 export declare function serifTail(cjk: ReturnType<typeof classifyCjkFont>): string;
@@ -1140,11 +1140,11 @@ export interface ColumnGeom {
     xPt: number;
     wPt: number;
 }
-export type BodyElement = {
+export type BodyElement = ({
     type: 'paragraph';
-} & DocParagraph | {
+} & DocParagraph) | ({
     type: 'table';
-} & DocTable | {
+} & DocTable) | {
     type: 'pageBreak';
     parity?: 'odd' | 'even';
 } | {
@@ -1280,30 +1280,30 @@ export interface NumberingInfo {
     picBulletWidthPt?: number;
     picBulletHeightPt?: number;
 }
-export type DocRun = {
+export type DocRun = ({
     type: 'text';
-} & DocxTextRun | {
+} & DocxTextRun) | ({
     type: 'anchorHost';
-} & AnchorHostMetrics | {
+} & AnchorHostMetrics) | ({
     type: 'image';
-} & ImageRun | {
+} & ImageRun) | ({
     type: 'chart';
-} & ChartRun | {
+} & ChartRun) | {
     type: 'break';
     breakType: 'line' | 'page' | 'column';
-} | {
+} | ({
     type: 'field';
-} & FieldRun | {
+} & FieldRun) | ({
     type: 'shape';
-} & ShapeRun | {
+} & ShapeRun) | {
     type: 'math';
     nodes: MathNode[];
     display: boolean;
     fontSize: number;
     jc?: string;
-} | {
+} | ({
     type: 'ptab';
-} & PTabRun;
+} & PTabRun);
 export interface ChartRun {
     chart: ChartModel;
     widthPt: number;
@@ -1643,11 +1643,11 @@ export interface DocTableRow {
     isHeader: boolean;
     cantSplit?: boolean;
 }
-export type CellElement = {
+export type CellElement = ({
     type: 'paragraph';
-} & DocParagraph | {
+} & DocParagraph) | ({
     type: 'table';
-} & DocTable;
+} & DocTable);
 export interface DocTableCell {
     content: CellElement[];
     colSpan: number;

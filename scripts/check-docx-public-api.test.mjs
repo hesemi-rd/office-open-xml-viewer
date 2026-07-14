@@ -61,6 +61,24 @@ test('fails when a transitively reachable declaration changes', () => {
   assert.match(result.stderr, /public API declaration baseline differs/i);
 });
 
+test('ignores declaration-emitter quote style and redundant type parentheses', () => {
+  const { root, base } = fixture();
+  const detailPath = path.join(root, 'packages/docx/dist/types/detail.d.ts');
+  writeFileSync(
+    detailPath,
+    'export interface A { a: string; }\nexport interface B { b: string; }\nexport type Detail = ({ kind: "a" } & A) | ({ kind: "b" } & B);\n',
+  );
+  assert.equal(run(root, '--base-ref', base, '--write-baseline').status, 0);
+  writeFileSync(
+    detailPath,
+    "export interface A { a: string; }\nexport interface B { b: string; }\nexport type Detail = { kind: 'a' } & A | { kind: 'b' } & B;\n",
+  );
+
+  const result = run(root, '--base-ref', base);
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
 test('fails when the generated entry declaration is missing', () => {
   const { root, base } = fixture();
   const result = run(root, '--base-ref', base, '--write-baseline', '--entry', 'missing.d.ts');
@@ -77,4 +95,23 @@ test('refuses to rewrite the baseline after it exists at the merge base', () => 
   const result = run(root, '--base-ref', postA1, '--write-baseline');
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /only permitted before the merge base contains/i);
+});
+
+test('rejects manually changing both declarations and the committed baseline after A1', () => {
+  const { root, base } = fixture();
+  assert.equal(run(root, '--base-ref', base, '--write-baseline').status, 0);
+  git(root, 'add', '.');
+  git(root, 'commit', '-qm', 'establish baseline');
+  const postA1 = git(root, 'rev-parse', 'HEAD');
+  writeFileSync(
+    path.join(root, 'packages/docx/dist/types/detail.d.ts'),
+    'export interface Detail { value: number; }\n',
+  );
+  const baselinePath = path.join(root, 'packages/docx/api/public-api-baseline.d.ts');
+  writeFileSync(baselinePath, readFileSync(baselinePath, 'utf8').replace('value: string', 'value: number'));
+
+  const result = run(root, '--base-ref', postA1);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /baseline differs from the merge base/i);
 });
