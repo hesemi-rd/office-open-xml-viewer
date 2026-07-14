@@ -24,6 +24,8 @@ import {
   attachDocumentLayoutRuntime,
   documentLayoutRuntimeOf,
 } from './layout/runtime-state.js';
+import { layoutParseErrorPage } from './layout/error-page.js';
+import { deepFreezeDocumentLayout } from './layout/invariants.js';
 import type {
   DocumentMeta,
   RenderWorkerRequest,
@@ -183,12 +185,22 @@ export class DocxDocument {
       preparedMath = await prepareMathRuns(doc._document.body, opts.math);
     }
     if (mode === 'main' && doc._document) {
-      documentLayoutRuntimeOf(doc).services = createLayoutServices(doc._document, {
+      const runtime = documentLayoutRuntimeOf(doc);
+      runtime.services = createLayoutServices(doc._document, {
         localMetrics: localMetrics?.metrics,
         useGoogleFonts: !!opts.useGoogleFonts,
+        embeddedFaces: doc._embeddedFontFaces,
+        googleFaces: doc._googleFontFaces,
         mathResources: preparedMath?.records,
         mathDrawables: preparedMath?.drawables,
       });
+      if (doc._document.parseError) {
+        runtime.retainedErrorLayout = deepFreezeDocumentLayout(layoutParseErrorPage(
+          doc._document.parseError,
+          { widthPt: doc._document.section.pageWidth, heightPt: doc._document.section.pageHeight },
+          runtime.services.text,
+        ));
+      }
     }
     return doc;
   }
@@ -225,6 +237,7 @@ export class DocxDocument {
     this._meta = null;
     this._pages = null;
     documentLayoutRuntimeOf(this).services = null;
+    documentLayoutRuntimeOf(this).retainedErrorLayout = null;
     this._bookmarkPages = null;
     this._imageCache.clear();
     // Release the embedded fonts this document added to the shared FontFaceSet
@@ -468,6 +481,7 @@ export class DocxDocument {
       // zip path (decoded only when drawn) instead of reading inlined base64.
       fetchImage: this._fetchImage,
       layoutServices: documentLayoutRuntimeOf(this).services ?? undefined,
+      retainedLayout: documentLayoutRuntimeOf(this).retainedErrorLayout ?? undefined,
       defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs,
     });
   }

@@ -72,14 +72,6 @@ const LEGACY_SYMBOLS = [
   'tableLayoutInputs',
 ];
 
-// Migration coordinators must accept each staged service/option as it moves
-// behind the retained-layout boundary. Their legacy occurrence counts and the
-// final adapter gate still require deletion; only leaf algorithms stay body-hash
-// frozen while the series is in progress.
-const MUTABLE_MIGRATION_COORDINATORS = new Set([
-  'computePages',
-]);
-
 const LEGACY_RENDERER_IMPORTS = new Set([
   'fragment-paint.ts',
   'layout-context.ts',
@@ -381,6 +373,46 @@ function normalizedNodeHash(node, source) {
   return createHash('sha256').update(normalized).digest('hex');
 }
 
+/** A2 permits one mechanically constrained edit to computePages: append the
+ * two dependency parameters, then append those identifiers to its existing
+ * buildMeasureState call. Everything else remains represented in the hash. */
+function normalizedComputePagesHash(node, source) {
+  const allowedNames = ['layoutServices', 'layoutOptions'];
+  const appendedParameters = node.parameters?.slice(-2) ?? [];
+  const hasAllowedParameters = appendedParameters.length === 2
+    && appendedParameters.every((parameter, index) => (
+      ts.isIdentifier(parameter.name) && parameter.name.text === allowedNames[index]
+    ));
+  const omittedParameters = new Set(hasAllowedParameters ? appendedParameters : []);
+  const shape = (current) => {
+    if (omittedParameters.has(current)) return null;
+    if (ts.isCallExpression(current)
+      && ts.isIdentifier(current.expression)
+      && current.expression.text === 'buildMeasureState') {
+      const tail = current.arguments.slice(-2);
+      const hasAllowedArguments = tail.length === 2
+        && tail.every((argument, index) => ts.isIdentifier(argument) && argument.text === allowedNames[index]);
+      const args = hasAllowedArguments ? current.arguments.slice(0, -2) : current.arguments;
+      return [
+        ts.SyntaxKind[current.kind],
+        undefined,
+        shape(current.expression),
+        ...args.map(shape),
+      ];
+    }
+    const text = ts.isIdentifier(current) || ts.isLiteralExpression(current)
+      ? current.getText(source)
+      : undefined;
+    const children = [];
+    current.forEachChild((child) => {
+      const childShape = shape(child);
+      if (childShape !== null) children.push(childShape);
+    });
+    return [ts.SyntaxKind[current.kind], text, ...children];
+  };
+  return createHash('sha256').update(JSON.stringify(shape(node))).digest('hex');
+}
+
 function declarationInventory(root) {
   const sourceRoot = resolve(root, DOCX_SOURCE);
   const nonLayoutDeclarationKeys = [];
@@ -400,8 +432,10 @@ function declarationInventory(root) {
         const plannedRendererAdapter = file === `${DOCX_SOURCE}/renderer.ts`
           && FINAL_RENDERER_DECLARATIONS.has(name);
         if (!migrationOwner && !plannedRendererAdapter) nonLayoutDeclarationKeys.push(key);
-        if (LEGACY_SYMBOLS.includes(name) && !MUTABLE_MIGRATION_COORDINATORS.has(name)) {
-          legacyDeclarationHashes[key] = normalizedNodeHash(statement, source);
+        if (LEGACY_SYMBOLS.includes(name)) {
+          legacyDeclarationHashes[key] = name === 'computePages'
+            ? normalizedComputePagesHash(statement, source)
+            : normalizedNodeHash(statement, source);
         }
       }
     }
@@ -462,6 +496,20 @@ function mergeBaseBaseline(root, baseRef) {
   if (shown.status !== 0) return null;
   const value = JSON.parse(shown.stdout);
   if (value.version !== 2) fail('INVALID_BASELINE', `${mergeBase}:${BASELINE_PATH}`);
+  // The stored A1 hash predates the A2-specific normalization. Recompute only
+  // computePages from the immutable merge-base source with today's mechanical
+  // rule; every other declaration continues to use the committed baseline.
+  const renderer = git(root, ['show', `${mergeBase}:${DOCX_SOURCE}/renderer.ts`], true);
+  if (renderer.status === 0) {
+    const source = ts.createSourceFile('renderer.ts', renderer.stdout, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    const declaration = source.statements.find((statement) => (
+      ts.isFunctionDeclaration(statement) && statement.name?.text === 'computePages'
+    ));
+    if (declaration) {
+      value.legacyDeclarationHashes[`${DOCX_SOURCE}/renderer.ts#FunctionDeclaration#computePages`]
+        = normalizedComputePagesHash(declaration, source);
+    }
+  }
   return value;
 }
 
@@ -700,6 +748,17 @@ export function checkDocxLayoutBoundaries(options) {
   const baseBaseline = mergeBaseBaseline(root, options.baseRef);
   const headBaseline = readBaseline(baselinePath);
   if (baseBaseline) assertNoExpansion(headBaseline, baseBaseline);
+  const coordinatorKey = `${DOCX_SOURCE}/renderer.ts#FunctionDeclaration#computePages`;
+  if (baseBaseline?.legacyDeclarationHashes[coordinatorKey]) {
+    // A1's committed baseline intentionally had no coordinator hash. Treat the
+    // immutable merge-base declaration as its virtual baseline entry so A2 can
+    // constrain the one dependency-threading edit without rewriting the file.
+    headBaseline.legacyDeclarationHashes[coordinatorKey]
+      = baseBaseline.legacyDeclarationHashes[coordinatorKey];
+    headBaseline.legacyDeclarationHashes = Object.fromEntries(
+      Object.entries(headBaseline.legacyDeclarationHashes).sort(([left], [right]) => left.localeCompare(right)),
+    );
+  }
   const actual = currentAllowances(root);
   if (baseBaseline) assertNoExpansion(actual, baseBaseline);
   assertExactBaseline(headBaseline, actual);

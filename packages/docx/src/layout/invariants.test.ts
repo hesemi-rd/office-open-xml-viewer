@@ -55,6 +55,7 @@ function serviceStubs(): LayoutServices {
   return {
     text: {
       fingerprint: 'text',
+      localMetrics: {},
       shape: () => ({ advancePt: 0, ascentPt: 0, descentPt: 0, spans: [], diagnostics: [] }),
     },
     images: {

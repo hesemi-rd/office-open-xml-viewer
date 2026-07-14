@@ -13,10 +13,8 @@ function canonicalValue(value: unknown): string {
 
 export function stableFingerprint(namespace: string, value: unknown): string {
   const input = canonicalValue(value);
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < input.length; index += 1) {
-    hash ^= input.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return `${namespace}:${(hash >>> 0).toString(16).padStart(8, '0')}`;
+  // This value is used as an identity, not merely as a hash-table hint. Keep
+  // the canonical input itself so two resources can never alias through a
+  // short digest collision (the previous FNV-1a/32 representation did).
+  return `${namespace}:${encodeURIComponent(input)}`;
 }

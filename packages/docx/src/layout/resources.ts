@@ -1,6 +1,6 @@
 import type { DeepReadonly, LayoutDiagnostic, SourceRef } from './types.js';
 import { stableFingerprint } from './fingerprint.js';
-import type { DocxDocumentModel } from '../types.js';
+import type { BodyElement, DocRun, DocTable, DocxDocumentModel, ShapeRun } from '../types.js';
 import { rasterExceedsBudget, sniffRasterDimensions } from '@silurus/ooxml-core';
 
 export interface ImageLayoutResource {
@@ -15,6 +15,8 @@ export interface ImageMetadataRecord extends ImageLayoutResource {
 
 export interface MathLayoutResource {
   readonly resourceKey: string;
+  /** Deterministic content/display alias used by the transitional line adapter. */
+  readonly lookupKey?: string;
   readonly widthEm: number;
   readonly ascentEm: number;
   readonly descentEm: number;
@@ -97,15 +99,19 @@ export function createMathMetadataService(records: readonly MathLayoutResource[]
   const snapshot = [...records]
     .map((record) => Object.freeze({
       resourceKey: record.resourceKey,
+      ...(record.lookupKey ? { lookupKey: record.lookupKey } : {}),
       widthEm: finiteNonNegative(record.widthEm, 'widthEm'),
       ascentEm: finiteNonNegative(record.ascentEm, 'ascentEm'),
       descentEm: finiteNonNegative(record.descentEm, 'descentEm'),
-      diagnostics: Object.freeze([...record.diagnostics]),
+      diagnostics: Object.freeze(record.diagnostics.map((diagnostic) => Object.freeze({ ...diagnostic }))),
       ...(record.available === false ? { available: false } : {}),
     }))
     .sort((a, b) => a.resourceKey.localeCompare(b.resourceKey));
   const byKey = new Map(snapshot.map((resource) => [resource.resourceKey, resource]));
   if (byKey.size !== snapshot.length) throw new Error('Duplicate math resource key');
+  for (const resource of snapshot) {
+    if (resource.lookupKey && !byKey.has(resource.lookupKey)) byKey.set(resource.lookupKey, resource);
+  }
   return Object.freeze({
     fingerprint: stableFingerprint('math', snapshot),
     resolve(resourceKey: string): DeepReadonly<MathLayoutResource> {
@@ -118,28 +124,55 @@ export function createMathMetadataService(records: readonly MathLayoutResource[]
 
 export function documentImageMetadataRecords(doc: DocxDocumentModel): ImageMetadataRecord[] {
   const records: ImageMetadataRecord[] = [];
-  const visit = (value: unknown, path: readonly (string | number)[]): void => {
-    if (Array.isArray(value)) {
-      value.forEach((child, index) => visit(child, [...path, index]));
+  const add = (source: SourceRef, imagePath: string, mimeType: string, widthPt: number, heightPt: number): void => {
+    records.push({ resourceKey: imageResourceKey(source, imagePath), widthPt, heightPt, mimeType });
+  };
+  const visitRun = (run: DocRun, source: SourceRef): void => {
+    if (run.type === 'image') {
+      add(source, run.imagePath, run.mimeType, run.widthPt, run.heightPt);
       return;
     }
-    if (!value || typeof value !== 'object') return;
-    const record = value as Record<string, unknown>;
-    if (
-      typeof record.imagePath === 'string'
-      && typeof record.widthPt === 'number'
-      && typeof record.heightPt === 'number'
-      && typeof record.mimeType === 'string'
-    ) {
-      records.push({
-        resourceKey: `image:document:${path.map((part) => encodeURIComponent(String(part))).join('/')}:${encodeURIComponent(record.imagePath)}`,
-        widthPt: record.widthPt,
-        heightPt: record.heightPt,
-        mimeType: record.mimeType,
-      });
-    }
-    for (const key of Object.keys(record).sort()) visit(record[key], [...path, key]);
+    if (run.type !== 'shape') return;
+    const shape = run as { type: 'shape' } & ShapeRun;
+    shape.textBlocks?.forEach((block, index) => {
+      if (!block.imagePath || !block.mimeType || block.imageWidthPt == null || block.imageHeightPt == null) return;
+      const textBoxSource: SourceRef = {
+        story: 'textbox',
+        storyInstance: `${source.story}:${source.storyInstance}:${source.path.join('.')}`,
+        path: [index],
+      };
+      add(textBoxSource, block.imagePath, block.mimeType, block.imageWidthPt, block.imageHeightPt);
+    });
   };
-  visit(doc, []);
+  const visitTable = (table: DocTable, story: SourceRef['story'], storyInstance: string, prefix: number[]): void => {
+    table.rows.forEach((row, rowIndex) => row.cells.forEach((cell, cellIndex) => {
+      visitBody(cell.content as BodyElement[], story, storyInstance, [...prefix, rowIndex, cellIndex]);
+    }));
+  };
+  const visitBody = (body: BodyElement[], story: SourceRef['story'], storyInstance: string, prefix: number[] = []): void => {
+    body.forEach((element, elementIndex) => {
+      const path = [...prefix, elementIndex];
+      if (element.type === 'paragraph') {
+        element.runs.forEach((run, runIndex) => visitRun(run, { story, storyInstance, path: [...path, runIndex] }));
+      } else if (element.type === 'table') {
+        visitTable(element, story, storyInstance, path);
+      }
+      if (element.type === 'sectionBreak') {
+        for (const kind of ['default', 'first', 'even'] as const) {
+          const header = element.headers?.[kind];
+          const footer = element.footers?.[kind];
+          if (header) visitBody(header.body, 'header', `section:${elementIndex}:${kind}`);
+          if (footer) visitBody(footer.body, 'footer', `section:${elementIndex}:${kind}`);
+        }
+      }
+    });
+  };
+  visitBody(doc.body, 'body', 'body');
+  for (const kind of ['default', 'first', 'even'] as const) {
+    const header = doc.headers[kind];
+    const footer = doc.footers[kind];
+    if (header) visitBody(header.body, 'header', kind);
+    if (footer) visitBody(footer.body, 'footer', kind);
+  }
   return records;
 }

@@ -32,7 +32,7 @@ function runChecker(root, ...args) {
 
 function initializeRepository() {
   const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-'));
-  write(root, 'packages/docx/src/renderer.ts', 'export function computePages() { return []; }\nexport function computeTableLayout() { return []; }\n');
+  write(root, 'packages/docx/src/renderer.ts', 'function buildMeasureState(ctx: unknown, fonts: unknown) { return [ctx, fonts]; }\nexport function computePages(ctx: unknown, resolvedLocalFonts: unknown = {}) { const measure = buildMeasureState(ctx, resolvedLocalFonts); return [measure]; }\nexport function computeTableLayout() { return []; }\n');
   write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
   write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
   git(root, 'init', '-b', 'main');
@@ -216,14 +216,30 @@ test('rejects renaming a migration flag and changing a hash-frozen leaf declarat
   assert.match(changedResult.output, /LEGACY_DECLARATION_CHANGED/);
 });
 
-test('allows a migration coordinator body and signature to change without count expansion', () => {
+test('allows only exact A2 service and option dependency threading through computePages', () => {
   const root = initializeRepository();
   establishA1Baseline(root);
-  write(root, 'packages/docx/src/renderer.ts', 'export function createLayoutServices() {}\nexport function computePages(services: unknown) { return [services]; }\nexport function computeTableLayout() { return []; }\n');
+  write(root, 'packages/docx/src/renderer.ts', 'function buildMeasureState(ctx: unknown, fonts: unknown, services?: LayoutServices, options?: LayoutOptions) { return [ctx, fonts, services, options]; }\nexport function createLayoutServices() {}\nexport function computePages(ctx: unknown, resolvedLocalFonts: unknown = {}, layoutServices?: LayoutServices, layoutOptions?: LayoutOptions) { const measure = buildMeasureState(ctx, resolvedLocalFonts, layoutServices, layoutOptions); return [measure]; }\nexport function computeTableLayout() { return []; }\n');
 
   const result = runChecker(root, '--base-ref', 'main');
 
   assert.equal(result.status, 0, result.output);
+});
+
+test('rejects unrelated computePages control-flow, calls, and parameters during A2 threading', () => {
+  const cases = [
+    'function buildMeasureState(ctx: unknown, fonts: unknown, services?: LayoutServices, options?: LayoutOptions) { return [ctx, fonts, services, options]; }\nexport function computePages(ctx: unknown, resolvedLocalFonts: unknown = {}, layoutServices?: LayoutServices, layoutOptions?: LayoutOptions) { const measure = buildMeasureState(ctx, resolvedLocalFonts, layoutServices, layoutOptions); return []; }\nexport function computeTableLayout() { return []; }\n',
+    'function buildMeasureState(ctx: unknown, fonts: unknown, services?: LayoutServices, options?: LayoutOptions) { return [ctx, fonts, services, options]; }\nexport function computePages(ctx: unknown, resolvedLocalFonts: unknown = {}, layoutServices?: LayoutServices, layoutOptions?: LayoutOptions) { buildMeasureState(ctx, resolvedLocalFonts, layoutServices, layoutOptions); const measure = buildMeasureState(ctx, resolvedLocalFonts, layoutServices, layoutOptions); return [measure]; }\nexport function computeTableLayout() { return []; }\n',
+    'function buildMeasureState(ctx: unknown, fonts: unknown, services?: LayoutServices, options?: LayoutOptions) { return [ctx, fonts, services, options]; }\nexport function computePages(ctx: unknown, resolvedLocalFonts: unknown = {}, layoutServices?: LayoutServices, layoutOptions?: LayoutOptions, unrelated?: boolean) { const measure = buildMeasureState(ctx, resolvedLocalFonts, layoutServices, layoutOptions); return [measure]; }\nexport function computeTableLayout() { return []; }\n',
+  ];
+  for (const source of cases) {
+    const root = initializeRepository();
+    establishA1Baseline(root);
+    write(root, 'packages/docx/src/renderer.ts', source);
+    const result = runChecker(root, '--base-ref', 'main');
+    assert.notEqual(result.status, 0);
+    assert.match(result.output, /LEGACY_DECLARATION_CHANGED|BASELINE_EXPANSION/);
+  }
 });
 
 test('final mode enforces the renderer adapter export and import allowlists', () => {

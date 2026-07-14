@@ -18,6 +18,7 @@ export interface FontResolution {
   readonly weight: number;
   readonly style: FontStyle;
   readonly diagnostics: readonly LayoutDiagnostic[];
+  readonly genericFamily: 'serif' | 'sans-serif' | 'monospace';
 }
 
 export interface FontResolver {
@@ -63,8 +64,8 @@ export function createFontResolver(inventory: readonly FontInventoryFace[]): Fon
     .filter((face) => face.requestedFamily.trim() && face.resolvedFamily.trim())
     .map((face) => Object.freeze({
       ...face,
-      weights: Object.freeze([...(face.weights ?? [400, 700])]),
-      styles: Object.freeze([...(face.styles ?? ['normal', 'italic'])]),
+      weights: Object.freeze([...(face.weights ?? [400])]),
+      styles: Object.freeze([...(face.styles ?? ['normal'])]),
     }))
     .sort((a, b) => {
       const family = normalizeFamily(a.requestedFamily).localeCompare(normalizeFamily(b.requestedFamily));
@@ -87,7 +88,7 @@ export function createFontResolver(inventory: readonly FontInventoryFace[]): Fon
       const candidates = byFamily.get(normalizeFamily(requestedFamily)) ?? [];
       const face = candidates.find((candidate) =>
         candidate.weights.includes(weight) && candidate.styles.includes(style),
-      ) ?? candidates[0];
+      );
       if (face) {
         const diagnostics: LayoutDiagnostic[] = face.source === 'substitute'
           ? [{
@@ -103,13 +104,14 @@ export function createFontResolver(inventory: readonly FontInventoryFace[]): Fon
           weight,
           style,
           diagnostics,
+          genericFamily: request.genericFamily ?? 'sans-serif',
         });
       }
 
       const generic = request.genericFamily ?? 'sans-serif';
       return freezeResolution({
         requestedFamily,
-        resolvedFamily: generic,
+        resolvedFamily: requestedFamily,
         source: 'generic',
         weight,
         style,
@@ -118,6 +120,7 @@ export function createFontResolver(inventory: readonly FontInventoryFace[]): Fon
           severity: 'warning',
           message: `Font ${requestedFamily} is unavailable; using generic ${generic}`,
         }],
+        genericFamily: generic,
       });
     },
   });

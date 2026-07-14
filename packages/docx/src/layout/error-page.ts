@@ -1,5 +1,6 @@
 import type { SectionLayoutContext } from '../layout-context.js';
 import type { TextLayoutService } from './text.js';
+import { graphemeClusterOffsets } from '@silurus/ooxml-core';
 import type {
   DocumentLayout,
   DrawingLayout,
@@ -29,17 +30,35 @@ function wrapWords(
   const words = text.trim().split(/\s+/).filter(Boolean);
   const lines: string[] = [];
   let line = '';
+  const widthOf = (value: string): number => service.shape({
+    text: value,
+    fontSizePt,
+    fonts: { ascii: 'sans-serif', highAnsi: 'sans-serif', eastAsia: 'sans-serif', complexScript: 'sans-serif' },
+    genericFamily: 'sans-serif',
+  }).advancePt;
+  const pushOverlong = (word: string): void => {
+    const offsets = [0, ...graphemeClusterOffsets(word), word.length]
+      .filter((offset, index, values) => index === 0 || offset !== values[index - 1]);
+    let start = 0;
+    while (start < offsets.length - 1) {
+      let end = start + 1;
+      while (end < offsets.length && widthOf(word.slice(offsets[start], offsets[end])) <= maxWidthPt) end += 1;
+      const fittingEnd = Math.max(start + 1, end - 1);
+      lines.push(word.slice(offsets[start], offsets[fittingEnd]));
+      start = fittingEnd;
+    }
+  };
   for (const word of words) {
     const candidate = line ? `${line} ${word}` : word;
-    const shaped = service.shape({
-      text: candidate,
-      fontSizePt,
-      fonts: { ascii: 'sans-serif', highAnsi: 'sans-serif', eastAsia: 'sans-serif', complexScript: 'sans-serif' },
-      genericFamily: 'sans-serif',
-    });
-    if (line && shaped.advancePt > maxWidthPt) {
+    const candidateWidth = widthOf(candidate);
+    if (line && candidateWidth > maxWidthPt) {
       lines.push(line);
-      line = word;
+      line = '';
+      if (lines.length === maxLines) break;
+      if (widthOf(word) > maxWidthPt) pushOverlong(word);
+      else line = word;
+    } else if (!line && candidateWidth > maxWidthPt) {
+      pushOverlong(word);
       if (lines.length === maxLines) break;
     } else {
       line = candidate;

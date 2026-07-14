@@ -1,4 +1,5 @@
 import type { LayoutDiagnostic } from './types.js';
+import { graphemeClusterOffsets, type ResolvedLocalFontMetric } from '@silurus/ooxml-core';
 import type {
   FontResolution,
   FontResolver,
@@ -25,6 +26,8 @@ export interface TextShapeRequest {
   readonly complexScript?: boolean;
   readonly genericFamily?: 'serif' | 'sans-serif' | 'monospace';
   readonly letterSpacingPt?: number;
+  /** Resolve script slots and faces without touching the measurement adapter. */
+  readonly measure?: boolean;
 }
 
 export interface GlyphMeasureRequest {
@@ -34,6 +37,7 @@ export interface GlyphMeasureRequest {
   readonly weight: number;
   readonly style: FontStyle;
   readonly letterSpacingPt: number;
+  readonly genericFamily: 'serif' | 'sans-serif' | 'monospace';
 }
 
 export interface GlyphMeasurement {
@@ -62,26 +66,25 @@ export interface TextShapeResult extends GlyphMeasurement {
 
 export interface TextLayoutService {
   readonly fingerprint: string;
+  readonly localMetrics: Readonly<Record<string, Readonly<ResolvedLocalFontMetric>>>;
   shape(request: Readonly<TextShapeRequest>): TextShapeResult;
 }
 
 export interface TextLayoutServiceInput {
   readonly fonts: FontResolver;
   readonly measurer: GlyphMeasurer;
+  readonly localMetrics?: Readonly<Record<string, Readonly<ResolvedLocalFontMetric>>>;
 }
 
 function scriptSlot(codePoint: number, forceComplex: boolean): FontScriptSlot {
   if (forceComplex) return 'complexScript';
   if (
-    (codePoint >= 0x0590 && codePoint <= 0x08ff)
-    || (codePoint >= 0xfb1d && codePoint <= 0xfdff)
-    || (codePoint >= 0xfe70 && codePoint <= 0xfeff)
-  ) return 'complexScript';
-  if (
     (codePoint >= 0x2e80 && codePoint <= 0x9fff)
     || (codePoint >= 0xac00 && codePoint <= 0xd7af)
     || (codePoint >= 0xf900 && codePoint <= 0xfaff)
     || (codePoint >= 0x3040 && codePoint <= 0x30ff)
+    || (codePoint >= 0xff00 && codePoint <= 0xffef)
+    || (codePoint >= 0x20000 && codePoint <= 0x2fa1f)
   ) return 'eastAsia';
   return codePoint <= 0x7f ? 'ascii' : 'highAnsi';
 }
@@ -99,29 +102,38 @@ function requestedFamily(request: Readonly<TextShapeRequest>, slot: FontScriptSl
  * authored East Asian and complex-script faces.
  */
 export function createTextLayoutService(input: TextLayoutServiceInput): TextLayoutService {
+  const localMetrics = Object.freeze(Object.fromEntries(
+    Object.entries(input.localMetrics ?? {})
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([family, metric]) => [family, Object.freeze({ ...metric })]),
+  ));
   const fingerprint = stableFingerprint('text', {
     fonts: input.fonts.fingerprint,
     measurer: input.measurer.fingerprint,
+    localMetrics,
   });
   return Object.freeze({
     fingerprint,
+    localMetrics,
     shape(request: Readonly<TextShapeRequest>): TextShapeResult {
       if (!Number.isFinite(request.fontSizePt) || request.fontSizePt < 0) {
         throw new RangeError('fontSizePt must be a finite non-negative number');
       }
-      const characters = [...request.text];
       const grouped: { text: string; start: number; end: number; script: FontScriptSlot }[] = [];
-      let offset = 0;
-      for (const character of characters) {
+      const boundaries = [0, ...graphemeClusterOffsets(request.text), request.text.length]
+        .filter((offset, index, values) => index === 0 || offset !== values[index - 1]);
+      for (let index = 0; index < boundaries.length - 1; index += 1) {
+        const start = boundaries[index];
+        const end = boundaries[index + 1];
+        const character = request.text.slice(start, end);
         const script = scriptSlot(character.codePointAt(0) ?? 0, request.complexScript ?? false);
         const previous = grouped.at(-1);
         if (previous?.script === script) {
           previous.text += character;
-          previous.end += character.length;
+          previous.end = end;
         } else {
-          grouped.push({ text: character, start: offset, end: offset + character.length, script });
+          grouped.push({ text: character, start, end, script });
         }
-        offset += character.length;
       }
 
       const spans = grouped.map((group): TextShapeSpan => {
@@ -131,13 +143,18 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
           weight: request.weight,
           style: request.style,
         });
-        const measurement = input.measurer.measure({
+        const measurement = request.measure === false ? {
+          advancePt: 0,
+          ascentPt: 0,
+          descentPt: 0,
+        } : input.measurer.measure({
           text: group.text,
           resolvedFamily: font.resolvedFamily,
           fontSizePt: request.fontSizePt,
           weight: font.weight,
           style: font.style,
           letterSpacingPt: request.letterSpacingPt ?? 0,
+          genericFamily: font.genericFamily,
         });
         return Object.freeze({ ...group, ...measurement, font });
       });

@@ -4,7 +4,7 @@ import type { LayoutServices } from './types.js';
 
 function services(text: string, images: string, math: string): LayoutServices {
   return {
-    text: { fingerprint: text, shape: () => ({ advancePt: 0, ascentPt: 0, descentPt: 0, spans: [], diagnostics: [] }) },
+    text: { fingerprint: text, localMetrics: {}, shape: () => ({ advancePt: 0, ascentPt: 0, descentPt: 0, spans: [], diagnostics: [] }) },
     images: { fingerprint: images, resolve: () => ({ widthPt: 1, heightPt: 1, mimeType: 'image/png' }) },
     math: { fingerprint: math, resolve: () => ({ resourceKey: 'm', widthEm: 1, ascentEm: 1, descentEm: 0, diagnostics: [] }) },
   };

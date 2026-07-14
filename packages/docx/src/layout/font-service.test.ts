@@ -10,8 +10,8 @@ import {
 } from './text.js';
 
 const faces: readonly FontInventoryFace[] = [
-  { requestedFamily: 'Embedded Sans', resolvedFamily: 'Embedded Sans', source: 'embedded' },
-  { requestedFamily: 'Meiryo', resolvedFamily: '__ooxml_local_meiryo', source: 'local' },
+  { requestedFamily: 'Embedded Sans', resolvedFamily: 'Embedded Sans', source: 'embedded', weights: [400, 700], styles: ['normal', 'italic'] },
+  { requestedFamily: 'Meiryo', resolvedFamily: '__ooxml_local_meiryo', source: 'local', weights: [400], styles: ['normal'] },
   { requestedFamily: 'Calibri', resolvedFamily: 'Carlito', source: 'google' },
   { requestedFamily: 'Legacy Arabic', resolvedFamily: 'Noto Naskh Arabic', source: 'substitute' },
   { requestedFamily: 'Theme Serif', resolvedFamily: 'Theme Serif', source: 'local' },
@@ -25,6 +25,8 @@ describe('font layout services', () => {
       .toMatchObject({ source: 'embedded', resolvedFamily: 'Embedded Sans', weight: 700, style: 'italic', diagnostics: [] });
     expect(resolver.resolve({ requestedFamily: 'Meiryo' }))
       .toMatchObject({ source: 'local', resolvedFamily: '__ooxml_local_meiryo' });
+    expect(resolver.resolve({ requestedFamily: 'Meiryo', weight: 700 }))
+      .toMatchObject({ source: 'generic', resolvedFamily: 'Meiryo', genericFamily: 'sans-serif' });
     expect(resolver.resolve({ requestedFamily: 'Calibri' }))
       .toMatchObject({ source: 'google', resolvedFamily: 'Carlito' });
 
@@ -33,7 +35,7 @@ describe('font layout services', () => {
     expect(substituted.diagnostics[0]?.message).toMatch(/implementation-dependent font substitution/i);
 
     const missing = resolver.resolve({ requestedFamily: 'Missing Face', genericFamily: 'serif' });
-    expect(missing).toMatchObject({ source: 'generic', resolvedFamily: 'serif' });
+    expect(missing).toMatchObject({ source: 'generic', resolvedFamily: 'Missing Face', genericFamily: 'serif' });
     expect(missing.diagnostics[0]?.message).toContain('Missing Face');
   });
 
@@ -68,16 +70,26 @@ describe('font layout services', () => {
     expect(result.spans.map((span) => [span.text, span.font.source, span.font.resolvedFamily]))
       .toEqual([
         ['A', 'embedded', 'Embedded Sans'],
-        ['国', 'local', '__ooxml_local_meiryo'],
-        ['ش', 'substitute', 'Noto Naskh Arabic'],
+        ['国', 'generic', 'Meiryo'],
+        ['ش', 'embedded', 'Embedded Sans'],
       ]);
     expect(result.advancePt).toBe(30);
     expect(measured.map(({ resolvedFamily, weight, style }) => [resolvedFamily, weight, style]))
       .toEqual([
         ['Embedded Sans', 700, 'italic'],
-        ['__ooxml_local_meiryo', 700, 'italic'],
-        ['Noto Naskh Arabic', 700, 'italic'],
+        ['Meiryo', 700, 'italic'],
+        ['Embedded Sans', 700, 'italic'],
       ]);
+
+    const forced = service.shape({
+      text: 'ش-12',
+      fontSizePt: 10,
+      complexScript: true,
+      fonts: { ascii: 'Embedded Sans', complexScript: 'Legacy Arabic' },
+    });
+    expect(forced.spans).toHaveLength(1);
+    expect(forced.spans[0]).toMatchObject({ text: 'ش-12', script: 'complexScript' });
+    expect(forced.spans[0]?.font).toMatchObject({ source: 'substitute', resolvedFamily: 'Noto Naskh Arabic' });
   });
 
   it('uses theme slots without collapsing mixed-script runs to one family', () => {
@@ -119,5 +131,50 @@ describe('font layout services', () => {
     expect(main.fingerprint).toBe(worker.fingerprint);
     expect(main.shape({ text: 'A国', fontSizePt: 10, fonts: { ascii: 'Calibri', eastAsia: 'Meiryo' } }))
       .toEqual(worker.shape({ text: 'A国', fontSizePt: 10, fonts: { ascii: 'Calibri', eastAsia: 'Meiryo' } }));
+  });
+
+  it('keeps grapheme clusters intact across ECMA-376 script-slot boundaries', () => {
+    const service = createTextLayoutService({
+      fonts: createFontResolver(faces),
+      measurer: {
+        fingerprint: 'cluster-measurer-v1',
+        measure: (request) => ({ advancePt: [...request.text].length, ascentPt: 1, descentPt: 0 }),
+      },
+    });
+    const shape = (text: string) => service.shape({
+      text,
+      fontSizePt: 10,
+      fonts: {
+        ascii: 'Embedded Sans',
+        highAnsi: 'Theme Serif',
+        eastAsia: 'Meiryo',
+        complexScript: 'Legacy Arabic',
+      },
+    });
+
+    expect(shape('a\u0301').spans.map((span) => [span.text, span.script]))
+      .toEqual([['a\u0301', 'ascii']]);
+    expect(shape('国\u{E0100}').spans.map((span) => [span.text, span.script]))
+      .toEqual([['国\u{E0100}', 'eastAsia']]);
+    expect(shape('\u{20000}').spans.map((span) => [span.text, span.script]))
+      .toEqual([['\u{20000}', 'eastAsia']]);
+    expect(shape('👩‍💻').spans.map((span) => span.text)).toEqual(['👩‍💻']);
+    expect(shape('ش-12').spans.every((span) => span.script !== 'complexScript')).toBe(true);
+  });
+
+  it('includes immutable local geometry metrics in the text fingerprint', () => {
+    const make = (lineHeightRatio: number) => createTextLayoutService({
+      fonts: createFontResolver(faces),
+      localMetrics: {
+        meiryo: { family: '__ooxml_local_meiryo', lineHeightRatio },
+      },
+      measurer: {
+        fingerprint: 'metrics-v1',
+        measure: () => ({ advancePt: 1, ascentPt: 1, descentPt: 0 }),
+      },
+    });
+
+    expect(make(1.3).fingerprint).not.toBe(make(1.31).fingerprint);
+    expect(Object.isFrozen(make(1.3).localMetrics.meiryo)).toBe(true);
   });
 });

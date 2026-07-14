@@ -130,24 +130,27 @@ import {
 } from './layout-context.js';
 import { justifiedPiecePositions } from '@silurus/ooxml-core';
 import type { LayoutServices } from './layout/types.js';
+import type { DocumentLayout as RetainedDocumentLayout } from './layout/types.js';
 import { normalizeLayoutOptions } from './layout/options.js';
 import type { LayoutOptions } from './layout/options.js';
-import { layoutParseErrorPage } from './layout/error-page.js';
 import { paintLayoutPage as paintRetainedLayoutPage } from './paint/canvas-page.js';
 import {
   mathAstResourceKey,
+  mathResourceKey,
   createImageMetadataService,
   createMathMetadataService,
   documentImageMetadataRecords,
   type MathLayoutResource,
 } from './layout/resources.js';
 import { createFontResolver, type FontInventoryFace } from './layout/font-service.js';
+import { attachPrivateResourceLookup, privateResourceLookupOf } from './layout/runtime-state.js';
 import {
   createTextLayoutService,
   type GlyphMeasureRequest,
   type TextLayoutService,
 } from './layout/text.js';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts.js';
+
 
 export { computeColumns };
 
@@ -306,24 +309,25 @@ export function documentHasMath(body: BodyElement[]): boolean {
   return collectMathRuns(body).length > 0;
 }
 
-function collectMathRuns(body: BodyElement[]): { nodes: MathNode[]; display: boolean }[] {
-  const found: { nodes: MathNode[]; display: boolean }[] = [];
-  const fromRuns = (runs: DocRun[]) => {
-    for (const r of runs) {
-      if (r.type === 'math') found.push({ nodes: r.nodes, display: r.display });
+function collectMathRuns(body: BodyElement[]): { nodes: MathNode[]; display: boolean; source: import('./layout/types.js').SourceRef }[] {
+  const found: { nodes: MathNode[]; display: boolean; source: import('./layout/types.js').SourceRef }[] = [];
+  const walkBody = (elements: BodyElement[], prefix: number[] = []) => elements.forEach((el, elementIndex) => {
+    const path = [...prefix, elementIndex];
+    if (el.type === 'paragraph') {
+      el.runs.forEach((run, runIndex) => {
+        if (run.type === 'math') found.push({
+          nodes: run.nodes,
+          display: run.display,
+          source: { story: 'body', storyInstance: 'body', path: [...path, runIndex] },
+        });
+      });
+    } else if (el.type === 'table') {
+      el.rows.forEach((row, rowIndex) => row.cells.forEach((cell, cellIndex) => {
+        walkBody(cell.content as BodyElement[], [...path, rowIndex, cellIndex]);
+      }));
     }
-  };
-  const walk = (el: BodyElement) => {
-    if ('runs' in el) fromRuns((el as DocParagraph).runs);
-    if ('rows' in el) {
-      for (const row of (el as DocTable).rows) {
-        for (const cell of row.cells) {
-          for (const child of cell.content) walk(child as BodyElement);
-        }
-      }
-    }
-  };
-  body.forEach(walk);
+  });
+  walkBody(body);
   return found;
 }
 
@@ -337,20 +341,31 @@ export function createLayoutServices(
     readonly mathResources?: readonly MathLayoutResource[];
     readonly mathDrawables?: ReadonlyMap<string, CanvasImageSource>;
     readonly measureContext?: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
+    /** Successfully loaded/registered faces only; declarations are not inventory. */
+    readonly embeddedFaces?: readonly FontFace[];
+    readonly googleFaces?: readonly FontFace[];
   } = {},
 ): LayoutServices {
   const localMetrics = Object.freeze({ ...(options.localMetrics ?? {}) });
-  const inventory: FontInventoryFace[] = (doc.embeddedFonts ?? []).map((font) => ({
-    requestedFamily: font.fontName,
-    resolvedFamily: font.fontName,
-    source: 'embedded',
-    weights: [font.style === 'bold' || font.style === 'boldItalic' ? 700 : 400],
-    styles: [font.style === 'italic' || font.style === 'boldItalic' ? 'italic' : 'normal'],
-  }));
+  const successfulEmbedded = new Map((options.embeddedFaces ?? []).map((face) => [
+    face.family.toLocaleLowerCase('en-US'), face,
+  ]));
+  const inventory: FontInventoryFace[] = (doc.embeddedFonts ?? []).flatMap((font) => {
+    const face = successfulEmbedded.get(font.fontName.toLocaleLowerCase('en-US'));
+    if (!face) return [];
+    return [{
+      requestedFamily: font.fontName,
+      resolvedFamily: face.family,
+      source: 'embedded' as const,
+      weights: [font.style === 'bold' || font.style === 'boldItalic' ? 700 : 400],
+      styles: [font.style === 'italic' || font.style === 'boldItalic' ? 'italic' as const : 'normal' as const],
+    }];
+  });
   for (const [requestedFamily, metric] of Object.entries(localMetrics)) {
-    inventory.push({ requestedFamily, resolvedFamily: metric.family, source: 'local' });
+    inventory.push({ requestedFamily, resolvedFamily: metric.family, source: 'local', weights: [400], styles: ['normal'] });
   }
   if (options.useGoogleFonts) {
+    const successfulGoogle = new Set((options.googleFaces ?? []).map((face) => face.family.toLocaleLowerCase('en-US')));
     const seen = new Set<string>();
     for (const name of docxFontPreloadNames(doc)) {
       if (!name) continue;
@@ -358,10 +373,13 @@ export function createLayoutServices(
       if (seen.has(key)) continue;
       seen.add(key);
       const entry = DOCX_GOOGLE_FONTS[key];
-      if (entry) inventory.push({
+      const resolvedFamily = entry?.loadFamily ?? name;
+      if (entry && successfulGoogle.has(resolvedFamily.toLocaleLowerCase('en-US'))) inventory.push({
         requestedFamily: name,
-        resolvedFamily: entry.loadFamily ?? name,
-        source: 'google',
+        resolvedFamily,
+        source: resolvedFamily.toLocaleLowerCase('en-US') === name.toLocaleLowerCase('en-US') ? 'google' : 'substitute',
+        weights: [400],
+        styles: ['normal'],
       });
     }
   }
@@ -372,27 +390,36 @@ export function createLayoutServices(
       : null);
   const textBase = createTextLayoutService({
     fonts: createFontResolver(inventory),
+    localMetrics,
     measurer: {
-      fingerprint: ctx ? 'canvas-text-metrics-v1' : 'canvas-text-metrics-unavailable-v1',
+      fingerprint: ctx ? 'canvas-text-metrics-v1' : 'deterministic-text-metrics-v1',
       measure(request: Readonly<GlyphMeasureRequest>) {
-        if (!ctx) throw new Error('Canvas text measurement is unavailable');
+        if (!ctx) return {
+          advancePt: [...request.text].length * request.fontSizePt * 0.5,
+          ascentPt: request.fontSizePt * 0.8,
+          descentPt: request.fontSizePt * 0.2,
+        };
         const previousFont = ctx.font;
         const previousLetterSpacing = ctx.letterSpacing;
-        ctx.font = `${request.style} ${request.weight} ${request.fontSizePt}px ${JSON.stringify(request.resolvedFamily)}`;
-        ctx.letterSpacing = `${request.letterSpacingPt}px`;
-        const metrics = ctx.measureText(request.text);
-        ctx.font = previousFont;
-        ctx.letterSpacing = previousLetterSpacing;
-        return {
-          advancePt: metrics.width,
-          ascentPt: metrics.fontBoundingBoxAscent ?? metrics.actualBoundingBoxAscent ?? 0,
-          descentPt: metrics.fontBoundingBoxDescent ?? metrics.actualBoundingBoxDescent ?? 0,
-        };
+        try {
+          ctx.font = `${request.style} ${request.weight} ${request.fontSizePt}px ${JSON.stringify(request.resolvedFamily)}, ${request.genericFamily}`;
+          ctx.letterSpacing = `${request.letterSpacingPt}px`;
+          const metrics = ctx.measureText(request.text);
+          return {
+            advancePt: metrics.width,
+            ascentPt: metrics.fontBoundingBoxAscent ?? metrics.actualBoundingBoxAscent ?? 0,
+            descentPt: metrics.fontBoundingBoxDescent ?? metrics.actualBoundingBoxDescent ?? 0,
+          };
+        } finally {
+          ctx.font = previousFont;
+          ctx.letterSpacing = previousLetterSpacing;
+        }
       },
     },
   });
-  const mathResources = options.mathResources ?? collectMathRuns(doc.body).map(({ nodes }) => ({
-    resourceKey: mathAstResourceKey(nodes),
+  const mathResources = options.mathResources ?? collectMathRuns(doc.body).map(({ nodes, display, source }) => ({
+    resourceKey: mathResourceKey(source, display ? 'display' : 'inline'),
+    lookupKey: mathAstResourceKey({ nodes, display }),
     widthEm: 0,
     ascentEm: 0,
     descentEm: 0,
@@ -403,12 +430,13 @@ export function createLayoutServices(
       message: 'The optional DOM math engine is unavailable; using the worker-safe text fallback',
     }],
   }));
-  return Object.freeze({
+  const services: LayoutServices = Object.freeze({
     text: Object.freeze({ ...textBase, resolvedLocalFonts: localMetrics }),
     images: createImageMetadataService(documentImageMetadataRecords(doc)),
     math: createMathMetadataService(mathResources),
-    mathDrawables: new Map(options.mathDrawables),
   });
+  attachPrivateResourceLookup(services, options.mathDrawables ?? new Map());
+  return services;
 }
 
 /** Rasterize an SVG string to an <img> (browser). Resolves once decoded. */
@@ -435,14 +463,16 @@ export async function prepareMathRuns(
   const drawables = new Map<string, CanvasImageSource>();
   const seen = new Set<string>();
   for (const r of runs) {
-    const resourceKey = mathAstResourceKey(r.nodes);
-    if (seen.has(resourceKey)) continue;
+    const resourceKey = mathResourceKey(r.source, r.display ? 'display' : 'inline');
+    const lookupKey = mathAstResourceKey({ nodes: r.nodes, display: r.display });
+    if (seen.has(resourceKey)) throw new Error(`Duplicate math occurrence: ${resourceKey}`);
     seen.add(resourceKey);
     try {
       const out = await math.mathMLToSvg(mathToMathML(r.nodes, r.display));
       const img = await svgToImage(recolorSvg(out.svg, '#000000'));
       records.push({
         resourceKey,
+        lookupKey,
         widthEm: out.widthEm,
         ascentEm: out.ascentEm,
         descentEm: out.descentEm,
@@ -452,6 +482,7 @@ export async function prepareMathRuns(
     } catch {
       records.push({
         resourceKey,
+        lookupKey,
         widthEm: 0,
         ascentEm: 0,
         descentEm: 0,
@@ -836,6 +867,8 @@ export interface RenderDocumentOptions {
   currentDate?: Date | number;
   /** Internal per-document service snapshot. Public render options never expose it. */
   layoutServices?: LayoutServices;
+  /** Prebuilt retained placeholder for a degraded parse; never measured while painting. */
+  retainedLayout?: RetainedDocumentLayout;
   /** Internal load-time default captured once and mirrored into worker mode. */
   defaultCurrentDateMs?: number;
 }
@@ -1673,11 +1706,8 @@ async function renderDocumentToCanvasLeased(
   // short-circuits BEFORE the vertical page rotation below: a degraded page has no
   // logical flow to rotate, and the placeholder is laid out in physical space.
   if (doc.parseError != null) {
-    const errorLayout = layoutParseErrorPage(
-      doc.parseError,
-      { widthPt: physPageWidth, heightPt: physPageHeight },
-      layoutServices.text,
-    );
+    const errorLayout = opts.retainedLayout;
+    if (!errorLayout) throw new Error('A degraded document requires a prebuilt retained error layout');
     await paintRetainedLayoutPage(errorLayout, 0, canvas, { scale, dpr: effectiveDpr });
     return;
   }
@@ -4777,6 +4807,7 @@ function paragraphMeasurementEnvironment(
     | 'verticalAllRotated'
     | 'docEastAsian'
     | 'resolvedLocalFonts'
+    | 'layoutServices'
   >,
 ): ParagraphMeasurementEnvironment {
   return {
@@ -4794,6 +4825,7 @@ function paragraphMeasurementEnvironment(
     verticalCJK: state.verticalCJK && !state.verticalAllRotated,
     documentHasEastAsianText: state.docEastAsian,
     resolvedLocalFonts: state.resolvedLocalFonts,
+    layoutServices: state.layoutServices,
   };
 }
 
@@ -9362,16 +9394,11 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
         continue;
       }
       if ('mathNodes' in seg) {
-        const resourceKey = mathAstResourceKey(seg.mathNodes);
-        let metadata;
-        try {
-          metadata = state.layoutServices?.math.resolve(resourceKey);
-        } catch {
-          metadata = undefined;
-        }
-        const drawable = (state.layoutServices as (LayoutServices & {
-          readonly mathDrawables?: ReadonlyMap<string, CanvasImageSource>;
-        }) | undefined)?.mathDrawables?.get(resourceKey);
+        const resourceKey = seg.mathResourceKey;
+        const metadata = state.layoutServices?.math.resolve(resourceKey);
+        const drawable = metadata?.available === false || !state.layoutServices
+          ? undefined
+          : privateResourceLookupOf<CanvasImageSource>(state.layoutServices)?.resolve(resourceKey);
         if (!dryRun && metadata && metadata.available !== false && drawable) {
           const emPx = seg.fontSize * scale;
           const w = metadata.widthEm * emPx;

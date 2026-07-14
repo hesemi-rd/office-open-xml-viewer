@@ -23,6 +23,9 @@ import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
 import { loadDocxLocalFontMetrics } from './local-font-metrics';
 import type { LayoutServices } from './layout/types.js';
+import type { DocumentLayout } from './layout/types.js';
+import { layoutParseErrorPage } from './layout/error-page.js';
+import { deepFreezeDocumentLayout } from './layout/invariants.js';
 import type { RenderWorkerRequest, RenderWorkerResponse, DocumentMeta } from './worker-protocol';
 
 // RB6: self-poison + auto-respawn. A trap during parse (or an in-worker image /
@@ -38,6 +41,7 @@ let doc: {
   model: DocxDocumentModel;
   layoutServices: LayoutServices;
   defaultCurrentDateMs: number;
+  retainedErrorLayout: DocumentLayout | null;
 } | null = null;
 let pages: PaginatedBodyElement[][] | null = null;
 let localMetricFontFaces: FontFace[] = [];
@@ -108,10 +112,11 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         host.setArchive(archive);
         return JSON.parse(new TextDecoder().decode(archive.parse())) as DocxDocumentModel;
       });
+      let googleFaces: FontFace[] = [];
       if (req.useGoogleFonts) {
         // Pagination measures text, so fonts must land BEFORE computePages —
         // same ordering the main-mode load() guarantees.
-        await preloadGoogleFonts(
+        googleFaces = await preloadGoogleFonts(
           docxFontPreloadNames(model),
           DOCX_GOOGLE_FONTS,
         );
@@ -119,8 +124,9 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       // ECMA-376 §17.8.1 / §17.8.3 — register embedded fonts into the worker's
       // FontFaceSet (self.fonts) before pagination measures text. Bytes are read
       // straight from the retained archive (extract_image reads any zip entry).
+      let embeddedFaces: FontFace[] = [];
       if (model.embeddedFonts?.length) {
-        await loadEmbeddedFonts(model, async (p) => {
+        embeddedFaces = await loadEmbeddedFonts(model, async (p) => {
           const loaded = host.archive;
           if (!loaded) throw new Error('No docx loaded');
           return new Uint8Array(host.run(() => loaded.extract_image(p))).slice();
@@ -131,8 +137,17 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       const layoutServices = createLayoutServices(model, {
         localMetrics: localMetrics.metrics,
         useGoogleFonts: !!req.useGoogleFonts,
+        embeddedFaces,
+        googleFaces,
       });
-      doc = { model, layoutServices, defaultCurrentDateMs: req.defaultCurrentDateMs };
+      const retainedErrorLayout = model.parseError
+        ? deepFreezeDocumentLayout(layoutParseErrorPage(
+            model.parseError,
+            { widthPt: model.section.pageWidth, heightPt: model.section.pageHeight },
+            layoutServices.text,
+          )) as DocumentLayout
+        : null;
+      doc = { model, layoutServices, defaultCurrentDateMs: req.defaultCurrentDateMs, retainedErrorLayout };
       pages = paginateDocument(model, layoutServices, { currentDateMs: req.defaultCurrentDateMs });
       // ECMA-376 §17.6.13 / §17.6.11 / §17.6.20 — per-page size from each page's
       // stamped frame (its page-meta for an empty parity page). A vertical
@@ -168,6 +183,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         fetchImage: getImage,
         onTextRun: (r) => runs.push(r),
         layoutServices: doc.layoutServices,
+        retainedLayout: doc.retainedErrorLayout ?? undefined,
         defaultCurrentDateMs: doc.defaultCurrentDateMs,
       });
       const bitmap = canvas.transferToImageBitmap();
@@ -189,6 +205,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         fetchImage: getImage,
         onTextRun: (r) => runs.push(r),
         layoutServices: doc.layoutServices,
+        retainedLayout: doc.retainedErrorLayout ?? undefined,
         defaultCurrentDateMs: doc.defaultCurrentDateMs,
       });
       post({ type: 'runsCollected', id, runs });

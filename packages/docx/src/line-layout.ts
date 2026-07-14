@@ -57,6 +57,7 @@ import {
 } from './float-layout.js';
 import { verticalRunInkExtraPx } from './vertical-text.js';
 import type { LayoutServices } from './layout/types.js';
+import type { TextLayoutService, TextShapeRequest } from './layout/text.js';
 import { mathAstResourceKey } from './layout/resources.js';
 import type { MathLayoutResource } from './layout/resources.js';
 
@@ -97,6 +98,10 @@ export interface LayoutTextSeg extends LayoutSegSource {
   resolvedLineHeightRatio?: number;
   vertAlign: 'super' | 'sub' | null;
   measuredWidth: number;  // px (set during layout)
+  /** A2 text authority captured during segmentation; production text width and
+   * metrics are resolved through this same service during line layout. */
+  textLayoutService?: TextLayoutService;
+  textShapeRequest?: TextShapeRequest;
   smallCaps?: boolean;
   /** This segment is GLUED to the preceding one (no inter-segment break): they
    *  are case-pieces of the same word emitted at different sizes for small caps
@@ -2309,6 +2314,25 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
       // the family-level design line ratio used by Word's line-box calculation.
       const localPaintFamily = !bold && !italic ? localFont?.family : undefined;
       const localEaFloorFamily = !bold && !italic ? localEaFloor?.family : undefined;
+      const textShapeRequest: TextShapeRequest = Object.freeze({
+        text,
+        fontSizePt: cs ? csFontSize : base.fontSize,
+        fonts: {
+          ascii: base.fontFamily,
+          highAnsi: base.fontFamily,
+          eastAsia: eaFontFamily,
+          complexScript: csFontFamily,
+        },
+        weight: bold ? 700 : 400,
+        style: italic ? 'italic' : 'normal',
+        complexScript: cs,
+        measure: false,
+      });
+      const shaped = environment.layoutServices?.text.shape(textShapeRequest);
+      const resolvedFamilies = new Set(shaped?.spans.map((span) => span.font.resolvedFamily));
+      const resolvedPaintFamily = resolvedFamilies.size === 1
+        ? shaped?.spans[0]?.font.resolvedFamily
+        : undefined;
       segs.push({
         text,
         bold,
@@ -2322,10 +2346,12 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         strikethrough: base.strikethrough,
         fontSize: cs ? csFontSize : base.fontSize,
         color: base.color,
-        fontFamily: localPaintFamily ?? fontFamily,
+        fontFamily: resolvedPaintFamily ?? localPaintFamily ?? fontFamily,
         resolvedLineHeightRatio: localFont?.lineHeightRatio,
         vertAlign,
         measuredWidth: 0,
+        textLayoutService: environment.layoutServices?.text,
+        textShapeRequest,
         smallCaps: reduced,
         joinPrev: gluePending ? true : undefined,
         doubleStrikethrough: base.doubleStrikethrough ?? false,
@@ -2444,10 +2470,11 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
           // Mixed Arabic+Latin word (no w:rtl / w:cs): split at script boundaries
           // so each side gets its own (cs vs Latin) size and typeface; the non-cs
           // side then sub-splits at CJK boundaries for the eastAsia face.
-          for (const slice of splitByComplexScript(word)) {
-            if (slice.cs) emit(slice.text, 'cs');
-            else emitNonCs(slice.text);
-          }
+          // ECMA-376 §17.3.2.26 selects the cs axis only when w:cs/w:rtl
+          // forces the run. Arabic/Hebrew code points in an ordinary run stay
+          // on ascii/hAnsi; the text service performs the remaining grapheme-
+          // safe East Asian slot split.
+          emitNonCs(word);
         }
       }
     }
@@ -2544,13 +2571,9 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
       // The parser resolves the paragraph font size; fall back to a nearby run only
       // if it is somehow absent.
       const fontSize = run.fontSize || findNearbyFontSize(runs, runs.indexOf(run));
-      const resourceKey = mathAstResourceKey(run.nodes);
-      let mathMetadata: MathLayoutResource | undefined;
-      try {
-        mathMetadata = environment.layoutServices?.math.resolve(resourceKey);
-      } catch {
-        mathMetadata = undefined;
-      }
+      const lookupKey = mathAstResourceKey({ nodes: run.nodes, display: run.display });
+      const mathMetadata = environment.layoutServices?.math.resolve(lookupKey);
+      const resourceKey = mathMetadata?.resourceKey ?? lookupKey;
       segs.push({
         mathNodes: run.nodes,
         mathResourceKey: resourceKey,
@@ -3083,6 +3106,21 @@ export function layoutLines(
   };
 
   const measureText = (s: LayoutTextSeg): TextMetrics => {
+    if (s.textLayoutService && s.textShapeRequest) {
+      const shaped = s.textLayoutService.shape({
+        ...s.textShapeRequest,
+        text: s.text,
+        fontSizePt: effectiveFontPx(s),
+        measure: true,
+      });
+      return {
+        width: shaped.advancePt,
+        actualBoundingBoxAscent: shaped.ascentPt,
+        actualBoundingBoxDescent: shaped.descentPt,
+        fontBoundingBoxAscent: shaped.ascentPt,
+        fontBoundingBoxDescent: shaped.descentPt,
+      } as TextMetrics;
+    }
     setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses));
     const prevKern = setSegKerning(s);
     const m = ctx.measureText(s.text);
@@ -3187,6 +3225,15 @@ export function layoutLines(
   // text/length so char-spacing scales with the piece — the split-prefix vs
   // whole-segment advances must agree.
   const strAdvance = (s: LayoutTextSeg, text: string): number => {
+    if (s.textLayoutService && s.textShapeRequest) {
+      const shaped = s.textLayoutService.shape({
+        ...s.textShapeRequest,
+        text,
+        fontSizePt: effectiveFontPx(s),
+        measure: true,
+      });
+      return segAdvanceWidth({ ...s, text }, shaped.advancePt + verticalInkExtra(s, text), gridDeltaPx, scale);
+    }
     setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses));
     const prevKern = setSegKerning(s);
     const natural = ctx.measureText(text).width;
@@ -3487,10 +3534,26 @@ export function layoutLines(
     let metricM = m;
     let metricEmPx = effectiveFontPx(s);
     if (s.smallCaps && !s.vertAlign && metricEmPx !== fullPx) {
-      const prevFont = ctx.font;
-      ctx.font = buildFont(s.bold, s.italic, fullPx, s.fontFamily, fontFamilyClasses);
-      metricM = ctx.measureText(s.text || 'X');
-      ctx.font = prevFont;
+      if (s.textLayoutService && s.textShapeRequest) {
+        const shaped = s.textLayoutService.shape({
+          ...s.textShapeRequest,
+          text: s.text || 'X',
+          fontSizePt: fullPx,
+          measure: true,
+        });
+        metricM = {
+          width: shaped.advancePt,
+          actualBoundingBoxAscent: shaped.ascentPt,
+          actualBoundingBoxDescent: shaped.descentPt,
+          fontBoundingBoxAscent: shaped.ascentPt,
+          fontBoundingBoxDescent: shaped.descentPt,
+        } as TextMetrics;
+      } else {
+        const prevFont = ctx.font;
+        ctx.font = buildFont(s.bold, s.italic, fullPx, s.fontFamily, fontFamilyClasses);
+        metricM = ctx.measureText(s.text || 'X');
+        ctx.font = prevFont;
+      }
       metricEmPx = fullPx;
     }
     // FE design correction for EA segments only; ruby keeps its measured box

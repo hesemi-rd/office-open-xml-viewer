@@ -57,4 +57,29 @@ describe('parse-error page layout', () => {
     await expect(paintLayoutPage(layout, 0, canvas, { scale: 1, dpr: 1 })).resolves.toBeUndefined();
     expect(calls).toContain('fillText');
   });
+
+  it('emergency-splits an overlong token only at grapheme boundaries', () => {
+    const text = createTextLayoutService({
+      fonts: createFontResolver([]),
+      measurer: {
+        fingerprint: 'fixed-width-v1',
+        measure: (request) => ({
+          advancePt: [...request.text].length * 10,
+          ascentPt: 8,
+          descentPt: 2,
+        }),
+      },
+    });
+    const token = 'word/' + 'a\u0301'.repeat(24) + '.xml';
+    const layout = layoutParseErrorPage(token, { widthPt: 180, heightPt: 300 }, text);
+    const lines = layout.pages[0]?.layers.body.flatMap((node) =>
+      node.kind === 'drawing'
+        ? node.commands.filter((command) => command.kind === 'text').slice(2)
+        : [],
+    ) ?? [];
+
+    expect(lines.length).toBeGreaterThan(1);
+    expect(lines.map((line) => line.kind === 'text' ? line.text : '').join('')).toBe(token);
+    expect(lines.every((line) => line.kind !== 'text' || !line.text.startsWith('\u0301'))).toBe(true);
+  });
 });
