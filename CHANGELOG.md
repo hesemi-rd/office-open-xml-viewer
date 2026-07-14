@@ -4,6 +4,27 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.72.2 — 2026-07-13
+
+Patch (fixes on v0.72.1). Word-compatible docx layout geometry plus xlsx
+cacheless chart and RTL-anchor correctness.
+
+- **docx:** preserve floating-anchor host line metrics independently of the
+  drawing payload (picture / chart / shape / group); resolve installed normal
+  faces for eligible local metrics while keeping authored styled faces and
+  prioritizing embedded regular faces (§17.8.3.3), applied consistently to text,
+  floating-anchor hosts, and empty paragraph marks; include justified text and
+  picture list markers in paragraph border bounds (§17.9.7, §17.3.1.24); resolve
+  each emitted table page slice by the borders it actually paints without
+  assuming monotonic row heights (§17.4.66, §17.4.80); honor an explicit
+  `atLeast` grid minimum for a tall first line (observed Word behavior). No
+  sample-specific thresholds. (#1035)
+- **xlsx:** resolve cacheless legacy chart formulas through a shared DrawingML
+  resolver contract (category / value / series-name / scatter / bubble sources,
+  multi-level categories), with a bounded sparse worksheet-reference session
+  shared across charts and sparklines; mirror anchored objects and clipping
+  rectangles on right-to-left sheets without flipping content. (#1034)
+
 ## 0.72.1 — 2026-07-13
 
 Patch (fix on v0.72.0). Preserves authored OOXML layout and grouped-drawing
