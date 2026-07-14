@@ -32,6 +32,7 @@
 - Modify: `packages/docx/src/footnote-in-table.test.ts`
 - Modify: `packages/docx/src/per-section-headers-footers.test.ts`
 - Modify: `packages/docx/src/vertical-header-footer.test.ts`
+- Modify: `scripts/docx-layout-boundary-baseline.json`
 
 **Interfaces:**
 
@@ -115,19 +116,23 @@ Use the roadmap review gate.
 - Modify: `packages/docx/src/textbox-main-engine.test.ts`
 - Modify: `packages/docx/src/textbox-vertical-render.test.ts`
 - Modify: `packages/docx/src/renderer.textbox-image.test.ts`
+- Modify: `scripts/docx-layout-boundary-baseline.json`
 
 **Interfaces:**
 
 - Consumes: parser `BodyElement`, shared `layoutStory`, and DrawingML shape geometry.
-- Produces: Rust wire-only `ShapeRun.text_box_content: Vec<BodyElement>`, internal `ParsedShapeRun.textBoxContent?: BodyElement[]`, the unchanged public `ShapeRun.textBlocks?: ShapeText[]`, and `TextBoxLayout`.
+- Produces: Rust wire-only `ShapeRun.text_box_content: Vec<TextBoxBlockWire>`, internal `ParsedShapeRun.textBoxContent?: Array<BodyElement | ParsedUnsupportedTextBoxBlock>`, the unchanged public `ShapeRun.textBlocks?: ShapeText[]`, and `TextBoxLayout`.
 
 **Specification evidence:** ECMA-376 `wps:txbx/w:txbxContent` and
 `wps:bodyPr`, ECMA-376 §20.4.2.38 (`w:txbxContent`), and
 DrawingML §21.1.2.1.1 body insets/autofit define preserved block order and text
-container geometry. Unsupported block kinds emit diagnostics; they are not
-flattened silently.
+container geometry. Supported paragraph/table blocks are preserved in document
+order; every other schema-permitted `EG_BlockLevelElts` kind is retained as an
+internal unsupported-block marker with its QName/source path and emits a
+diagnostic rather than being flattened or discarded silently.
 
 ```ts
+export interface ParsedUnsupportedTextBoxBlock { readonly type: 'unsupportedTextBoxBlock'; readonly qName: string; readonly sourcePath: readonly number[] }
 export interface TextBoxLayout { readonly kind: 'textbox'; readonly id: LayoutNodeId; readonly source: SourceRef; readonly flowBounds: LayoutRect; readonly inkBounds: LayoutRect; readonly clip: ClipPathData; readonly transform: Matrix2DData; readonly story: StoryLayout }
 ```
 
@@ -155,20 +160,26 @@ Expected: parser assertions fail because the current `ShapeTextBody` tuple and
 
 Replace the private Rust tuple alias with a named `ShapeTextBody` struct carrying
 both `legacy_blocks: Vec<ShapeText>` and `content: Vec<BodyElement>`. Add a
+`#[serde(untagged)] TextBoxBlockWire` enum with `Body(BodyElement)` and
+`Unsupported { type, q_name, source_path }` variants, then add a
 `#[serde(skip_serializing_if = "Vec::is_empty")] text_box_content:
-Vec<BodyElement>` wire field to Rust `ShapeRun` while retaining and populating
+Vec<TextBoxBlockWire>` wire field to Rust `ShapeRun` while retaining and populating
 `text_blocks` exactly as today. Do not add, remove, or rename any exported
 TypeScript declaration. `parser-model.ts` defines non-exported
-`ParsedShapeRun = ShapeRun & { textBoxContent?: BodyElement[] }` and reads the
+`ParsedShapeRun = ShapeRun & { textBoxContent?: Array<BodyElement |
+ParsedUnsupportedTextBoxBlock> }` and reads the
 wire field; externally constructed models without it fall back to the existing
 `textBlocks` compatibility projection.
 
-Parse every permitted `txbxContent` block in document order through existing
-body-element parsers. Create a text-box container context containing insets,
+Parse supported paragraph/table `txbxContent` blocks in document order through
+existing body-element parsers and emit an unsupported-block marker for every
+other schema-permitted block. Create a text-box container context containing insets,
 autofit, vertical direction, clipping, and plain-data transform, then call
-`layoutStory`. Paint the nested story from stored geometry. Delete only
-text-box-specific paragraph measurement and `renderShapeText` layout
-calculations; retain the exported `ShapeText` and `ShapeTextRun` contracts.
+`layoutStory`. Paint the nested story from stored geometry. Delete the A3
+`ShapeText[] -> ParagraphLayoutInput[]` compatibility source adapter after the
+internal full block source is wired; A3 already removed text-box-specific
+measurement and `renderShapeText`. Retain the exported `ShapeText` and
+`ShapeTextRun` contracts.
 
 - [ ] **Step 4: Rebuild and verify Green**
 
@@ -178,7 +189,7 @@ Run:
 pnpm build:wasm
 cargo test -p docx-parser
 pnpm vitest run packages/docx/src/layout/textbox.test.ts packages/docx/src/textbox-*.test.ts packages/docx/src/anchored-textbox-render.test.ts packages/docx/src/renderer.textbox-image.test.ts
-rg -n 'renderShapeText|type ShapeTextBody = \(' packages/docx/src packages/docx/parser/src
+rg -n 'shapeTextCompatibilityBlocks|type ShapeTextBody = \(' packages/docx/src packages/docx/parser/src
 pnpm typecheck
 ```
 
@@ -201,6 +212,7 @@ Use the roadmap review gate.
 - Modify: `packages/docx/src/renderer.ts`
 - Modify: `packages/docx/src/front-float-zorder.test.ts`
 - Modify: `packages/docx/src/section-break-anchored-textbox-render.test.ts`
+- Modify: `scripts/docx-layout-boundary-baseline.json`
 
 **Interfaces:**
 
@@ -279,6 +291,7 @@ Use the roadmap review gate.
 - Modify: `packages/docx/src/renderer.ts`
 - Modify: `packages/docx/src/find.test.ts`
 - Modify: `packages/docx/src/find-highlight-layer.test.ts`
+- Modify: `scripts/docx-layout-boundary-baseline.json`
 
 **Interfaces:**
 

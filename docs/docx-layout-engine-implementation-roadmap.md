@@ -90,15 +90,14 @@ export type ClipPathData =
 export interface LayoutServices {
   readonly text: TextLayoutService;
   readonly images: ImageMetadataService;
+  readonly math: MathMetadataService;
 }
 
 export interface LayoutOptions {
   readonly currentDateMs: number;
-  readonly textEnvironmentFingerprint: string;
-  readonly mathEnvironmentFingerprint: string;
 }
 
-export function layoutOptionsKey(options: LayoutOptions): string;
+export function layoutOptionsKey(options: LayoutOptions, services: LayoutServices): string;
 
 export interface DocumentLayout {
   readonly pages: readonly LayoutPage[];
@@ -150,8 +149,10 @@ spacing ink, frames, or clipped overhang. Each node contains all text, resolved
 font, color, border, transform, clipping, and resource-key data needed by paint;
 paint never dereferences parser objects.
 
-`LayoutOptions.currentDateMs` is normalized once. Main and worker retain layouts
-by `layoutOptionsKey`; `NUMPAGES` is solved inside convergence, not supplied as a
+`LayoutOptions.currentDateMs` is normalized once. Each text/image/math service
+owns a readonly fingerprint derived from its immutable resource snapshot; callers
+cannot supply those strings independently. Main and worker retain layouts by
+`layoutOptionsKey(options, services)`; `NUMPAGES` is solved inside convergence, not supplied as a
 paint option. The load-time default option key determines the synchronous
 `pageCount`/`pageSize` getters. A per-call `currentDate` selects or lazily builds
 a keyed layout variant for that render/collection request and validates its

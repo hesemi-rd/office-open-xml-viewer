@@ -45,6 +45,7 @@
 - Read for the audit: `packages/ooxml-common/src/units.rs`
 - Create: `packages/docx/api/public-api-baseline.d.ts`
 - Create: `scripts/check-docx-layout-boundaries.mjs`
+- Create: `scripts/docx-layout-boundary-baseline.json`
 - Create: `scripts/check-docx-public-api.mjs`
 - Create: `rules/no-docx-layout-in-paint.yml`
 - Create: `rules/no-docx-display-scale-in-layout.yml`
@@ -141,9 +142,15 @@ resolution remains in the Rust parser and the typed parser boundary. Layout
 context construction may map resolved facts but cannot re-run the cascade.
 
 `scripts/check-docx-layout-boundaries.mjs` follows the complete local import graph
-from every `paint/*.ts` entry, rejects transitive reachability to measurement,
-pagination, style-resolution, or parser-object modules, and verifies
-`renderer.ts` against an adapter export/import allowlist. Generate and commit the
+from every `paint/*.ts` entry and rejects new transitive reachability to
+measurement, pagination, style-resolution, or parser-object modules. In A1,
+`--write-transitional-baseline` records the exact existing `renderer.ts`
+layout/measurement declarations and import edges in
+`scripts/docx-layout-boundary-baseline.json`; ordinary checks fail on additions.
+Every later migration PR removes the entries it deletes and may never add an
+allowance. C3 deletes the empty baseline and runs `--final`, which requires the
+adapter-only export/import allowlist and zero transitive forbidden edges; ordinary
+checks also enter final mode automatically once the baseline file is absent. Generate and commit the
 current `@silurus/ooxml/docx` declaration surface as
 `packages/docx/api/public-api-baseline.d.ts` before production migration begins.
 `scripts/check-docx-public-api.mjs --write-baseline` writes the normalized
@@ -158,6 +165,7 @@ Run:
 pnpm vitest run packages/docx/src/layout/invariants.test.ts packages/docx/src/paint/paint-purity.test.ts
 pnpm lint
 pnpm lint:test
+node scripts/check-docx-layout-boundaries.mjs --write-transitional-baseline
 node scripts/check-docx-layout-boundaries.mjs
 pnpm --filter @silurus/ooxml-docx build
 node scripts/check-docx-public-api.mjs --write-baseline
@@ -195,6 +203,7 @@ Use the roadmap review gate and merge only with all checks and findings clear.
 - Modify: `packages/docx/src/document.ts`
 - Modify: `packages/docx/src/render-worker.ts`
 - Modify: `packages/docx/src/worker-protocol.ts`
+- Modify: `scripts/docx-layout-boundary-baseline.json`
 
 **Interfaces:**
 
@@ -208,11 +217,11 @@ Use the roadmap review gate and merge only with all checks and findings clear.
 ```ts
 export interface FontResolution { readonly requestedFamily: string; readonly resolvedFamily: string; readonly source: 'embedded' | 'local' | 'google' | 'substitute' | 'generic'; readonly weight: number; readonly style: 'normal' | 'italic'; readonly diagnostics: readonly LayoutDiagnostic[] }
 export interface FontResolver { resolve(request: Readonly<FontRequest>): FontResolution }
-export interface TextLayoutService { shape(request: Readonly<TextShapeRequest>): TextShapeResult }
-export interface ImageMetadataService { resolve(resourceKey: string): Readonly<{ widthPt: number; heightPt: number; mimeType: string }> }
-export interface MathMetadataService { resolve(resourceKey: string): DeepReadonly<MathLayoutResource> }
-export interface LayoutOptions { readonly currentDateMs: number; readonly textEnvironmentFingerprint: string; readonly mathEnvironmentFingerprint: string }
-export function layoutOptionsKey(options: LayoutOptions): string;
+export interface TextLayoutService { readonly fingerprint: string; shape(request: Readonly<TextShapeRequest>): TextShapeResult }
+export interface ImageMetadataService { readonly fingerprint: string; resolve(resourceKey: string): Readonly<{ widthPt: number; heightPt: number; mimeType: string }> }
+export interface MathMetadataService { readonly fingerprint: string; resolve(resourceKey: string): DeepReadonly<MathLayoutResource> }
+export interface LayoutOptions { readonly currentDateMs: number }
+export function layoutOptionsKey(options: LayoutOptions, services: LayoutServices): string;
 export function convergeLayout(seed: LayoutIteration, step: (iteration: LayoutIteration) => LayoutIteration, limit: number): LayoutIteration;
 ```
 
@@ -228,8 +237,9 @@ resolution record, not hide inside paragraph geometry.
 Use fake font inventories and glyph measurers to cover ASCII, East Asian,
 complex-script, theme, embedded, local, Google, missing, bold, and italic
 resolution. Use fake image/math resources to assert stable string resource keys
-and plain metadata. Assert `layoutOptionsKey` changes for `currentDateMs`, text
-environment, or math environment but not paint width/DPR/default color. Assert convergence returns on
+and plain metadata. Assert `layoutOptionsKey` changes for `currentDateMs` or any
+service-owned resource fingerprint but not paint width/DPR/default color. Prove
+there is no overload accepting caller-supplied environment strings. Assert convergence returns on
 a stable fingerprint, throws `NON_CONVERGENCE` on a repeated cycle or limit, and
 never returns a stale iteration. Assert parse-error text wraps during layout and
 its paint calls no `measureText`.
@@ -253,8 +263,9 @@ theme/script selection local. Retrofit the existing renderer to consume this
 single service instance so no temporary second font/shaping implementation is
 introduced. Capture the load-time default `Date.now()` once on the main thread,
 send `defaultCurrentDateMs` as an internal worker parse field, and normalize every
-`Date | number | undefined` to `LayoutOptions.currentDateMs`. Define
-`layoutOptionsKey` now; A6 uses it when `DocumentLayout` becomes the retained
+`Date | number | undefined` to `LayoutOptions.currentDateMs`. Derive
+`layoutOptionsKey(options, services)` from that option and the three actual
+service fingerprints; A6 uses it when `DocumentLayout` becomes the retained
 cache value. Implement convergence with a relevant geometry fingerprint plus a
 seen-set and hard error. Convert the parse-error placeholder into stored
 text/frame paint nodes.
@@ -293,6 +304,7 @@ Use the roadmap review gate.
 - Create: `packages/docx/src/layout/paragraph.ts`
 - Create: `packages/docx/src/layout/paragraph.test.ts`
 - Create: `packages/docx/src/layout/run-resources.test.ts`
+- Create: `packages/docx/src/layout/textbox-compat.test.ts`
 - Create: `packages/docx/src/paint/canvas-text.ts`
 - Create: `packages/docx/src/paint/canvas-text.test.ts`
 - Modify: `packages/docx/src/paint/canvas-drawing.ts`
@@ -306,11 +318,12 @@ Use the roadmap review gate.
 - Modify: `packages/docx/src/layout-lines-reuse-identity.test.ts`
 - Modify: `packages/docx/src/layout-lines-scale-invariance.test.ts`
 - Modify: `packages/docx/src/layout-lines-zoom-invariant.test.ts`
+- Modify: `scripts/docx-layout-boundary-baseline.json`
 
 **Interfaces:**
 
 - Consumes: the stable services, options, convergence primitive, `SourceRef`, and invariant contracts from A1/A2.
-- Produces: `ParagraphLayout`, `TextPlacement`, `InlineResourceLayout`, `DrawingLayout`, `layoutParagraph`, and `paintParagraphLayout`.
+- Produces: `ParagraphLayout`, `TextPlacement`, `InlineResourceLayout`, `DrawingLayout`, `TextBoxLayout`, `shapeTextCompatibilityBlocks`, `layoutParagraph`, and `paintParagraphLayout`.
 
 **Specification evidence:** ECMA-376 §17.3.1.13 (`w:jc`), §17.3.1.38
 (`w:tabs`), §17.3.1.33 (`w:spacing`), §17.3.1.19/§17.9 numbering,
@@ -333,6 +346,7 @@ export interface ParagraphLayout {
   readonly shading?: FillPaint;
 }
 export function layoutParagraph(input: ParagraphLayoutInput & Readonly<{ exclusions: readonly WrapExclusion[] }>, services: LayoutServices): ParagraphLayout;
+export function shapeTextCompatibilityBlocks(shape: ShapeRun): readonly ParagraphLayoutInput[];
 export function paintParagraphLayout(node: ParagraphLayout, context: CanvasPaintContext): void;
 ```
 
@@ -355,7 +369,7 @@ Add one matrix-driven test covering every `DocRun` arm and associated resource:
 | inline/anchored `chart` | shared chart resource key and bounds | core chart paint + `DrawingLayout` |
 | line/page/column `break` | line or flow event | paragraph/paginator |
 | `field` | resolved text plus field dependency | paragraph + A2 convergence |
-| `shape` / text box | drawing resource now; nested story completed in B2 | `DrawingLayout` |
+| `shape` / text box | drawing bounds plus existing public `textBlocks` converted to retained paragraph layouts; richer block source replaces only the adapter in B2 | `DrawingLayout` + `TextBoxLayout` |
 | `math` | stable math resource key and layout bounds | A2 `MathMetadataService` |
 | `ptab` | positioned tab placement | paragraph |
 | picture bullet | image resource key and marker bounds | paragraph/resources |
@@ -381,6 +395,14 @@ font descriptor, advances, offsets, decorations, link/bookmark metadata, and
 resource keys on `TextPlacement`. `canvas-text.ts` and `canvas-drawing.ts` only
 apply stored transforms and call drawing primitives.
 
+For a shape carrying the existing public `ShapeRun.textBlocks`, convert each
+`ShapeText` compatibility block to a `ParagraphLayoutInput`, lay it out through
+the same `layoutParagraph`, and retain those paragraph nodes inside
+`TextBoxLayout`. Delete `renderShapeText` measurement and parser dereference in
+this PR. B2 later replaces only this source adapter with full internal
+`textBoxContent` plus `layoutStory`; it reuses the same paragraph/table nodes and
+paint contract and therefore introduces no temporary second text-box algorithm.
+
 Paragraph layout consumes only immutable `WrapExclusion` polygons; it does not
 place or retry floats. Until C1, the single existing float placer is adapted to
 produce that contract. C1 replaces that provider and deletes its mutable logic
@@ -396,8 +418,8 @@ paint-facing fragments; retain only `SourceRef` and self-contained paint data.
 Run:
 
 ```bash
-pnpm vitest run packages/docx/src/layout/paragraph.test.ts packages/docx/src/layout/run-resources.test.ts packages/docx/src/paint/canvas-text.test.ts packages/docx/src/fragment-paint.test.ts packages/docx/src/layout-lines-reuse-identity.test.ts packages/docx/src/layout-lines-scale-invariance.test.ts packages/docx/src/layout-lines-zoom-invariant.test.ts
-rg -n 'fitMeasureReuseEnabled|fragmentPaintEnabled|lineReuseEnabled|isFragmentPaintableParagraph|layoutLinesInputs|stampParagraphLines|renderBodyParagraphLines' packages/docx/src
+pnpm vitest run packages/docx/src/layout/paragraph.test.ts packages/docx/src/layout/run-resources.test.ts packages/docx/src/layout/textbox-compat.test.ts packages/docx/src/paint/canvas-text.test.ts packages/docx/src/fragment-paint.test.ts packages/docx/src/layout-lines-reuse-identity.test.ts packages/docx/src/layout-lines-scale-invariance.test.ts packages/docx/src/layout-lines-zoom-invariant.test.ts
+rg -n 'fitMeasureReuseEnabled|fragmentPaintEnabled|lineReuseEnabled|isFragmentPaintableParagraph|layoutLinesInputs|stampParagraphLines|renderBodyParagraphLines|renderShapeText' packages/docx/src
 pnpm lint
 pnpm lint:test
 pnpm typecheck
@@ -424,6 +446,7 @@ Use the roadmap review gate.
 - Modify: `packages/docx/src/table-layout-reuse.test.ts`
 - Modify: `packages/docx/src/cell-border-conflict-render.test.ts`
 - Modify: `packages/docx/src/column-widths.test.ts`
+- Modify: `scripts/docx-layout-boundary-baseline.json`
 
 **Interfaces:**
 
@@ -516,6 +539,7 @@ Use the roadmap review gate.
 - Modify: `packages/docx/src/float-table-page-fit.test.ts`
 - Modify: `packages/docx/src/float-table-width.test.ts`
 - Modify: `packages/docx/src/pagination.test.ts`
+- Modify: `scripts/docx-layout-boundary-baseline.json`
 
 **Interfaces:**
 
@@ -600,6 +624,7 @@ Use the roadmap review gate.
 - Modify: `packages/docx/src/worker-protocol.ts`
 - Modify: `packages/docx/src/document.ts`
 - Modify: `packages/docx/src/bookmark-nav.ts`
+- Modify: `scripts/docx-layout-boundary-baseline.json`
 
 **Interfaces:**
 
@@ -650,8 +675,9 @@ are recovered from element stamps rather than `LayoutPage`.
 Make each transition return a new `PageFlowState`; store section, geometry,
 columns, content origin, page numbering, direction, header/footer references,
 and parity-page metadata on `LayoutPage`. Replace `computePages` closure state
-with `paginateBody`. The render worker retains `Map<layoutOptionsKey,
-DocumentLayout>`; page metadata and bookmarks derive from the load-time default
+with `paginateBody`. The render worker retains `Map<string, DocumentLayout>` keyed
+only by `layoutOptionsKey(options, services)`, where `services` is the actual
+worker-owned instance; page metadata and bookmarks derive from the load-time default
 layout, while render/collect requests carry the normalized key inputs needed to
 select a variant. Keep worker protocol response shapes and public methods
 unchanged; add only internal request fields.

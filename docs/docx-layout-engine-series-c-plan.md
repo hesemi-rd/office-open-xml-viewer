@@ -30,6 +30,7 @@
 - Modify: `packages/docx/src/renderer.ts`
 - Modify: `packages/docx/src/float-line-start-one-inch.test.ts`
 - Modify: `packages/docx/src/float-table-geometry.test.ts`
+- Modify: `scripts/docx-layout-boundary-baseline.json`
 
 **Interfaces:**
 
@@ -163,18 +164,20 @@ the project later supplies one deterministic shaping engine and bundled font
 corpus.
 
 Use these explicit comparison rules: authored page boxes, fixed table grids,
-fixed border endpoints, and drawing extents compare within `1e-6 pt`; text
-`inkBounds` edges compare within `0.75 pt`; line/page partition equality is not a
-cross-browser assertion when the browser supplies native shaping. Every browser
-must still pass finite geometry, flow ownership, bottom-margin, structured-clone,
-and exact same-browser main/worker fingerprint invariants.
+fixed border endpoints, and drawing extents are normalized to six decimal places
+and compare exactly because they do not depend on shaping. Text coordinates,
+line partitions, and page partitions are not compared numerically across browser
+engines when native shaping is used. Every browser must instead pass finite
+geometry, flow ownership, bottom-margin, structured-clone, text/source-range
+coverage, and exact same-browser main/worker fingerprint invariants. No empirical
+cross-browser text tolerance is permitted.
 
 - [ ] **Step 3: Run tests to verify Red**
 
 Run:
 
 ```bash
-cargo test -p docx-parser diagnostics -- --nocapture
+cargo test -p docx-parser --test diagnostics -- --nocapture
 pnpm vitest run packages/docx/src/layout/diagnostics.test.ts packages/docx/src/conformance/layout.test.ts
 pnpm playwright test --config packages/docx/playwright.config.ts conformance.spec.ts --project=chrome
 ```
@@ -232,6 +235,7 @@ Use the roadmap review gate.
 - Create: `packages/docx/src/layout/architecture.test.ts`
 - Modify: `scripts/check-docx-public-api.mjs`
 - Modify: `scripts/check-docx-layout-boundaries.mjs`
+- Delete: `scripts/docx-layout-boundary-baseline.json`
 - Modify: `sgconfig.yml`
 - Modify: `.github/workflows/ci.yml`
 - Modify: `docs/docx-layout-engine-redesign.md`
@@ -276,7 +280,7 @@ Run:
 pnpm vitest run packages/docx/src/layout/architecture.test.ts packages/docx/src/paint/canvas-page.test.ts
 pnpm lint
 pnpm lint:test
-node scripts/check-docx-layout-boundaries.mjs
+node scripts/check-docx-layout-boundaries.mjs --final
 pnpm --filter @silurus/ooxml-docx build
 node scripts/check-docx-public-api.mjs
 ```
@@ -300,7 +304,7 @@ Run:
 pnpm vitest run packages/docx/src/layout/architecture.test.ts packages/docx/src/paint/canvas-page.test.ts packages/docx/src/layout/invariants.test.ts packages/docx/src/layout/worker-parity.test.ts
 pnpm lint
 pnpm lint:test
-node scripts/check-docx-layout-boundaries.mjs
+node scripts/check-docx-layout-boundaries.mjs --final
 rg -n 'fitMeasureReuseEnabled|fragmentPaintEnabled|lineReuseEnabled|tableReuseEnabled|RequiresLegacy|requiresLegacy|dryRun|PaginatedBodyElement|tableColWidthsPt|tableRowHeightsPt|layoutLinesInputs|deferFront' packages/docx/src --glob '!**/*.test.ts'
 ```
 
@@ -319,7 +323,7 @@ pnpm playwright test --config packages/docx/playwright.config.ts conformance.spe
 cargo test -p docx-parser
 pnpm --filter @silurus/ooxml-docx build
 node scripts/check-docx-public-api.mjs
-node scripts/check-docx-layout-boundaries.mjs
+node scripts/check-docx-layout-boundaries.mjs --final
 git diff --check
 ```
 

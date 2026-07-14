@@ -129,8 +129,6 @@ export interface LayoutServices {
 
 export interface LayoutOptions {
   readonly currentDateMs: number;
-  readonly textEnvironmentFingerprint: string;
-  readonly mathEnvironmentFingerprint: string;
 }
 ```
 
@@ -142,8 +140,9 @@ result.
 Layout uses points at scale 1. It owns line selection, row sizing, page and column
 placement, float exclusion, note reservation, story placement, and page-dependent
 field convergence. Geometry-affecting render options are normalized before layout
-and participate in a stable layout cache key; paint-only width, DPR, and color do
-not.
+and participate in a stable layout cache key together with fingerprints derived
+from the injected service instances; callers cannot provide service fingerprints
+independently. Paint-only width, DPR, and color do not participate.
 
 ### Document layout
 
@@ -281,7 +280,7 @@ part, note ID, or enclosing text-box path) plus the block path.
 
 Search and selection geometry is projected from layout rather than collected by a
 second dry render. Main and worker modes must produce the same normalized layout
-fingerprint for the same resolved font environment.
+fingerprint for services with identical text, image, and math resource snapshots.
 
 The worker retains layouts by a structured-clone-safe `LayoutOptions` key. The
 load-time default key backs synchronous page metadata. A per-call `currentDate`
@@ -409,9 +408,11 @@ Paint tests use a Canvas stub whose `measureText` throws. Static analysis reject
 Node/Skia geometry tests are the deterministic primary gate. Chrome, Firefox, and
 WebKit verify browser execution and main/worker parity. Visual regression tests
 remain supplementary. Native Canvas shaping may differ across browser engines,
-so cross-browser checks use semantic invariants and explicit per-primitive
-tolerances unless a deterministic shaping engine and font corpus are supplied;
-main/worker parity within one browser remains exact. Behavior-preserving
+so cross-browser checks compare authored fixed geometry after deterministic
+normalization and apply semantic invariants to shaped text; text coordinates and
+partitions are not numerically compared across engines unless a deterministic
+shaping engine and font corpus are supplied. Main/worker parity within one browser
+remains exact. Behavior-preserving
 migration pull requests require no intentional visual difference.
 
 ## Pull Request Review Gate
