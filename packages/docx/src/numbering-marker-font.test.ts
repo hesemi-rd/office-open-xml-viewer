@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { createLayoutServices, renderDocumentToCanvas, type DocxTextRunInfo } from './renderer.js';
+import {
+  createLayoutServices,
+  renderDocumentToCanvas,
+  renderShapeText,
+  type DocxTextRunInfo,
+} from './renderer.js';
+import { shapeRenderState } from './line-layout.js';
 import { testFontSnapshot } from './layout/test-font-snapshot.js';
 import type {
   BodyElement,
@@ -8,6 +14,8 @@ import type {
   DocxDocumentModel,
   SectionProps,
   NumberingInfo,
+  ShapeRun,
+  ShapeText,
 } from './types';
 
 // ECMA-376 §17.3.2.26 (rFonts ascii/eastAsia axes) + §17.9.6 (numbering level
@@ -172,6 +180,87 @@ describe('numbering marker + body eastAsia font routing (§17.3.2.26 / §17.9.6)
     expect(headFamily(marker.font)).not.toBe(headFamily(title.font));
   });
 
+  it('shapes a mixed 第1章 marker per scalar from retained four-slot theme facts', async () => {
+    const { canvas, fillTextCalls } = makeRecordingCanvas();
+    const num = {
+      ...numbering(),
+      text: '第1章',
+      fontFamily: 'Legacy ASCII',
+      fontFamilyEastAsia: 'Legacy EA',
+      fontFacts: {
+        fontFamily: 'Legacy ASCII',
+        fontFamilyHighAnsi: 'Legacy HANSI',
+        fontFamilyEastAsia: 'Legacy EA',
+        fontSlots: {
+          direct: {
+            ascii: 'Direct ASCII', highAnsi: 'Direct HANSI',
+            eastAsia: 'Direct EA', complexScript: 'Direct CS',
+          },
+          theme: { ascii: 'Theme ASCII', eastAsia: 'Theme EA' },
+          themePresent: { ascii: true, highAnsi: false, eastAsia: true, complexScript: false },
+        },
+      },
+    } as unknown as NumberingInfo;
+    const model = headingDoc(num);
+    await renderDocumentToCanvas(model, canvas, 0, {
+      dpr: 1,
+      width: 400,
+      layoutServices: createLayoutServices(model, {
+        localMetrics: testFontSnapshot([
+          { family: 'Theme ASCII' },
+          { family: 'Theme EA' },
+        ]),
+        measureContext: canvas.getContext('2d'),
+      }),
+    });
+
+    const marker = fillTextCalls.filter((call) => ['第', '1', '章'].includes(call.text));
+    expect(marker.map((call) => [call.text, headFamily(call.font)])).toEqual([
+      ['第', 'Theme EA'],
+      ['1', 'Theme ASCII'],
+      ['章', 'Theme EA'],
+    ]);
+    expect(fillTextCalls.some((call) => call.text === '第1章')).toBe(false);
+  });
+
+  it('routes U+2022 through highAnsi theme presence and the registered substitute face', async () => {
+    const { canvas, fillTextCalls } = makeRecordingCanvas();
+    const num = {
+      ...numbering(),
+      format: 'bullet',
+      text: '•',
+      fontFamily: 'Legacy ASCII',
+      fontFamilyEastAsia: 'Legacy EA',
+      fontFacts: {
+        fontFamily: 'Legacy ASCII',
+        fontFamilyHighAnsi: 'Direct HANSI',
+        fontFamilyEastAsia: 'Legacy EA',
+        fontSlots: {
+          direct: { ascii: 'Legacy ASCII', highAnsi: 'Direct HANSI', eastAsia: 'Legacy EA' },
+          theme: { highAnsi: 'Calibri' },
+          themePresent: { ascii: false, highAnsi: true, eastAsia: false, complexScript: false },
+        },
+      },
+    } as unknown as NumberingInfo;
+    const model = { ...headingDoc(num), majorFont: 'Calibri' };
+    const carlito = {
+      family: 'Carlito', weight: '400', style: 'normal', status: 'loaded',
+    } as FontFace;
+    await renderDocumentToCanvas(model, canvas, 0, {
+      dpr: 1,
+      width: 400,
+      layoutServices: createLayoutServices(model, {
+        useGoogleFonts: true,
+        googleFaces: [carlito],
+        measureContext: canvas.getContext('2d'),
+      }),
+    });
+
+    const marker = fillTextCalls.find((call) => call.text === '•');
+    expect(marker).toBeDefined();
+    expect(headFamily(marker!.font)).toBe('Carlito');
+  });
+
   it('no-regression: a CJK run with NO eastAsia axis falls back to the ascii face', async () => {
     // Field-run / legacy single-axis output: fontFamilyEastAsia absent → the CJK
     // glyphs keep the ascii family, exactly as before this change.
@@ -243,5 +332,88 @@ describe('numbering marker + body eastAsia font routing (§17.3.2.26 / §17.9.6)
     const seg = runs.find((r) => r.text === '本文')!;
     expect(headFamily(seg.font)).toBe('ＭＳ 明朝'); // eastAsia mincho
     expect(seg.font).toMatch(/serif/); // still serif — no visible change
+  });
+
+  const textBoxShape = (num: NumberingInfo): ShapeRun => ({
+    type: 'shape', presetGeometry: 'rect', wrapMode: 'none', textAnchor: 't',
+    textInsetL: 0, textInsetT: 0, textInsetR: 0, textInsetB: 0,
+    textBlocks: [{
+      text: 'item', fontSizePt: 10, alignment: 'left',
+      runs: [{ text: 'item', fontSizePt: 10 }],
+      numbering: num,
+    } as unknown as ShapeText],
+  }) as unknown as ShapeRun;
+
+  it('text boxes retain the same per-scalar 第1章 routes for width and paint', () => {
+    const { canvas, fillTextCalls } = makeRecordingCanvas();
+    const ctx = canvas.getContext('2d')!;
+    const num = {
+      ...numbering(),
+      text: '第1章',
+      fontFacts: {
+        fontFamily: 'Legacy ASCII',
+        fontFamilyHighAnsi: 'Legacy HANSI',
+        fontFamilyEastAsia: 'Legacy EA',
+        fontSlots: {
+          direct: { ascii: 'Direct ASCII', highAnsi: 'Direct HANSI', eastAsia: 'Direct EA' },
+          theme: { ascii: 'Theme ASCII', eastAsia: 'Theme EA' },
+          themePresent: { ascii: true, highAnsi: false, eastAsia: true, complexScript: false },
+        },
+      },
+    } as unknown as NumberingInfo;
+    const doc = headingDoc(num);
+    const services = createLayoutServices(doc, {
+      localMetrics: testFontSnapshot([{ family: 'Theme ASCII' }, { family: 'Theme EA' }]),
+      measureContext: ctx,
+    });
+    const state = shapeRenderState(ctx, 1, {}, new Map());
+    state.layoutServices = services;
+
+    renderShapeText(textBoxShape(num), 0, 0, 200, 100, ctx, 1, {}, new Map(), state);
+
+    const marker = fillTextCalls.filter((call) => ['第', '1', '章'].includes(call.text));
+    expect(marker.map((call) => [call.text, headFamily(call.font)])).toEqual([
+      ['第', 'Theme EA'],
+      ['1', 'Theme ASCII'],
+      ['章', 'Theme EA'],
+    ]);
+    expect(marker[1]!.x).toBeGreaterThan(marker[0]!.x);
+    expect(marker[2]!.x).toBeGreaterThan(marker[1]!.x);
+    expect(fillTextCalls.some((call) => call.text === '第1章')).toBe(false);
+  });
+
+  it('text boxes route U+2022 through highAnsi theme substitution for measure and paint', () => {
+    const { canvas, fillTextCalls } = makeRecordingCanvas();
+    const ctx = canvas.getContext('2d')!;
+    const num = {
+      ...numbering(),
+      format: 'bullet',
+      text: '•',
+      fontFacts: {
+        fontFamily: 'Legacy ASCII',
+        fontFamilyHighAnsi: 'Direct HANSI',
+        fontSlots: {
+          direct: { ascii: 'Legacy ASCII', highAnsi: 'Direct HANSI' },
+          theme: { highAnsi: 'Calibri' },
+          themePresent: { ascii: false, highAnsi: true, eastAsia: false, complexScript: false },
+        },
+      },
+    } as unknown as NumberingInfo;
+    const doc = { ...headingDoc(num), majorFont: 'Calibri' };
+    const services = createLayoutServices(doc, {
+      useGoogleFonts: true,
+      googleFaces: [{
+        family: 'Carlito', weight: '400', style: 'normal', status: 'loaded',
+      } as FontFace],
+      measureContext: ctx,
+    });
+    const state = shapeRenderState(ctx, 1, {}, new Map());
+    state.layoutServices = services;
+
+    renderShapeText(textBoxShape(num), 0, 0, 200, 100, ctx, 1, {}, new Map(), state);
+
+    const marker = fillTextCalls.find((call) => call.text === '•');
+    expect(marker).toBeDefined();
+    expect(headFamily(marker!.font)).toBe('Carlito');
   });
 });

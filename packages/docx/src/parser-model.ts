@@ -1,5 +1,14 @@
-import type { BodyElement, DocRun, DocxDocumentModel, DocxTextRun, FieldRun, HeadersFooters } from './types.js';
-import type { SourceRef } from './layout/types.js';
+import type {
+  BodyElement,
+  DocParagraph,
+  DocRun,
+  DocxDocumentModel,
+  DocxTextRun,
+  FieldRun,
+  HeadersFooters,
+  NumberingInfo,
+} from './types.js';
+import type { NumberingMarkerShapeInput, SourceRef } from './layout/types.js';
 import type { MathOccurrence } from './layout/resources.js';
 import { mathResourceKey } from './layout/source-key.js';
 import type { TextFontSlotPresence, TextFontSlots } from './layout/text.js';
@@ -27,6 +36,25 @@ export interface InternalRunSlotMetadata {
   langEastAsia?: string;
 }
 
+/** Effective parser-owned run facts used by non-content glyphs such as list
+ * markers and paragraph marks. Kept off the stable public document model. */
+export interface InternalRunFontFacts extends InternalRunSlotMetadata {
+  fontFamily?: string | null;
+  fontSize?: number;
+  bold?: boolean;
+  italic?: boolean;
+  kerning?: number;
+}
+
+export interface InternalNumberingInfo extends NumberingInfo {
+  fontFacts?: InternalRunFontFacts;
+}
+
+export interface InternalDocParagraph extends DocParagraph {
+  numbering: InternalNumberingInfo | null;
+  paragraphMarkFontFacts?: InternalRunFontFacts;
+}
+
 type TextOnlyMetadata = Pick<
   DocxTextRun,
   | 'ruby' | 'revision' | 'hyperlink' | 'hyperlinkAnchor'
@@ -50,6 +78,44 @@ export interface InternalDocxDocumentModel extends DocxDocumentModel {
 export interface NormalizedDocumentInput {
   readonly document: InternalDocxDocumentModel;
   readonly mathOccurrences: readonly MathOccurrence[];
+}
+
+/** Snapshot the parser's effective numbering-level rPr into the plain retained
+ * layout contract. This is the parser-model/layout boundary: layout code never
+ * dereferences the private parser extension itself. */
+export function numberingMarkerShapeInput(
+  num: NumberingInfo,
+  fallbackFontSizePt: number,
+): NumberingMarkerShapeInput {
+  const facts = internalNumberingInfo(num).fontFacts;
+  const complexScript = facts?.rtl === true || facts?.cs === true;
+  const fontSizePt = complexScript
+    ? (facts?.fontSizeCs ?? facts?.fontSize ?? fallbackFontSizePt)
+    : (facts?.fontSize ?? fallbackFontSizePt);
+  const ascii = facts?.fontFamily ?? num.fontFamily ?? null;
+  const fallbackFonts: TextFontSlots = {
+    ascii,
+    highAnsi: facts?.fontFamilyHighAnsi ?? ascii,
+    eastAsia: facts?.fontFamilyEastAsia ?? num.fontFamilyEastAsia ?? ascii,
+    complexScript: facts?.fontFamilyCs ?? ascii,
+  };
+  const slots = facts?.fontSlots;
+  return Object.freeze({
+    fontSizePt,
+    fonts: Object.freeze({ ...(slots?.direct ?? fallbackFonts) }),
+    themeFonts: slots?.theme ? Object.freeze({ ...slots.theme }) : undefined,
+    themeFontPresence: slots?.themePresent
+      ? Object.freeze({ ...slots.themePresent })
+      : undefined,
+    weight: (complexScript ? (facts?.boldCs ?? false) : (facts?.bold ?? false)) ? 700 : 400,
+    style: (complexScript ? (facts?.italicCs ?? false) : (facts?.italic ?? false))
+      ? 'italic'
+      : 'normal',
+    complexScript,
+    fontHint: facts?.fontHint,
+    eastAsiaLanguage: facts?.langEastAsia,
+    kerning: facts?.kerning == null ? undefined : fontSizePt >= facts.kerning,
+  });
 }
 
 /** Pure structural normalization for stable math addressing. Only ancestry that
@@ -183,6 +249,14 @@ export function internalFieldRun(run: FieldRun): InternalFieldRun {
 
 export function internalTextRun(run: DocxTextRun): InternalTextRun {
   return run as InternalTextRun;
+}
+
+export function internalNumberingInfo(numbering: NumberingInfo): InternalNumberingInfo {
+  return numbering as InternalNumberingInfo;
+}
+
+export function internalParagraph(paragraph: DocParagraph): InternalDocParagraph {
+  return paragraph as InternalDocParagraph;
 }
 
 export function internalDocumentModel(doc: DocxDocumentModel): InternalDocxDocumentModel {

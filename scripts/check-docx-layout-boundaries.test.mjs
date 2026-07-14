@@ -74,6 +74,23 @@ function initializeMetricShapeRepository() {
   return root;
 }
 
+function initializeNumberingShapeRepository() {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-shape-numbering-'));
+  write(root, 'packages/docx/src/renderer.ts', 'export function renderShapeText(block: any, ctx: any, scale: number, effState: any, eaVertUpright: boolean, markerX: number, baseline: number) { const markerText = markerDisplayText(block.numbering); const markerW = ctx.measureText(markerText).width; if (eaVertUpright) { drawVerticalRun(ctx, markerText, markerX, baseline, block.fontSizePt * scale, 0); } else { ctx.fillText(markerText, markerX, baseline); } return markerW; }\n');
+  write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
+  write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
+  git(root, 'init', '-b', 'main');
+  git(root, 'config', 'user.email', 'boundary-test@example.invalid');
+  git(root, 'config', 'user.name', 'Boundary Test');
+  git(root, 'add', '.');
+  git(root, 'commit', '-m', 'base');
+  git(root, 'switch', '-c', 'a1');
+  establishA1Baseline(root);
+  return root;
+}
+
+const exactNumberingShapeSource = 'export function renderShapeText(block: any, ctx: any, scale: number, effState: any, eaVertUpright: boolean, markerX: number, baseline: number) { const markerText = markerDisplayText(block.numbering); const markerShapeInput = numberingMarkerShapeInput(block.numbering, block.fontSizePt); const markerTextLayout = shapeNumberingMarkerText(markerShapeInput, markerText, scale, effState.layoutServices?.text,); const markerW = markerTextLayout?.shape.advancePt ?? ctx.measureText(markerText).width; if (markerTextLayout) { paintNumberingMarkerText(ctx, markerTextLayout, markerX, baseline, eaVertUpright ? (paintCtx, text, drawX, drawBaseline, fontSizePx) => { drawVerticalRun(paintCtx, text, drawX, drawBaseline, fontSizePx, 0); } : undefined,); } else if (eaVertUpright) { drawVerticalRun(ctx, markerText, markerX, baseline, block.fontSizePt * scale, 0); } else { ctx.fillText(markerText, markerX, baseline); } return markerW; }\n';
+
 function establishA1Baseline(root) {
   const writeResult = runChecker(root, '--write-transitional-baseline', '--base-ref', 'main');
   assert.equal(writeResult.status, 0, writeResult.output);
@@ -98,6 +115,23 @@ test('rejects a transitive paint edge to a measurement module', () => {
   assert.notEqual(result.status, 0);
   assert.match(result.output, /FORBIDDEN_PAINT_EDGE/);
   assert.match(result.output, /canvas-page\.ts.*helper\.ts.*line-layout\.ts/s);
+});
+
+test('rejects new parser-model dependencies inside retained layout modules', () => {
+  const root = initializeRepository();
+  establishA1Baseline(root);
+  write(root, 'packages/docx/src/parser-model.ts', 'export const parserFacts = true;\n');
+  write(
+    root,
+    'packages/docx/src/layout/numbering-marker.ts',
+    "import { parserFacts } from '../parser-model.js';\nexport const marker = parserFacts;\n",
+  );
+
+  const result = runChecker(root, '--base-ref', 'main');
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.output, /LAYOUT_PARSER_MODEL_DEPENDENCY/);
+  assert.match(result.output, /layout\/numbering-marker\.ts.*parser-model\.ts/s);
 });
 
 test('rejects any paint runtime dependency outside the paint owner directory', () => {
@@ -287,6 +321,32 @@ test('allows only exact A2 routes on renderShapeText line-metric probes', () => 
   const result = runChecker(root, '--base-ref', 'main');
 
   assert.equal(result.status, 0, result.output);
+});
+
+test('allows only exact A2 numbering snapshot, shape, and retained paint threading in renderShapeText', () => {
+  const root = initializeNumberingShapeRepository();
+  write(root, 'packages/docx/src/renderer.ts', exactNumberingShapeSource);
+
+  const result = runChecker(root, '--base-ref', 'main');
+
+  assert.equal(result.status, 0, result.output);
+});
+
+test('rejects non-exact renderShapeText numbering shape and paint migrations', () => {
+  const cases = [
+    exactNumberingShapeSource.replace('block.fontSizePt);', 'block.fontSizePt + 1);'),
+    exactNumberingShapeSource.replace('markerTextLayout?.shape.advancePt', 'markerTextLayout?.shape.advancePt + 1'),
+    exactNumberingShapeSource.replace('paintNumberingMarkerText(ctx, markerTextLayout', 'paintNumberingMarkerText(ctx, alteredLayout'),
+    exactNumberingShapeSource.replace('const markerShapeInput = numberingMarkerShapeInput(block.numbering, block.fontSizePt); ', ''),
+    exactNumberingShapeSource.replace('return markerW;', 'sideEffect(); return markerW;'),
+  ];
+  for (const source of cases) {
+    const root = initializeNumberingShapeRepository();
+    write(root, 'packages/docx/src/renderer.ts', source);
+    const result = runChecker(root, '--base-ref', 'main');
+    assert.notEqual(result.status, 0);
+    assert.match(result.output, /LEGACY_DECLARATION_CHANGED/);
+  }
 });
 
 test('rejects non-exact renderShapeText line-metric route threading', () => {

@@ -1,5 +1,9 @@
 import type { SectionLayoutContext } from '../layout-context.js';
-import type { TextLayoutService } from './text.js';
+import type {
+  TextFontSlotPresence,
+  TextFontSlots,
+  TextLayoutService,
+} from './text.js';
 import type { ImageMetadataService, MathMetadataService } from './resources.js';
 import type { CanvasFontRoute } from '@silurus/ooxml-core';
 
@@ -203,6 +207,22 @@ export interface LayoutServices {
   readonly text: TextLayoutService;
   readonly images: ImageMetadataService;
   readonly math: MathMetadataService;
+}
+
+/** Plain, parser-independent input for shaping a numbering marker. The renderer
+ * boundary snapshots effective level rPr facts into this contract before the
+ * retained layout service sees them. */
+export interface NumberingMarkerShapeInput {
+  readonly fontSizePt: number;
+  readonly fonts: TextFontSlots;
+  readonly themeFonts?: TextFontSlots;
+  readonly themeFontPresence?: TextFontSlotPresence;
+  readonly weight: number;
+  readonly style: 'normal' | 'italic';
+  readonly complexScript: boolean;
+  readonly fontHint?: 'default' | 'eastAsia' | 'cs';
+  readonly eastAsiaLanguage?: string;
+  readonly kerning?: boolean;
 }
 
 export interface ParagraphLayoutInput {

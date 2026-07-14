@@ -1,6 +1,14 @@
 import { describe, it, expect } from 'vitest';
-import { resolveColumnWidths } from './renderer.js';
-import type { DocTable, DocTableRow, DocTableCell } from './types.js';
+import { createLayoutServices, resolveColumnWidths } from './renderer.js';
+import { buildSegments, layoutLines } from './line-layout.js';
+import { canvasFontString } from '@silurus/ooxml-core';
+import type {
+  DocParagraph,
+  DocTable,
+  DocTableRow,
+  DocTableCell,
+  DocxDocumentModel,
+} from './types.js';
 
 // State type taken from resolveColumnWidths' signature so the test does not
 // depend on RenderState being exported (mirrors table-row-height.test).
@@ -128,5 +136,232 @@ describe('resolveColumnWidths — a tblW=auto table sizes to tcW/content, ignori
     expect(w[0]).toBeCloseTo(120, 5);
     expect(w[1]).toBeCloseTo(20, 5);
     expect(w[0] + w[1]).toBeLessThan(415);
+  });
+
+  it('uses the same registered highAnsi substitute route as ordinary line layout', () => {
+    let font = '';
+    const measured: Array<{ text: string; font: string }> = [];
+    const ctx = {
+      get font() { return font; },
+      set font(value: string) { font = value; },
+      letterSpacing: '0px',
+      fontKerning: 'auto' as CanvasFontKerning,
+      measureText(text: string) {
+        measured.push({ text, font });
+        return {
+          width: [...text].length * 10,
+          fontBoundingBoxAscent: 8,
+          fontBoundingBoxDescent: 2,
+          actualBoundingBoxAscent: 8,
+          actualBoundingBoxDescent: 2,
+        } as TextMetrics;
+      },
+    } as unknown as CanvasRenderingContext2D;
+    const doc = {
+      section: {}, body: [], headers: {}, footers: {}, majorFont: 'Calibri',
+    } as unknown as DocxDocumentModel;
+    const services = createLayoutServices(doc, {
+      useGoogleFonts: true,
+      googleFaces: [{
+        family: 'Carlito', weight: '400', style: 'normal', status: 'loaded',
+      } as FontFace],
+      measureContext: ctx,
+    });
+    const run = {
+      type: 'text', text: 'é', fontSize: 10, fontFamily: 'Legacy ASCII',
+      fontFamilyHighAnsi: 'Calibri', bold: false, italic: false, underline: false,
+      strikethrough: false, color: null, isLink: false, background: null,
+      vertAlign: null, hyperlink: null,
+      fontSlots: {
+        direct: { ascii: 'Legacy ASCII', highAnsi: 'Calibri' },
+        theme: {},
+        themePresent: { ascii: false, highAnsi: false, eastAsia: false, complexScript: false },
+      },
+    } as DocParagraph['runs'][number];
+    const paragraph = {
+      alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
+      spaceBefore: 0, spaceAfter: 0, lineSpacing: null, numbering: null,
+      tabStops: [], runs: [run], widowControl: false,
+    } as DocParagraph;
+    const textCell = {
+      ...cell(1, null, 0), content: [{ type: 'paragraph', ...paragraph }],
+    } as unknown as DocTableCell;
+    const t = autofit([row([textCell])], [200]);
+    const state = {
+      ctx, fontFamilyClasses: {}, layoutServices: services, pageWidth: 300,
+    } as unknown as ColState;
+
+    resolveColumnWidths(t, 300, state);
+    const autoFitFonts = measured
+      .filter((entry) => entry.text === 'é')
+      .map((entry) => entry.font);
+    measured.length = 0;
+    const segments = buildSegments([run], {
+      pageIndex: 0, totalPages: 1, layoutServices: services,
+    });
+    layoutLines(ctx, segments, 300, 0, 1);
+    const expectedShape = services.text.shape({
+      text: 'é', fontSizePt: 10,
+      fonts: { ascii: 'Legacy ASCII', highAnsi: 'Calibri' },
+    });
+    const expectedFont = canvasFontString(
+      expectedShape.spans[0]!.fontRoute, 10, 400, 'normal',
+    );
+
+    expect(expectedShape.spans[0]!.font).toMatchObject({
+      source: 'substitute', resolvedFamily: 'Carlito',
+    });
+    expect(segments[0]).toMatchObject({ fontRoute: expectedShape.spans[0]!.fontRoute });
+    expect(autoFitFonts).toContain(expectedFont);
+    expect(measured.filter((entry) => entry.text === 'é').map((entry) => entry.font))
+      .toContain(expectedFont);
+  });
+
+  it('sums each retained route across a differently formatted no-break pair', () => {
+    let font = '';
+    const measured: Array<{ text: string; font: string }> = [];
+    const ctx = {
+      get font() { return font; },
+      set font(value: string) { font = value; },
+      letterSpacing: '0px',
+      fontKerning: 'auto' as CanvasFontKerning,
+      measureText(text: string) {
+        measured.push({ text, font });
+        const perScalar = font.includes('Carlito') ? 13 : font.includes('Caladea') ? 29 : 5;
+        return {
+          width: [...text].length * perScalar,
+          fontBoundingBoxAscent: 8,
+          fontBoundingBoxDescent: 2,
+          actualBoundingBoxAscent: 8,
+          actualBoundingBoxDescent: 2,
+        } as TextMetrics;
+      },
+    } as unknown as CanvasRenderingContext2D;
+    const doc = {
+      section: {}, body: [], headers: {}, footers: {}, majorFont: 'Calibri',
+    } as unknown as DocxDocumentModel;
+    const services = createLayoutServices(doc, {
+      useGoogleFonts: true,
+      googleFaces: [
+        { family: 'Carlito', weight: '400', style: 'normal', status: 'loaded' },
+        { family: 'Caladea', weight: '400', style: 'normal', status: 'loaded' },
+      ] as FontFace[],
+      measureContext: ctx,
+    });
+    const textRun = (text: string, family: string): DocParagraph['runs'][number] => ({
+      type: 'text', text, fontSize: 10, fontFamily: family,
+      fontFamilyHighAnsi: family, bold: false, italic: false, underline: false,
+      strikethrough: false, color: null, isLink: false, background: null,
+      vertAlign: null, hyperlink: null,
+      fontSlots: {
+        direct: { ascii: family, highAnsi: family },
+        theme: {},
+        themePresent: { ascii: false, highAnsi: false, eastAsia: false, complexScript: false },
+      },
+    }) as DocParagraph['runs'][number];
+    const paragraph = {
+      alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
+      spaceBefore: 0, spaceAfter: 0, lineSpacing: null, numbering: null,
+      tabStops: [], widowControl: false,
+      // UAX #14 LB14 forbids a break between OP and AL. The formatting seam is
+      // not a license to route the following scalar through the opening mark's
+      // font: each piece keeps its own TextLayoutService request.
+      runs: [textRun('(', 'Carlito'), textRun('A', 'Caladea')],
+    } as DocParagraph;
+    const textCell = {
+      ...cell(1, null, 0), content: [{ type: 'paragraph', ...paragraph }],
+    } as unknown as DocTableCell;
+    const t = autofit([row([textCell])], [200]);
+    const state = {
+      ctx, fontFamilyClasses: {}, layoutServices: services, pageWidth: 300,
+    } as unknown as ColState;
+
+    const segments = buildSegments(paragraph.runs, {
+      pageIndex: 0, totalPages: 1, layoutServices: services,
+    });
+    expect(segments).toMatchObject([
+      { text: '(', fontFamily: 'Carlito' },
+      { text: 'A', fontFamily: 'Caladea', joinPrev: true },
+    ]);
+    expect(resolveColumnWidths(t, 300, state)[0]).toBe(42);
+    expect(measured).toEqual(expect.arrayContaining([
+      expect.objectContaining({ text: '(', font: expect.stringContaining('Carlito') }),
+      expect.objectContaining({ text: 'A', font: expect.stringContaining('Caladea') }),
+    ]));
+    expect(measured.some((entry) => entry.text === '(A')).toBe(false);
+  });
+
+  it('keeps a CJK grapheme cluster atomic when deriving the auto-fit minimum', () => {
+    const ctx = {
+      font: '', letterSpacing: '0px', fontKerning: 'auto' as CanvasFontKerning,
+      measureText(text: string) {
+        return {
+          width: [...text].length * 10,
+          fontBoundingBoxAscent: 8,
+          fontBoundingBoxDescent: 2,
+          actualBoundingBoxAscent: 8,
+          actualBoundingBoxDescent: 2,
+        } as TextMetrics;
+      },
+    } as unknown as CanvasRenderingContext2D;
+    const doc = { section: {}, body: [], headers: {}, footers: {} } as unknown as DocxDocumentModel;
+    const services = createLayoutServices(doc, { measureContext: ctx });
+    const paragraph = {
+      alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
+      spaceBefore: 0, spaceAfter: 0, lineSpacing: null, numbering: null,
+      tabStops: [], widowControl: false,
+      runs: [{
+        type: 'text', text: 'か\u3099国', fontSize: 10, fontFamily: 'EA Face',
+        fontFamilyEastAsia: 'EA Face', bold: false, italic: false, underline: false,
+        strikethrough: false, color: null, isLink: false, background: null,
+        vertAlign: null, hyperlink: null,
+      }],
+    } as DocParagraph;
+    const textCell = {
+      ...cell(1, null, 0), content: [{ type: 'paragraph', ...paragraph }],
+    } as unknown as DocTableCell;
+    const t = autofit([row([textCell])], [200]);
+    const state = {
+      ctx, fontFamilyClasses: {}, layoutServices: services, pageWidth: 300,
+    } as unknown as ColState;
+
+    expect(resolveColumnWidths(t, 300, state)[0]).toBe(20);
+  });
+
+  it('keeps a kinsoku-prohibited CJK boundary inside one auto-fit minimum atom', () => {
+    const ctx = {
+      font: '', letterSpacing: '0px', fontKerning: 'auto' as CanvasFontKerning,
+      measureText(text: string) {
+        return {
+          width: [...text].length * 10,
+          fontBoundingBoxAscent: 8,
+          fontBoundingBoxDescent: 2,
+          actualBoundingBoxAscent: 8,
+          actualBoundingBoxDescent: 2,
+        } as TextMetrics;
+      },
+    } as unknown as CanvasRenderingContext2D;
+    const doc = { section: {}, body: [], headers: {}, footers: {} } as unknown as DocxDocumentModel;
+    const services = createLayoutServices(doc, { measureContext: ctx });
+    const paragraph = {
+      alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
+      spaceBefore: 0, spaceAfter: 0, lineSpacing: null, numbering: null,
+      tabStops: [], widowControl: false,
+      runs: [{
+        type: 'text', text: '（国', fontSize: 10, fontFamily: 'EA Face',
+        fontFamilyEastAsia: 'EA Face', bold: false, italic: false, underline: false,
+        strikethrough: false, color: null, isLink: false, background: null,
+        vertAlign: null, hyperlink: null,
+      }],
+    } as DocParagraph;
+    const textCell = {
+      ...cell(1, null, 0), content: [{ type: 'paragraph', ...paragraph }],
+    } as unknown as DocTableCell;
+    const t = autofit([row([textCell])], [200]);
+    const state = {
+      ctx, fontFamilyClasses: {}, layoutServices: services, pageWidth: 300,
+    } as unknown as ColState;
+
+    expect(resolveColumnWidths(t, 300, state)[0]).toBe(20);
   });
 });

@@ -636,6 +636,11 @@ pub struct DocParagraph {
     /// the ASCII fallback.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_font_family_east_asia: Option<String>,
+    /// Internal effective paragraph-mark run facts used by the shared text
+    /// resolver for empty and anchor-only line metrics. Not part of the stable
+    /// public TypeScript document model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paragraph_mark_font_facts: Option<RunFontFacts>,
     /// ECMA-376 §17.3.1.29 — the paragraph MARK run's resolved `<w:color>`
     /// (direct `pPr/rPr` → pStyle chain → docDefaults, the same `mark_run`
     /// resolution that feeds `default_font_size`; hex 6 lowercased; an
@@ -833,6 +838,11 @@ pub struct NumberingInfo {
     /// bullet) with this family. `None` ⇒ renderer falls back to `font_family`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_family_east_asia: Option<String>,
+    /// Internal effective numbering-level run facts. Kept outside the stable TS
+    /// public model, but serialized so layout can apply the normative four-slot
+    /// §17.3.2.26 selection to every scalar in mixed marker text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_facts: Option<RunFontFacts>,
     /// ECMA-376 §17.9.24 — the numbering level rPr's `<w:color w:val>` (hex 6,
     /// lowercased like run colors). Colors the marker glyph only, never the
     /// paragraph's runs. `None` (absent `<w:color>`) lets the renderer fall
@@ -1295,6 +1305,49 @@ pub struct RunFontSlots {
     pub direct: RunFontAxisValues,
     pub theme: RunFontAxisValues,
     pub theme_present: RunFontAxisPresence,
+}
+
+/// Internal projection of the effective run properties needed by the DOCX text
+/// service. This is shared by numbering-level text (§17.9.6) and paragraph-mark
+/// line probes (§17.3.1.29); the stable public TypeScript model intentionally
+/// remains unchanged.
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RunFontFacts {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_high_ansi: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_slots: Option<RunFontSlots>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_east_asia: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtl: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_cs: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_size: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_size_cs: Option<f64>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub bold: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub italic: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bold_cs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub italic_cs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang_bidi: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang_east_asia: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kerning: Option<f64>,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]

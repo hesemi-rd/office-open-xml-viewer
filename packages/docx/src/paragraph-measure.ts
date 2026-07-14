@@ -217,6 +217,7 @@ export function measureParagraph(
       fontFamilyClasses,
       context.lineSpacing,
       environment.resolvedLocalFonts,
+      environment.layoutServices?.text,
     );
     return {
       lines: [],
@@ -235,6 +236,7 @@ export function measureParagraph(
         fontFamilyClasses,
         context.lineSpacing,
         environment.resolvedLocalFonts,
+        environment.layoutServices?.text,
       ),
       placement: recordedPlacement,
     };

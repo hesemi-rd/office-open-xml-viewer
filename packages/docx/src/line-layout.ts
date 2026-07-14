@@ -59,6 +59,7 @@ import {
 import { verticalRunInkExtraPx } from './vertical-text.js';
 import type { LayoutServices } from './layout/types.js';
 import type { TextLayoutService, TextShapeRequest, TextShapeSpan } from './layout/text.js';
+import { internalParagraph } from './parser-model.js';
 import type { InternalMathRun, InternalTextBearingRun } from './parser-model.js';
 import type { MathLayoutResource } from './layout/resources.js';
 
@@ -1262,8 +1263,13 @@ export function paragraphMarkLineMetrics(
   fontFamilyClasses: Record<string, string> = {},
   effectiveLineSpacing: LineSpacing | null = para.lineSpacing,
   resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>> = {},
+  textLayoutService?: TextLayoutService,
 ): MarkLineMetrics {
-  const fs = getDefaultFontSize(para);
+  const facts = internalParagraph(para).paragraphMarkFontFacts;
+  const forceCs = facts?.rtl === true || facts?.cs === true;
+  const fs = forceCs
+    ? (facts?.fontSizeCs ?? facts?.fontSize ?? getDefaultFontSize(para))
+    : (facts?.fontSize ?? getDefaultFontSize(para));
   const authoredFamily = getDefaultFontFamily(para, eastAsian);
   const resolvedLocalFont = authoredFamily
     ? resolvedLocalFonts[normalizeLocalFontMetricFamily(authoredFamily)]
@@ -1271,7 +1277,44 @@ export function paragraphMarkLineMetrics(
   const measuredFamily = resolvedLocalFont?.family ?? authoredFamily;
   let asc: number;
   let desc: number;
-  if (ctx) {
+  if (textLayoutService) {
+    const bold = forceCs ? (facts?.boldCs ?? false) : (facts?.bold ?? false);
+    const italic = forceCs ? (facts?.italicCs ?? false) : (facts?.italic ?? false);
+    const ascii = facts?.fontFamily ?? para.defaultFontFamily ?? authoredFamily;
+    const shaped = textLayoutService.shape({
+      text: eastAsian ? 'あ' : 'x',
+      fontSizePt: fs * scale,
+      fonts: facts?.fontSlots?.direct ?? {
+        ascii,
+        highAnsi: facts?.fontFamilyHighAnsi ?? ascii,
+        eastAsia: facts?.fontFamilyEastAsia ?? para.defaultFontFamilyEastAsia ?? ascii,
+        complexScript: facts?.fontFamilyCs ?? ascii,
+      },
+      themeFonts: facts?.fontSlots?.theme,
+      themeFontPresence: facts?.fontSlots?.themePresent,
+      weight: bold ? 700 : 400,
+      style: italic ? 'italic' : 'normal',
+      complexScript: forceCs,
+      fontHint: facts?.fontHint,
+      eastAsiaLanguage: facts?.langEastAsia,
+      kerning: facts?.kerning == null ? undefined : fs >= facts.kerning,
+      measure: true,
+    });
+    const face = shaped.spans[0]?.font.resolvedFamily ?? authoredFamily;
+    ({ ascent: asc, descent: desc } = correctedLineMetrics(
+      {
+        width: shaped.advancePt,
+        actualBoundingBoxAscent: shaped.ascentPt,
+        actualBoundingBoxDescent: shaped.descentPt,
+        fontBoundingBoxAscent: shaped.ascentPt,
+        fontBoundingBoxDescent: shaped.descentPt,
+      } as TextMetrics,
+      face,
+      fs * scale,
+      fs * scale,
+      eastAsian,
+    ));
+  } else if (ctx) {
     // ECMA-376 §17.3.1.29 / §17.3.1.33: an empty paragraph's mark line reserves
     // the mark font's REAL single-line height — the SAME fontBoundingBox a text
     // line of that font and size uses (layoutLines), so an empty paragraph is
@@ -1331,10 +1374,11 @@ export function paragraphMarkLineHeight(
   fontFamilyClasses: Record<string, string> = {},
   effectiveLineSpacing: LineSpacing | null = para.lineSpacing,
   resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>> = {},
+  textLayoutService?: TextLayoutService,
 ): number {
   return paragraphMarkLineMetrics(
     para, scale, grid, paraHasRuby, eastAsian, ctx, fontFamilyClasses, effectiveLineSpacing,
-    resolvedLocalFonts,
+    resolvedLocalFonts, textLayoutService,
   ).advancePx;
 }
 
@@ -1371,11 +1415,12 @@ export function paragraphMarkBelowBaselinePt(
   fontFamilyClasses: Record<string, string>,
   effectiveLineSpacing: LineSpacing | null,
   resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>> = {},
+  textLayoutService?: TextLayoutService,
 ): number {
   // Measured at scale 1 so the returned px value is already in points.
   const m = paragraphMarkLineMetrics(
     para, 1, grid, paraHasRuby, eastAsian, ctx, fontFamilyClasses, effectiveLineSpacing,
-    resolvedLocalFonts,
+    resolvedLocalFonts, textLayoutService,
   );
   return lineBelowBaselinePx(m.advancePx, m.ascentPx, m.descentPx);
 }

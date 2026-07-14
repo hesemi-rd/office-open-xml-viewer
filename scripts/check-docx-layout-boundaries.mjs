@@ -14,6 +14,10 @@ const BASELINE_PATH = 'scripts/docx-layout-boundary-baseline.json';
 const DOCX_SOURCE = 'packages/docx/src';
 const PAINT_SOURCE = `${DOCX_SOURCE}/paint`;
 const LAYOUT_SOURCE = `${DOCX_SOURCE}/layout`;
+const PARSER_MODEL = `${DOCX_SOURCE}/parser-model.ts`;
+const LAYOUT_PARSER_MODEL_ALLOWLIST = new Set([
+  `${LAYOUT_SOURCE}/resources.ts`,
+]);
 
 const FINAL_RENDERER_EXPORTS = new Set([
   'DocxTextRunInfo',
@@ -303,6 +307,22 @@ function assertCapabilityBoundaries(root) {
   }
 }
 
+function assertLayoutParserModelBoundaries(root) {
+  const graph = dependencyGraph(root);
+  const parserModel = resolve(root, PARSER_MODEL);
+  for (const [path, edges] of graph) {
+    const rel = posixPath(relative(root, path));
+    if (!rel.startsWith(`${LAYOUT_SOURCE}/`)
+      || LAYOUT_PARSER_MODEL_ALLOWLIST.has(rel)) continue;
+    for (const edge of edges) {
+      if (!edge.literal || !edge.specifier.startsWith('.')) continue;
+      if (resolveLocalImport(path, edge.specifier) === parserModel) {
+        fail('LAYOUT_PARSER_MODEL_DEPENDENCY', `${rel} -> ${PARSER_MODEL}`);
+      }
+    }
+  }
+}
+
 const MIGRATION_IDENTIFIER = /(?:legacy|(?:use|enable|prefer|require)[a-z0-9]*(?:old|previous|alternate)[a-z0-9]*(?:engine|layout|path|algorithm)|(?:reuse|paint)enabled|requireslegacy|dryrun)/i;
 
 function matchingIdentifierCounts(root, predicate) {
@@ -422,8 +442,9 @@ function normalizedComputePagesHash(node, source) {
 }
 
 /** A2 routes service-produced shape text through the same immutable Canvas
- * route used by measurement. The legacy text-box implementation remains hash
- * frozen except for appending `s.fontRoute` to existing buildFont calls. */
+ * route used by measurement. The text-box implementation remains hash frozen
+ * except for exact Canvas-route threading and the spec-required numbering
+ * marker snapshot -> shape -> retained-paint sequence below. */
 function normalizedRenderShapeTextHash(node, source) {
   const omittedRouteParameters = new Set();
   const findAllowedRouteParameters = (current) => {
@@ -443,13 +464,71 @@ function normalizedRenderShapeTextHash(node, source) {
     ts.forEachChild(current, findAllowedRouteParameters);
   };
   findAllowedRouteParameters(node);
-  const shape = (current) => {
+  const compactText = (current, currentSource) =>
+    current.getText(currentSource).replace(/\s+/g, '');
+  const exactMarkerInput =
+    'constmarkerShapeInput=numberingMarkerShapeInput(block.numbering,block.fontSizePt);';
+  const exactMarkerLayout =
+    'constmarkerTextLayout=shapeNumberingMarkerText(markerShapeInput,markerText,scale,effState.layoutServices?.text,);';
+  const exactMarkerWidth =
+    'constmarkerW=markerTextLayout?.shape.advancePt??ctx.measureText(markerText).width;';
+  const exactMarkerPaint = [
+    'if(markerTextLayout){',
+    'paintNumberingMarkerText(ctx,markerTextLayout,markerX,baseline,',
+    'eaVertUpright?(paintCtx,text,drawX,drawBaseline,fontSizePx)=>{',
+    'drawVerticalRun(paintCtx,text,drawX,drawBaseline,fontSizePx,0);',
+    '}:undefined,);',
+    '}elseif(eaVertUpright){',
+    'drawVerticalRun(ctx,markerText,markerX,baseline,block.fontSizePt*scale,0);',
+    '}else{ctx.fillText(markerText,markerX,baseline);}',
+  ].join('');
+  const markerMigrationCounts = [0, 0, 0, 0];
+  const countMarkerMigration = (current) => {
+    const compact = compactText(current, source);
+    if (ts.isVariableStatement(current) && compact === exactMarkerInput) markerMigrationCounts[0] += 1;
+    if (ts.isVariableStatement(current) && compact === exactMarkerLayout) markerMigrationCounts[1] += 1;
+    if (ts.isVariableStatement(current) && compact === exactMarkerWidth) markerMigrationCounts[2] += 1;
+    if (ts.isIfStatement(current) && compact === exactMarkerPaint) markerMigrationCounts[3] += 1;
+    ts.forEachChild(current, countMarkerMigration);
+  };
+  countMarkerMigration(node);
+  const exactMarkerMigration = markerMigrationCounts.every((count) => count === 1);
+  let shape;
+  const replacementShape = (text) => {
+    const replacementSource = ts.createSourceFile(
+      'render-shape-text-a2-replacement.ts',
+      text,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    return shape(replacementSource.statements[0], replacementSource);
+  };
+  shape = (current, currentSource = source) => {
+    if (ts.isVariableStatement(current)) {
+      const compact = compactText(current, currentSource);
+      if (exactMarkerMigration && (compact === exactMarkerInput || compact === exactMarkerLayout)) {
+        return null;
+      }
+      if (exactMarkerMigration && compact === exactMarkerWidth) {
+        return replacementShape('const markerW = ctx.measureText(markerText).width;');
+      }
+    }
+    if (exactMarkerMigration
+      && ts.isIfStatement(current)
+      && compactText(current, currentSource) === exactMarkerPaint) {
+      return replacementShape(
+        'if (eaVertUpright) { drawVerticalRun(ctx, markerText, markerX, baseline, block.fontSizePt * scale, 0); } else { ctx.fillText(markerText, markerX, baseline); }',
+      );
+    }
+    // A partial/duplicated marker migration is intentionally left in the AST
+    // hash. Only the complete four-node contract above can normalize away.
     if (ts.isVariableStatement(current)
       && current.declarationList.declarations.length === 1) {
       const [declaration] = current.declarationList.declarations;
       if (ts.isIdentifier(declaration.name)
         && declaration.name.text === 'measureRoute'
-        && current.getText(source).replace(/\s+/g, ' ').trim()
+        && current.getText(currentSource).replace(/\s+/g, ' ').trim()
           === 'const measureRoute = eaIntended > asciiIntended ? familyEaRoute : familyRoute;') {
         return null;
       }
@@ -470,8 +549,8 @@ function normalizedRenderShapeTextHash(node, source) {
       return [
         ts.SyntaxKind[current.kind],
         undefined,
-        shape(current.expression),
-        ...args.map(shape),
+        shape(current.expression, currentSource),
+        ...args.map((argument) => shape(argument, currentSource)),
       ];
     }
     if (ts.isCallExpression(current)
@@ -487,16 +566,16 @@ function normalizedRenderShapeTextHash(node, source) {
       return [
         ts.SyntaxKind[current.kind],
         undefined,
-        shape(current.expression),
-        ...args.map(shape),
+        shape(current.expression, currentSource),
+        ...args.map((argument) => shape(argument, currentSource)),
       ];
     }
     const text = ts.isIdentifier(current) || ts.isLiteralExpression(current)
-      ? current.getText(source)
+      ? current.getText(currentSource)
       : undefined;
     const children = [];
     current.forEachChild((child) => {
-      const childShape = shape(child);
+      const childShape = shape(child, currentSource);
       if (childShape !== null) children.push(childShape);
     });
     return [ts.SyntaxKind[current.kind], text, ...children];
@@ -821,6 +900,7 @@ export function checkDocxLayoutBoundaries(options) {
   const baselineExists = existsSync(baselinePath);
   assertPaintBoundaries(root);
   assertCapabilityBoundaries(root);
+  assertLayoutParserModelBoundaries(root);
 
   if (options.write) {
     const baseBaseline = mergeBaseBaseline(root, options.baseRef);

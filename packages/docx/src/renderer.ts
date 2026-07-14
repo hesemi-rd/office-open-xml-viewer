@@ -52,6 +52,7 @@ import {
   fillDoubleBorder,
   drawUnderline,
   renderChart,
+  graphemeClusterOffsets,
 } from '@silurus/ooxml-core';
 import type { CanvasFontRoute, MathNode, MathRenderer, KinsokuRules, HyperlinkTarget, NumberFormat, Duotone, ResolvedLocalFontMetric } from '@silurus/ooxml-core';
 import { computePageNumbering } from './page-numbering.js';
@@ -153,11 +154,15 @@ import {
   classifyDocxFontGeneric,
   snapshotLocalMetrics,
   type GlyphMeasureRequest,
-  type TextLayoutService,
 } from './layout/text.js';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts.js';
-import { internalDocumentModel } from './parser-model.js';
+import { internalDocumentModel, numberingMarkerShapeInput } from './parser-model.js';
 import { normalizeInternalDocumentModel } from './parser-model.js';
+import {
+  shapeNumberingMarkerText,
+  type NumberingMarkerTextLayout,
+} from './layout/numbering-marker.js';
+import { paintNumberingMarkerText } from './paint/numbering-marker.js';
 
 
 export { computeColumns };
@@ -5836,42 +5841,112 @@ function cellMinContentPt(cell: DocTableCell, table: DocTable, state: RenderStat
   const { ctx, fontFamilyClasses } = state;
   let maxTokenPt = 0;
   const scanPara = (para: DocParagraph): void => {
-    for (const run of para.runs) {
-      if (run.type !== 'text') continue;
-      const t = run as unknown as DocxTextRun & { type: 'text' };
-      if (!t.text) continue;
-      // Resolve the complex-script (cs) axis the same way `buildSegments` does
-      // (ECMA-376 §17.3.2.3/§17.3.2.17/§17.3.2.18): a run forcing cs (w:rtl or
-      // the §17.3.2.7 <w:cs/> toggle) measures with the cs bold/italic/size/
-      // family. SIZE (szCs) and FAMILY (rFonts@cs) fall back to their Latin
-      // counterpart when absent, but BOLD (bCs) and ITALIC (iCs) are INDEPENDENT
-      // toggles that default OFF (issue #937), so an absent bCs/iCs must NOT
-      // inherit the Latin `w:b`/`w:i` — mirror buildSegments exactly or the
-      // measured min-content width would drift from the painted glyphs. We pick
-      // the cs axis for the min-content estimate when the run forces cs so wide
-      // Arabic/Hebrew tokens reserve enough column width; otherwise the Latin
-      // axis. NOTE rFonts@cs alone is just a font SLOT — it must not force cs
-      // (a Latin heading whose style defines cstheme would wrongly take szCs).
-      const forceCs = t.rtl === true || t.cs === true;
-      const effBold = forceCs ? (t.boldCs ?? false) : t.bold;
-      const effItalic = forceCs ? (t.italicCs ?? false) : t.italic;
-      const effFontSize = forceCs ? (t.fontSizeCs ?? t.fontSize) : t.fontSize;
-      const effFontFamily = forceCs ? (t.fontFamilyCs ?? t.fontFamily) : t.fontFamily;
-      // Measure in pt-space (font size in pt, scale 1) so the result composes
-      // directly with the pt-based column math.
-      ctx.font = buildFont(effBold, effItalic, effFontSize, effFontFamily, fontFamilyClasses);
-      // Non-breakable tokens are the same units the line layout treats as
-      // atomic (UAX#14 has no break inside a word or between a digit and an
-      // adjacent hyphen/period). CJK breaks per-glyph, so its min is one glyph.
-      for (const piece of t.text.split('\t')) {
-        for (const token of splitTextForLayout(piece)) {
-          const trimmed = token.replace(/\s+$/u, '');
-          if (!trimmed) continue;
-          const w = hasCJKBreakOpportunity(trimmed)
-            ? Math.max(...[...trimmed].map((ch) => ctx.measureText(ch).width))
-            : ctx.measureText(trimmed).width;
-          if (w > maxTokenPt) maxTokenPt = w;
+    // Build the same scalar-routed segments as ordinary line layout. This keeps
+    // hAnsi/theme/charset/CS selection and registered Canvas routes in one
+    // service instead of reconstructing a legacy family in table geometry.
+    const segments = buildSegments(para.runs, segmentEnvironmentOf(state));
+    for (let segmentIndex = 0; segmentIndex < segments.length; segmentIndex++) {
+      const segment = segments[segmentIndex];
+      if (!('text' in segment) || !segment.text) continue;
+      // `joinPrev` is a LINE-BREAK contract, not a font-routing contract. It can
+      // arise from a cross-slot grapheme, UAX #14 no-break pairs, fitText, or a
+      // formatting seam. Keep every piece with its own immutable shape request
+      // and sum those piece widths when the group forms one min-content atom.
+      // Re-shaping concatenated text with the first piece would incorrectly make
+      // that first font authoritative for differently formatted continuations.
+      const pieces: Array<{ segment: LayoutTextSeg; start: number; end: number }> = [];
+      let joinedText = '';
+      const appendPiece = (piece: LayoutTextSeg): void => {
+        const start = joinedText.length;
+        joinedText += piece.text;
+        pieces.push({ segment: piece, start, end: joinedText.length });
+      };
+      appendPiece(segment as LayoutTextSeg);
+      while (segmentIndex + 1 < segments.length) {
+        const following = segments[segmentIndex + 1];
+        if (!('text' in following) || following.joinPrev !== true) break;
+        appendPiece(following as LayoutTextSeg);
+        segmentIndex += 1;
+      }
+      const measureRange = (start: number, end: number): number => {
+        let width = 0;
+        for (const piece of pieces) {
+          const overlapStart = Math.max(start, piece.start);
+          const overlapEnd = Math.min(end, piece.end);
+          if (overlapStart >= overlapEnd) continue;
+          const text = joinedText.slice(overlapStart, overlapEnd);
+          const candidate = { ...piece.segment, text };
+          if (candidate.textLayoutService && candidate.textShapeRequest) {
+            const shaped = candidate.textLayoutService.shape({
+              ...candidate.textShapeRequest,
+              text,
+              fontSizePt: calcEffectiveFontPx(candidate, 1),
+              measure: true,
+            });
+            width += segAdvanceWidth(candidate, shaped.advancePt, 0, 1);
+          } else {
+            ctx.font = buildFont(
+              candidate.bold,
+              candidate.italic,
+              calcEffectiveFontPx(candidate, 1),
+              candidate.fontFamily,
+              fontFamilyClasses,
+              candidate.fontRoute,
+            );
+            width += segAdvanceWidth(candidate, ctx.measureText(text).width, 0, 1);
+          }
         }
+        return width;
+      };
+      let tokenStart = 0;
+      for (const token of splitTextForLayout(joinedText)) {
+        const trimmed = token.replace(/\s+$/u, '');
+        const trimmedStart = tokenStart;
+        const trimmedEnd = tokenStart + trimmed.length;
+        tokenStart += token.length;
+        if (!trimmed) continue;
+        let width: number;
+        if (hasCJKBreakOpportunity(trimmed)) {
+          // CJK contributes one legal grapheme unit, not one Unicode scalar:
+          // combining marks and supplementary characters stay attached exactly
+          // as they do in emergency line wrapping. Boundary discovery is route-
+          // independent; measurement below still dispatches every slice through
+          // the service request retained by its originating segment.
+          const boundaries = [0, ...graphemeClusterOffsets(trimmed), trimmed.length];
+          const clusters: Array<{ text: string; start: number; end: number }> = [];
+          for (let i = 1; i < boundaries.length; i++) {
+            clusters.push({
+              text: trimmed.slice(boundaries[i - 1], boundaries[i]),
+              start: trimmedStart + boundaries[i - 1],
+              end: trimmedStart + boundaries[i],
+            });
+          }
+          const rules = state.kinsoku ?? DEFAULT_KINSOKU_RULES;
+          const atoms: Array<{ text: string; start: number; end: number }> = [];
+          let atom = clusters[0];
+          for (let i = 1; i < clusters.length; i++) {
+            const previous = [...atom.text].at(-1)?.codePointAt(0);
+            const next = clusters[i].text.codePointAt(0);
+            const breakAllowed = previous !== undefined
+              && next !== undefined
+              && !rules.lineEndForbidden.has(previous)
+              && !rules.lineStartForbidden.has(next);
+            if (breakAllowed) {
+              atoms.push(atom);
+              atom = clusters[i];
+            } else {
+              atom = { text: atom.text + clusters[i].text, start: atom.start, end: clusters[i].end };
+            }
+          }
+          if (atom) atoms.push(atom);
+          width = 0;
+          for (const unbreakable of atoms) {
+            width = Math.max(width, measureRange(unbreakable.start, unbreakable.end));
+          }
+        } else {
+          width = measureRange(trimmedStart, trimmedEnd);
+        }
+        if (width > maxTokenPt) maxTokenPt = width;
       }
     }
   };
@@ -8038,7 +8113,7 @@ function renderEmptyMarkParagraph(
   const markRectTop = state.y;
   const emptyH = paragraphMarkLineHeight(
     para, scale, grid, paraHasRuby, state.docEastAsian, ctx, state.fontFamilyClasses,
-    para.lineSpacing, state.resolvedLocalFonts,
+    para.lineSpacing, state.resolvedLocalFonts, state.layoutServices?.text,
   );
   if (para.shading && !dryRun) {
     ctx.fillStyle = `#${para.shading}`;
@@ -8100,6 +8175,7 @@ function frameAnchorLineHeightPx(
       state.fontFamilyClasses,
       p.lineSpacing,
       state.resolvedLocalFonts,
+      state.layoutServices?.text,
     );
   }
   const fp = frameEl as unknown as DocParagraph;
@@ -8113,6 +8189,7 @@ function frameAnchorLineHeightPx(
     state.fontFamilyClasses,
     fp.lineSpacing,
     state.resolvedLocalFonts,
+    state.layoutServices?.text,
   );
 }
 
@@ -8262,6 +8339,7 @@ interface NumberingMarkerLayout {
   /** Resolved marker ink width in px. Uses the decoded picture-bullet width when
    *  present, otherwise the marker glyph measurement in its resolved font. */
   markerWidthPx: number;
+  markerTextLayout: NumberingMarkerTextLayout | null;
   hasMarker: boolean;
 }
 
@@ -8291,6 +8369,7 @@ function resolveNumberingMarker(
   // firstLineX); −markerW/2 = centre. Set in the numbering block below.
   let markerJcShiftPx = 0;
   let markerWidthPx = 0;
+  let markerTextLayout: NumberingMarkerTextLayout | null = null;
   if (para.numbering) {
     numMarker = para.numbering.text;
     numTab = para.numbering.tab * scale;
@@ -8309,12 +8388,32 @@ function resolveNumberingMarker(
     // Marker glyph width (px) with its RESOLVED font (§17.3.2.26 + §17.9.6); the
     // picture bullet's own width when present. Needed for both the suff≠tab abut
     // and the suff=tab overrun check below, so measure once up front.
+    const markerShapeInput = numberingMarkerShapeInput(
+      para.numbering,
+      getDefaultFontSize(para),
+    );
     let markerW: number;
     if (picBullet) {
       markerW = picBullet.w;
     } else {
-      ctx.font = buildFont(false, false, getDefaultFontSize(para) * scale, markerFontFamily(para.numbering), fontFamilyClasses);
-      markerW = ctx.measureText(markerDisplayText(para.numbering)).width;
+      markerTextLayout = shapeNumberingMarkerText(
+        markerShapeInput,
+        markerDisplayText(para.numbering),
+        scale,
+        state.layoutServices?.text,
+      );
+      if (markerTextLayout) {
+        markerW = markerTextLayout.shape.advancePt;
+      } else {
+        // Only synthetic states that bypass the document service reach this
+        // compatibility branch; production pagination and paint always share
+        // the immutable service instance.
+        ctx.font = buildFont(
+          false, false, getDefaultFontSize(para) * scale,
+          para.numbering.fontFamily ?? null, fontFamilyClasses,
+        );
+        markerW = ctx.measureText(markerDisplayText(para.numbering)).width;
+      }
     }
     markerWidthPx = markerW;
     // §17.9.8 lvlJc: shift the marker so its left/right/centre aligns at
@@ -8324,7 +8423,14 @@ function resolveNumberingMarker(
     markerJcShiftPx = lvlJc === 'right' ? -markerW : lvlJc === 'center' ? -markerW / 2 : 0;
     const markerEndFromIndent = indFirst + markerJcShiftPx + markerW;
     if (suff !== 'tab') {
-      const spaceW = suff === 'space' ? ctx.measureText(' ').width : 0;
+      const spaceW = suff === 'space'
+        ? shapeNumberingMarkerText(
+            markerShapeInput,
+            ' ',
+            scale,
+            state.layoutServices?.text,
+          )?.shape.advancePt ?? ctx.measureText(' ').width
+        : 0;
       // body abuts the marker's right edge (+ one space for suff="space").
       numBodyOffset = markerEndFromIndent + spaceW;
     } else {
@@ -8358,7 +8464,15 @@ function resolveNumberingMarker(
   }
   // True when the paragraph has any marker to draw (text glyph OR picture bullet).
   const hasMarker = numMarker !== '' || picBullet !== null;
-  return { numTab, picBullet, numBodyOffset, markerJcShiftPx, markerWidthPx, hasMarker };
+  return {
+    numTab,
+    picBullet,
+    numBodyOffset,
+    markerJcShiftPx,
+    markerWidthPx,
+    markerTextLayout,
+    hasMarker,
+  };
 }
 
 /** Resolved numbering-marker bounds in the paragraph's physical coordinate
@@ -8479,7 +8593,9 @@ function renderParagraph(
   const indFirst = inFrame ? 0 : para.indentFirst * scale;
 
   // Numbering marker layout (§17.9.x): see resolveNumberingMarker.
-  const { numTab, picBullet, numBodyOffset, markerJcShiftPx, markerWidthPx, hasMarker } =
+  const {
+    numTab, picBullet, numBodyOffset, markerJcShiftPx, markerWidthPx, markerTextLayout, hasMarker,
+  } =
     resolveNumberingMarker(para, state, indLeft, indFirst);
 
   const paraX = contentX + indLeft;
@@ -8877,7 +8993,7 @@ function renderParagraph(
   // glyph lands on the box edge, so the painted advance equals measuredWidth by
   // construction. See the gridCharDeltaPx / gridSegDeltaPx header.
   const drawGridDeltaPx = gridCharDeltaPx(grid, scale);
-  const drawCtx: ParagraphLineDrawCtx = { ctx, scale, state, para, dryRun, defaultColor, fontFamilyClasses, contentX, contentW, lines, grid, paraHasRuby, paraX, firstLineX, paraW, indLeft, indFirst, continuesParagraph: lineSlice?.continues === true, baseRtl, hasMarker, markerUsesBodyOffset, numTab, numBodyOffset, markerJcShiftPx, picBullet, isJustified, stretchLastLine, alignEdge, paraNeedsBidi, decimalAutoTabPx, drawGridDeltaPx, canonicalTextScale, lineHForLine };
+  const drawCtx: ParagraphLineDrawCtx = { ctx, scale, state, para, dryRun, defaultColor, fontFamilyClasses, contentX, contentW, lines, grid, paraHasRuby, paraX, firstLineX, paraW, indLeft, indFirst, continuesParagraph: lineSlice?.continues === true, baseRtl, hasMarker, markerUsesBodyOffset, numTab, numBodyOffset, markerJcShiftPx, markerWidthPx, markerTextLayout, picBullet, isJustified, stretchLastLine, alignEdge, paraNeedsBidi, decimalAutoTabPx, drawGridDeltaPx, canonicalTextScale, lineHForLine };
   for (let li = sliceStart; li < paintEnd; li++) {
     drawParagraphLine(li, drawCtx);
   }
@@ -9030,6 +9146,8 @@ interface ParagraphLineDrawCtx {
   numTab: number;
   numBodyOffset: number;
   markerJcShiftPx: number;
+  markerWidthPx: number;
+  markerTextLayout: NumberingMarkerTextLayout | null;
   picBullet: { bmp: DecodedImage; w: number; h: number } | null;
   isJustified: boolean;
   stretchLastLine: boolean;
@@ -9049,7 +9167,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
     ctx, scale, state, para, dryRun, defaultColor, fontFamilyClasses,
     contentX, contentW, lines, grid, paraHasRuby, paraX, firstLineX, paraW, indLeft,
     indFirst, continuesParagraph, baseRtl, hasMarker, markerUsesBodyOffset, numTab, numBodyOffset, markerJcShiftPx,
-    picBullet, isJustified, stretchLastLine, alignEdge, paraNeedsBidi,
+    markerWidthPx, markerTextLayout, picBullet, isJustified, stretchLastLine, alignEdge, paraNeedsBidi,
     decimalAutoTabPx, drawGridDeltaPx, canonicalTextScale, lineHForLine,
   } = c;
     const line = lines[li];
@@ -9279,12 +9397,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
         const left = baseRtl ? x + lineWidth + numTab - w : lineLeft + indFirst + markerJcShiftPx;
         ctx.drawImage(bmp, left, top, w, h);
       } else {
-        const numFontSize = getDefaultFontSize(para) * scale;
-        // Draw the marker with its RESOLVED font (§17.3.2.26 + §17.9.6): the
-        // ascii axis for a Latin number (a decimal "1" → Times → serif), the
-        // eastAsia axis for a CJK marker. Replaces the old hardcoded sans-serif,
-        // which forced every number/bullet sans regardless of the heading's font.
-        ctx.font = buildFont(false, false, numFontSize, markerFontFamily(para.numbering!), fontFamilyClasses);
+        const fallbackFontSize = getDefaultFontSize(para) * scale;
         // Marker ink (§17.9.24 + §17.3.1.29): the level rPr's own color wins;
         // absent that, Word layers the level rPr over the PARAGRAPH MARK's run
         // properties, so the mark's resolved color tints the bullet/number;
@@ -9307,9 +9420,17 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           const prevDir = ctx.direction;
           ctx.textAlign = 'left';
           ctx.direction = 'rtl';
-          const markerText = markerDisplayText(para.numbering!);
-          const markerW = ctx.measureText(markerText).width;
-          ctx.fillText(markerText, x + lineWidth + numTab - markerW, baseline);
+          const markerW = markerTextLayout?.shape.advancePt ?? markerWidthPx;
+          const markerX = x + lineWidth + numTab - markerW;
+          if (markerTextLayout) {
+            paintNumberingMarkerText(ctx, markerTextLayout, markerX, baseline);
+          } else {
+            ctx.font = buildFont(
+              false, false, fallbackFontSize,
+              para.numbering!.fontFamily ?? null, fontFamilyClasses,
+            );
+            ctx.fillText(markerDisplayText(para.numbering!), markerX, baseline);
+          }
           ctx.textAlign = prevAlign;
           ctx.direction = prevDir;
         } else {
@@ -9319,15 +9440,27 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           // shifted by lvlJc (§17.9.8) so a "right" level period-aligns its right
           // edge at firstLineX. The body was advanced past the marker above
           // (numBodyOffset).
-          const markerText = markerDisplayText(para.numbering!);
           const markerX = lineLeft + indFirst + markerJcShiftPx;
-          if (verticalUpright) {
-            // §17.6.20 (tbRl) — draw the bullet/number upright inside the rotated
-            // page, same per-glyph counter-rotation as body glyphs. A btLr page
-            // takes the plain branch: the marker rides the page rotation too.
-            drawVerticalRun(ctx, markerText, markerX, baseline, numFontSize, 0);
+          if (markerTextLayout) {
+            // §17.6.20 (tbRl) uses the same retained scalar routes; each routed
+            // span advances from the geometry that positioned the marker.
+            paintNumberingMarkerText(
+              ctx,
+              markerTextLayout,
+              markerX,
+              baseline,
+              verticalUpright
+                ? (paintCtx, text, drawX, drawBaseline, fontSizePx) => {
+                    drawVerticalRun(paintCtx, text, drawX, drawBaseline, fontSizePx, 0);
+                  }
+                : undefined,
+            );
           } else {
-            ctx.fillText(markerText, markerX, baseline);
+            ctx.font = buildFont(
+              false, false, fallbackFontSize,
+              para.numbering!.fontFamily ?? null, fontFamilyClasses,
+            );
+            ctx.fillText(markerDisplayText(para.numbering!), markerX, baseline);
           }
         }
         // Restore the default ink: everything after the marker previously ran
@@ -11980,13 +12113,34 @@ export function renderShapeText(
               : block.color ?? block.runs?.find((r) => r.color)?.color ?? null);
           ctx.fillStyle = markerColor ? `#${markerColor}` : defaultColor;
           const markerText = markerDisplayText(block.numbering);
-          const markerW = ctx.measureText(markerText).width;
+          // A2's narrow text-box migration: snapshot private parser facts at the
+          // renderer boundary, then use the same retained service spans for both
+          // marker geometry and paint. The boundary checker recognizes only this
+          // exact sequence so unrelated renderShapeText changes remain frozen.
+          const markerShapeInput = numberingMarkerShapeInput(block.numbering, block.fontSizePt);
+          const markerTextLayout = shapeNumberingMarkerText(
+            markerShapeInput,
+            markerText,
+            scale,
+            effState.layoutServices?.text,
+          );
+          const markerW = markerTextLayout?.shape.advancePt ?? ctx.measureText(markerText).width;
           const lvlJc = block.numbering.jc || 'left';
           const markerShift = lvlJc === 'right' ? -markerW : lvlJc === 'center' ? -markerW / 2 : 0;
           const markerX = innerX + ind.leftPx + ind.markerFirstPx + markerShift;
-          if (eaVertUpright) {
-            // §20.1.10.83 eaVert — the list marker stands upright too (mirrors the
-            // body vertical marker path), advancing down the column like its cell.
+          if (markerTextLayout) {
+            paintNumberingMarkerText(
+              ctx,
+              markerTextLayout,
+              markerX,
+              baseline,
+              eaVertUpright
+                ? (paintCtx, text, drawX, drawBaseline, fontSizePx) => {
+                    drawVerticalRun(paintCtx, text, drawX, drawBaseline, fontSizePx, 0);
+                  }
+                : undefined,
+            );
+          } else if (eaVertUpright) {
             drawVerticalRun(ctx, markerText, markerX, baseline, block.fontSizePt * scale, 0);
           } else {
             ctx.fillText(markerText, markerX, baseline);
@@ -13665,6 +13819,7 @@ function measureCellParagraphWindow(
           state.fontFamilyClasses,
           paragraphContext.lineSpacing,
           state.resolvedLocalFonts,
+          state.layoutServices?.text,
         ),
         totalLines,
       };
@@ -14513,21 +14668,11 @@ function runBordersEqual(a: DocxRunBorder, b: DocxRunBorder): boolean {
   );
 }
 
-/** Resolve the list-marker glyph's font family (ECMA-376 §17.3.2.26 + §17.9.6).
- *  The marker is drawn/measured as a single `fillText`/`measureText`, so it must
- *  be one family. Pick it per the marker's leading code point, exactly like the
- *  body's per-character split ({@link splitByEastAsia}): a CJK marker (e.g. an
- *  ideographic bullet) → the eastAsia axis, anything else (a decimal "1", roman
- *  "i", letter, or "•") → the ascii axis. Realistic markers are single-script, so
- *  the leading code point classifies the whole glyph string. eastAsia falls back
- *  to ascii when absent (older parser output / no eastAsia font). The font CLASS
- *  (serif/sans) is then resolved by `fontFamilyClasses` (fontTable §17.8.3.10),
- *  so e.g. a serif ascii (Times) number renders serif even when the heading's
- *  eastAsia axis is a Gothic (sans). */
+/** Service-less compatibility adapter. It deliberately does not inspect a
+ * leading marker scalar; production body/text-box paths use retained per-scalar
+ * TextLayoutService spans. */
 function markerFontFamily(num: NumberingInfo): string | null {
-  const cp = num.text.codePointAt(0) ?? 0;
-  const ascii = num.fontFamily ?? null;
-  return isCjkBreakChar(cp) ? (num.fontFamilyEastAsia ?? ascii) : ascii;
+  return num.fontFamily ?? null;
 }
 
 /** Marker glyph as it should be drawn/measured. Symbol/Wingdings markers
