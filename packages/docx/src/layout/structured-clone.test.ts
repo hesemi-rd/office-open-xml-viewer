@@ -123,4 +123,17 @@ describe('DocumentLayout data boundary', () => {
     expect(() => deepFreezeDocumentLayout(layout)).toThrow(/INVALID_GEOMETRY/);
     expect(() => layoutFingerprint(layout)).toThrow(/INVALID_GEOMETRY/);
   });
+
+  it.each(['accessor index', 'non-enumerable property'])('rejects arrays with an %s', (kind) => {
+    const pages: unknown[] = [];
+    if (kind === 'accessor index') {
+      Object.defineProperty(pages, '0', { enumerable: true, get: () => ({}) });
+    } else {
+      Object.defineProperty(pages, 'hidden', { value: 'hidden', enumerable: false });
+    }
+    const layout = { pages, diagnostics: [] } as unknown as DocumentLayout;
+
+    expect(() => deepFreezeDocumentLayout(layout)).toThrow(/INVALID_GEOMETRY/);
+    expect(() => layoutFingerprint(layout)).toThrow(/INVALID_GEOMETRY/);
+  });
 });

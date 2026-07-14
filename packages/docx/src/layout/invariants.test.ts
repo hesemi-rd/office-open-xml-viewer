@@ -236,13 +236,21 @@ describe('layoutFlowBlocks', () => {
   it('dispatches paragraph and table blocks through one injected coordinator', () => {
     const calls: string[] = [];
     const algorithms: BlockLayoutAlgorithms = {
-      layoutParagraph(input) {
-        calls.push(`paragraph:${input.source.path.join('.')}`);
-        return { ...drawing('p1', rect(10, 20, 100, 12)), kind: 'paragraph' };
+      layoutParagraph(input, placement) {
+        calls.push(`paragraph:${input.source.path.join('.')}:${placement.cursor.yPt}`);
+        const layout = {
+          ...drawing('p1', rect(10, placement.cursor.yPt, 100, 12)),
+          kind: 'paragraph' as const,
+        };
+        return { layout, nextCursor: { xPt: 10, yPt: placement.cursor.yPt + 12 } };
       },
-      layoutTable(input) {
-        calls.push(`table:${input.source.path.join('.')}`);
-        return { ...drawing('t2', rect(10, 32, 100, 18)), kind: 'table' };
+      layoutTable(input, placement) {
+        calls.push(`table:${input.source.path.join('.')}:${placement.cursor.yPt}`);
+        const layout = {
+          ...drawing('t2', rect(10, placement.cursor.yPt, 100, 18)),
+          kind: 'table' as const,
+        };
+        return { layout, nextCursor: { xPt: 10, yPt: placement.cursor.yPt + 18 } };
       },
     };
     const services: LayoutServices = {
@@ -254,15 +262,44 @@ describe('layoutFlowBlocks', () => {
     const result = layoutFlowBlocks({
       source: source(0),
       container: { id: 'body', kind: 'body', bounds: rect(10, 20, 100, 200) },
+      cursor: { xPt: 10, yPt: 20 },
       blocks: [
         { kind: 'paragraph', source: source(1) },
         { kind: 'table', source: source(2) },
       ],
     }, services, algorithms);
 
-    expect(calls).toEqual(['paragraph:1', 'table:2']);
+    expect(calls).toEqual(['paragraph:1:20', 'table:2:32']);
     expect(result.blocks.map((block) => block.id)).toEqual(['p1', 't2']);
     expect(result.advancePt).toBe(30);
     expect(result.flowBounds).toEqual(rect(10, 20, 100, 30));
+    expect(result.nextCursor).toEqual({ xPt: 10, yPt: 50 });
+  });
+
+  it('rejects a block assigned outside its enclosing flow domain', () => {
+    const algorithms: BlockLayoutAlgorithms = {
+      layoutParagraph(_input, placement) {
+        const layout = {
+          ...drawing('p1', rect(10, placement.cursor.yPt, 100, 12), { flowDomainId: 'other' }),
+          kind: 'paragraph' as const,
+        };
+        return { layout, nextCursor: { xPt: 10, yPt: placement.cursor.yPt + 12 } };
+      },
+      layoutTable() {
+        throw new Error('not used');
+      },
+    };
+    const services: LayoutServices = {
+      text: { fingerprint: 'text' },
+      images: { fingerprint: 'images' },
+      math: { fingerprint: 'math' },
+    };
+
+    expect(() => layoutFlowBlocks({
+      source: source(0),
+      container: { id: 'cell:1', kind: 'tableCell', bounds: rect(10, 20, 100, 200) },
+      cursor: { xPt: 10, yPt: 20 },
+      blocks: [{ kind: 'paragraph', source: source(1) }],
+    }, services, algorithms)).toThrow(/INVALID_REFERENCE/);
   });
 });

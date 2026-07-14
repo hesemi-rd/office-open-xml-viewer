@@ -9,3 +9,4 @@ invalid:
   - "const cascadeParagraphProperties = (style: Style) => style.parent;"
   - "function mergeRunProperties(base: Props, direct: Props) { return { ...base, ...direct }; }"
   - "function combineRunPr(base: Props, direct: Props) { return { ...base, ...direct }; }"
+  - "function foldRunFormatting(base: Props, direct: Props) { return { ...base, ...direct }; }"

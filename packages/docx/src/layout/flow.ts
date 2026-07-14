@@ -7,6 +7,7 @@ import type {
   ParagraphLayout,
   TableLayout,
 } from './types.js';
+import { LayoutInvariantError } from './diagnostics.js';
 
 function unionBounds(bounds: readonly LayoutRect[], fallback: LayoutRect): LayoutRect {
   if (bounds.length === 0) {
@@ -24,21 +25,53 @@ export function layoutFlowBlocks(
   services: LayoutServices,
   algorithms: BlockLayoutAlgorithms,
 ): FlowLayout {
-  const blocks: Array<ParagraphLayout | TableLayout> = input.blocks.map((block) => (
-    block.kind === 'paragraph'
-      ? algorithms.layoutParagraph(block, services)
-      : algorithms.layoutTable(block, services)
-  ));
+  const blocks: Array<ParagraphLayout | TableLayout> = [];
+  let cursor = input.cursor;
+  const containerBottom = input.container.bounds.yPt + input.container.bounds.heightPt;
+  const containerRight = input.container.bounds.xPt + input.container.bounds.widthPt;
+
+  for (const block of input.blocks) {
+    const placement = {
+      container: input.container,
+      cursor,
+      availableBounds: {
+        xPt: input.container.bounds.xPt,
+        yPt: cursor.yPt,
+        widthPt: input.container.bounds.widthPt,
+        heightPt: Math.max(0, containerBottom - cursor.yPt),
+      },
+    };
+    const result = block.kind === 'paragraph'
+      ? algorithms.layoutParagraph(block, placement, services)
+      : algorithms.layoutTable(block, placement, services);
+    if (result.layout.flowDomainId !== input.container.id) {
+      throw new LayoutInvariantError(
+        'INVALID_REFERENCE',
+        `${result.layout.id} belongs to ${result.layout.flowDomainId}, not ${input.container.id}`,
+      );
+    }
+    if (!Number.isFinite(result.nextCursor.xPt)
+      || !Number.isFinite(result.nextCursor.yPt)
+      || result.nextCursor.xPt < input.container.bounds.xPt
+      || result.nextCursor.xPt > containerRight
+      || result.nextCursor.yPt < cursor.yPt
+      || result.nextCursor.yPt > containerBottom) {
+      throw new LayoutInvariantError('INVALID_GEOMETRY', `${result.layout.id} returned an invalid flow cursor`);
+    }
+    blocks.push(result.layout);
+    cursor = result.nextCursor;
+  }
 
   return {
     source: input.source,
     container: input.container,
     blocks,
+    nextCursor: cursor,
     flowDomainId: input.container.id,
     flowBounds: unionBounds(blocks.map((block) => block.flowBounds), input.container.bounds),
     inkBounds: unionBounds(blocks.map((block) => block.inkBounds), input.container.bounds),
     clipBounds: input.container.bounds,
-    advancePt: blocks.reduce((sum, block) => sum + block.advancePt, 0),
+    advancePt: cursor.yPt - input.cursor.yPt,
     ordinaryFlow: true,
   };
 }

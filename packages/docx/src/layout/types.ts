@@ -205,9 +205,23 @@ export type FlowBlockInput = ParagraphLayoutInput | TableLayoutInput;
 
 export interface FlowContainer extends FlowDomain {}
 
+export interface FlowCursor extends PointPt {}
+
+export interface FlowBlockPlacement {
+  readonly container: FlowContainer;
+  readonly cursor: FlowCursor;
+  readonly availableBounds: LayoutRect;
+}
+
+export interface BlockLayoutResult<T extends ParagraphLayout | TableLayout> {
+  readonly layout: T;
+  readonly nextCursor: FlowCursor;
+}
+
 export interface FlowLayoutInput {
   readonly blocks: readonly FlowBlockInput[];
   readonly container: FlowContainer;
+  readonly cursor: FlowCursor;
   readonly source: SourceRef;
 }
 
@@ -215,9 +229,18 @@ export interface FlowLayout extends FlowOwnership {
   readonly source: SourceRef;
   readonly container: FlowContainer;
   readonly blocks: readonly (ParagraphLayout | TableLayout)[];
+  readonly nextCursor: FlowCursor;
 }
 
 export interface BlockLayoutAlgorithms {
-  layoutParagraph(input: ParagraphLayoutInput, services: LayoutServices): ParagraphLayout;
-  layoutTable(input: TableLayoutInput, services: LayoutServices): TableLayout;
+  layoutParagraph(
+    input: ParagraphLayoutInput,
+    placement: FlowBlockPlacement,
+    services: LayoutServices,
+  ): BlockLayoutResult<ParagraphLayout>;
+  layoutTable(
+    input: TableLayoutInput,
+    placement: FlowBlockPlacement,
+    services: LayoutServices,
+  ): BlockLayoutResult<TableLayout>;
 }

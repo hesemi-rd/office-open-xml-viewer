@@ -216,6 +216,55 @@ test('final mode enforces the renderer adapter export and import allowlists', ()
   assert.match(result.output, /FINAL_ADAPTER_/);
 });
 
+test('final mode rejects layout logic hidden inside an allowed renderer adapter', () => {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-inline-adapter-'));
+  write(root, 'packages/docx/src/renderer.ts', `
+export function paginateDocument(items: unknown[]) {
+  const pages = [];
+  for (const item of items) pages.push([item]);
+  return pages;
+}
+export function renderDocumentToCanvas() {}
+`);
+
+  const result = runChecker(root, '--final');
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.output, /FINAL_ADAPTER_BODY/);
+});
+
+test('final mode rejects renamed fallback and style-cascade capabilities', () => {
+  const diagnostic = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-diagnostic-fallback-'));
+  write(diagnostic, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
+  write(diagnostic, 'packages/docx/src/layout/page.ts', "export const diagnosticFallback = { code: 'UNSUPPORTED_FEATURE' };\n");
+  assert.equal(runChecker(diagnostic, '--final').status, 0);
+
+  const fallback = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-old-engine-'));
+  write(fallback, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
+  write(fallback, 'packages/docx/src/layout/page.ts', 'export const useOldEngine = true;\n');
+  const fallbackResult = runChecker(fallback, '--final');
+  assert.notEqual(fallbackResult.status, 0);
+  assert.match(fallbackResult.output, /FINAL_LEGACY_BOUNDARY/);
+
+  const style = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-fold-style-'));
+  write(style, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
+  write(style, 'packages/docx/src/layout/page.ts', 'export function foldRunFormatting(base: object, direct: object) { return { ...base, ...direct }; }\n');
+  const styleResult = runChecker(style, '--final');
+  assert.notEqual(styleResult.status, 0);
+  assert.match(styleResult.output, /LAYOUT_STYLE_CAPABILITY/);
+});
+
+test('final mode rejects star exports from renderer', () => {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-star-export-'));
+  write(root, 'packages/docx/src/layout/page.ts', 'export function accidentalAlgorithm() {}\n');
+  write(root, 'packages/docx/src/renderer.ts', "export * from './layout/page.js';\nexport function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n");
+
+  const result = runChecker(root, '--final');
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.output, /FINAL_ADAPTER_EXPORT/);
+});
+
 test('rejects rewriting a transitional baseline after A1', () => {
   const root = initializeRepository();
   establishA1Baseline(root);

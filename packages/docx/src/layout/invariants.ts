@@ -1,4 +1,5 @@
 import { LayoutInvariantError } from './diagnostics.js';
+import { orderedPagePaintNodes, pageLayerNodes, PageGraphError } from './page-graph.js';
 import type {
   DeepReadonly,
   DocumentLayout,
@@ -6,26 +7,9 @@ import type {
   FlowDomain,
   LayoutRect,
   LayoutPage,
-  PageLayerId,
   PaintNode,
   PointPt,
 } from './types.js';
-
-const PAGE_LAYER_IDS = [
-  'background',
-  'behindText',
-  'header',
-  'body',
-  'notes',
-  'front',
-  'footer',
-] as const satisfies readonly PageLayerId[];
-
-type LayerNode = Readonly<{ layer: PageLayerId; node: PaintNode }>;
-
-const layerNodes = (page: LayoutPage): readonly LayerNode[] => PAGE_LAYER_IDS.flatMap((layer) => (
-  page.layers[layer].map((node) => ({ layer, node }))
-));
 
 function assertPlainData(value: unknown, path: string, ancestors = new WeakSet<object>()): void {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
@@ -45,17 +29,25 @@ function assertPlainData(value: unknown, path: string, ancestors = new WeakSet<o
   ancestors.add(value);
   try {
     if (Array.isArray(value)) {
-      for (let index = 0; index < value.length; index += 1) {
-        if (!(index in value)) {
-          throw new LayoutInvariantError('INVALID_GEOMETRY', `${path}[${index}] is missing`);
+      let indexCount = 0;
+      for (const key of Reflect.ownKeys(value)) {
+        if (key === 'length') continue;
+        if (typeof key !== 'string') {
+          throw new LayoutInvariantError('INVALID_GEOMETRY', `${path} has a symbol key`);
         }
-        assertPlainData(value[index], `${path}[${index}]`, ancestors);
+        const index = Number(key);
+        if (!Number.isInteger(index) || index < 0 || String(index) !== key || index >= value.length) {
+          throw new LayoutInvariantError('INVALID_GEOMETRY', `${path}.${key} is not an array index`);
+        }
+        const descriptor = Object.getOwnPropertyDescriptor(value, key);
+        if (!descriptor?.enumerable || !('value' in descriptor)) {
+          throw new LayoutInvariantError('INVALID_GEOMETRY', `${path}[${key}] is not plain data`);
+        }
+        assertPlainData(descriptor.value, `${path}[${key}]`, ancestors);
+        indexCount += 1;
       }
-      if (Object.keys(value).length !== value.length) {
-        throw new LayoutInvariantError('INVALID_GEOMETRY', `${path} has a non-index property`);
-      }
-      if (Object.getOwnPropertySymbols(value).length > 0) {
-        throw new LayoutInvariantError('INVALID_GEOMETRY', `${path} has a symbol key`);
+      if (indexCount !== value.length) {
+        throw new LayoutInvariantError('INVALID_GEOMETRY', `${path} is sparse`);
       }
       return;
     }
@@ -143,13 +135,18 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
     });
 
     const ordinary: PaintNode[] = [];
-    const nodes = new Map<string, LayerNode>();
-    layerNodes(page).forEach(({ layer, node }, nodeIndex) => {
-      const path = `pages[${pageIndex}].nodes[${nodeIndex}]`;
-      if (nodes.has(node.id)) {
-        throw new LayoutInvariantError('INVALID_REFERENCE', `duplicate node ${node.id}`);
+    try {
+      orderedPagePaintNodes(page);
+    } catch (error) {
+      if (error instanceof PageGraphError) {
+        throw new LayoutInvariantError('INVALID_REFERENCE', error.message);
       }
-      nodes.set(node.id, { layer, node });
+      throw error;
+    }
+    const nodes = new Map<string, PaintNode>();
+    pageLayerNodes(page).forEach(({ node }, nodeIndex) => {
+      const path = `pages[${pageIndex}].nodes[${nodeIndex}]`;
+      nodes.set(node.id, node);
       requireRect(node.flowBounds, `${path}.flowBounds`);
       requireRect(node.inkBounds, `${path}.inkBounds`);
       if (node.clipBounds) requireRect(node.clipBounds, `${path}.clipBounds`);
@@ -169,19 +166,6 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
       }
       ordinary.push(node);
     });
-
-    const painted = new Set<string>();
-    page.layers.paintOrder.forEach((entry) => {
-      const target = nodes.get(entry.nodeId);
-      if (!target || target.layer !== entry.layer || painted.has(entry.nodeId)) {
-        throw new LayoutInvariantError('INVALID_REFERENCE', `invalid paint reference ${entry.layer}:${entry.nodeId}`);
-      }
-      painted.add(entry.nodeId);
-    });
-    if (painted.size !== nodes.size) {
-      const missing = [...nodes.keys()].find((id) => !painted.has(id));
-      throw new LayoutInvariantError('INVALID_REFERENCE', `node ${missing ?? '<unknown>'} is absent from paintOrder`);
-    }
 
     const read = new Set<string>();
     page.readingOrder.forEach((nodeId) => {

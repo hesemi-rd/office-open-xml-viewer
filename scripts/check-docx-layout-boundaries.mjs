@@ -28,6 +28,12 @@ const FINAL_RENDERER_EXPORTS = new Set([
   'setResolvedLocalFonts',
 ]);
 
+const FINAL_RENDERER_DECLARATIONS = new Set([
+  ...FINAL_RENDERER_EXPORTS,
+  'createLayoutServices',
+  'normalizeRenderOptions',
+]);
+
 const PLANNED_NON_LAYOUT_MODULES = new Set([
   `${DOCX_SOURCE}/parser-model.ts`,
 ]);
@@ -145,6 +151,7 @@ function moduleEdges(path) {
         typeOnly: importIsTypeOnly(statement),
         literal: true,
         importedNames,
+        bare: !statement.importClause,
       });
     }
     if (ts.isExportDeclaration(statement)
@@ -210,6 +217,7 @@ function paintBoundaryViolations(root) {
   const graph = dependencyGraph(root);
   const paintRoot = resolve(root, PAINT_SOURCE);
   const layoutTypes = resolve(root, LAYOUT_SOURCE, 'types.ts');
+  const pageGraph = resolve(root, LAYOUT_SOURCE, 'page-graph.ts');
   const entries = [...graph.keys()].filter((path) => path.startsWith(`${paintRoot}${sep}`));
   const violations = [];
   const nonLiteral = [];
@@ -224,10 +232,15 @@ function paintBoundaryViolations(root) {
           nonLiteral.push(posixPath(relative(root, current.path)));
           continue;
         }
+        if (edge.bare) {
+          violations.push([...current.chain.map((path) => posixPath(relative(root, path))), edge.specifier]);
+          continue;
+        }
         if (!edge.specifier.startsWith('.')) {
           const allowedNames = SHARED_PAINT_IMPORTS.get(edge.specifier);
           const allowed = !edge.typeOnly
             && allowedNames
+            && edge.importedNames?.length > 0
             && edge.importedNames?.every((name) => allowedNames.has(name));
           if (!allowed) {
             violations.push([...current.chain.map((path) => posixPath(relative(root, path))), edge.specifier]);
@@ -241,7 +254,7 @@ function paintBoundaryViolations(root) {
         }
         const chain = [...current.chain, dependency];
         const insidePaint = dependency.startsWith(`${paintRoot}${sep}`);
-        const allowedContract = edge.typeOnly && dependency === layoutTypes;
+        const allowedContract = (edge.typeOnly && dependency === layoutTypes) || dependency === pageGraph;
         if (!insidePaint && !allowedContract) {
           violations.push(chain.map((path) => posixPath(relative(root, path))));
           continue;
@@ -272,8 +285,11 @@ function assertCapabilityBoundaries(root) {
     const visit = (node) => {
       const text = identifierText(node);
       if (inPaint && text === 'measureText') fail('PAINT_CAPABILITY', `${rel} uses measureText`);
-      if (inPaint && text && /^(?:resolve|merge|combine|apply).*(?:Style|Properties|Pr|Cascade)$/i.test(text)) {
+      if (inPaint && text && /^(?:resolve|merge|combine|apply|fold|compose|inherit).*(?:Style|Properties|Pr|Cascade|Format|Formatting)$/i.test(text)) {
         fail('PAINT_CAPABILITY', `${rel} uses ${text}`);
+      }
+      if (inLayout && text && /^(?:resolve|merge|combine|apply|fold|compose|inherit).*(?:Style|Properties|Pr|Cascade|Format|Formatting)$/i.test(text)) {
+        fail('LAYOUT_STYLE_CAPABILITY', `${rel} uses ${text}`);
       }
       if (inLayout && text && /^(?:dpr|displayScale|devicePixelRatio|CanvasRenderingContext2D|OffscreenCanvasRenderingContext2D)$/.test(text)) {
         fail('LAYOUT_DISPLAY_CAPABILITY', `${rel} uses ${text}`);
@@ -284,7 +300,7 @@ function assertCapabilityBoundaries(root) {
   }
 }
 
-const MIGRATION_IDENTIFIER = /(?:legacy|fallback|(?:reuse|paint)enabled|requireslegacy|dryrun)/i;
+const MIGRATION_IDENTIFIER = /(?:legacy|(?:use|enable|prefer|require)[a-z0-9]*(?:old|previous|alternate)[a-z0-9]*(?:engine|layout|path|algorithm)|(?:reuse|paint)enabled|requireslegacy|dryrun)/i;
 
 function matchingIdentifierCounts(root, predicate) {
   const counts = {};
@@ -500,14 +516,117 @@ function rendererExports(path) {
   return [...new Set(names)].sort();
 }
 
+function rendererImportBindings(source) {
+  const bindings = new Set();
+  for (const statement of source.statements) {
+    if (!ts.isImportDeclaration(statement) || !statement.importClause) continue;
+    if (statement.importClause.name) bindings.add(statement.importClause.name.text);
+    const named = statement.importClause.namedBindings;
+    if (named && ts.isNamespaceImport(named)) bindings.add(named.name.text);
+    if (named && ts.isNamedImports(named)) {
+      for (const element of named.elements) bindings.add(element.name.text);
+    }
+  }
+  return bindings;
+}
+
+function unwrapAdapterExpression(expression) {
+  if (ts.isAwaitExpression(expression)
+    || ts.isParenthesizedExpression(expression)
+    || ts.isAsExpression(expression)
+    || ts.isSatisfiesExpression(expression)) {
+    return unwrapAdapterExpression(expression.expression);
+  }
+  return expression;
+}
+
+function adapterValueIsAllowed(expression, callable) {
+  const value = unwrapAdapterExpression(expression);
+  if (ts.isIdentifier(value)
+    || ts.isStringLiteralLike(value)
+    || ts.isNumericLiteral(value)
+    || value.kind === ts.SyntaxKind.TrueKeyword
+    || value.kind === ts.SyntaxKind.FalseKeyword
+    || value.kind === ts.SyntaxKind.NullKeyword) return true;
+  if (ts.isPropertyAccessExpression(value)) return adapterValueIsAllowed(value.expression, callable);
+  if (ts.isElementAccessExpression(value)) {
+    return adapterValueIsAllowed(value.expression, callable)
+      && (!value.argumentExpression || adapterValueIsAllowed(value.argumentExpression, callable));
+  }
+  if (ts.isArrayLiteralExpression(value)) {
+    return value.elements.every((element) => !ts.isSpreadElement(element)
+      ? adapterValueIsAllowed(element, callable)
+      : adapterValueIsAllowed(element.expression, callable));
+  }
+  if (ts.isObjectLiteralExpression(value)) {
+    return value.properties.every((property) => {
+      if (ts.isPropertyAssignment(property)) return adapterValueIsAllowed(property.initializer, callable);
+      if (ts.isShorthandPropertyAssignment(property)) return true;
+      if (ts.isSpreadAssignment(property)) return adapterValueIsAllowed(property.expression, callable);
+      return false;
+    });
+  }
+  if (ts.isCallExpression(value)) {
+    const callee = unwrapAdapterExpression(value.expression);
+    const callableName = ts.isIdentifier(callee)
+      ? callee.text
+      : ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression)
+        ? callee.expression.text
+        : null;
+    return callableName != null
+      && callable.has(callableName)
+      && value.arguments.every((argument) => adapterValueIsAllowed(argument, callable));
+  }
+  return false;
+}
+
+function adapterBodyIsAllowed(body, callable) {
+  return body.statements.every((statement) => {
+    if (ts.isVariableStatement(statement)) {
+      return statement.declarationList.declarations.every((declaration) => (
+        ts.isIdentifier(declaration.name)
+        && (!declaration.initializer || adapterValueIsAllowed(declaration.initializer, callable))
+      ));
+    }
+    if (ts.isExpressionStatement(statement)) return adapterValueIsAllowed(statement.expression, callable);
+    if (ts.isReturnStatement(statement)) {
+      return !statement.expression || adapterValueIsAllowed(statement.expression, callable);
+    }
+    return false;
+  });
+}
+
 function assertFinalRendererAdapter(root) {
   const renderer = resolve(root, DOCX_SOURCE, 'renderer.ts');
   if (!existsSync(renderer)) fail('FINAL_ADAPTER_MISSING', `${DOCX_SOURCE}/renderer.ts`);
+  const source = sourceFile(renderer);
+  for (const statement of source.statements) {
+    if (ts.isExportDeclaration(statement)
+      && (!statement.exportClause || !ts.isNamedExports(statement.exportClause))) {
+      fail('FINAL_ADAPTER_EXPORT', statement.getText(source));
+    }
+    for (const name of declarationNames(statement)) {
+      if (!FINAL_RENDERER_DECLARATIONS.has(name)) fail('FINAL_ADAPTER_DECLARATION', name);
+    }
+  }
   for (const name of rendererExports(renderer)) {
     if (!FINAL_RENDERER_EXPORTS.has(name)) fail('FINAL_ADAPTER_EXPORT', name);
   }
+  const callable = rendererImportBindings(source);
+  callable.add('createLayoutServices');
+  callable.add('normalizeRenderOptions');
+  for (const statement of source.statements) {
+    if (ts.isFunctionDeclaration(statement)
+      && statement.name
+      && (statement.name.text === 'paginateDocument' || statement.name.text === 'renderDocumentToCanvas')
+      && statement.body
+      && !adapterBodyIsAllowed(statement.body, callable)) {
+      fail('FINAL_ADAPTER_BODY', statement.name.text);
+    }
+  }
   for (const edge of moduleEdges(renderer)) {
     if (!edge.literal) fail('FINAL_ADAPTER_IMPORT', '<dynamic>');
+    if (edge.bare) fail('FINAL_ADAPTER_IMPORT', edge.specifier);
     if (!edge.specifier.startsWith('.')) continue;
     const target = resolveLocalImport(renderer, edge.specifier);
     if (!target) fail('FINAL_ADAPTER_IMPORT', edge.specifier);
