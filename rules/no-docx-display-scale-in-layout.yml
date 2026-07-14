@@ -1,0 +1,19 @@
+id: no-docx-display-scale-in-layout
+language: TypeScript
+severity: error
+message: DOCX layout is point-space and cannot depend on display scale, DPR, or Canvas paint types.
+note: |
+  Authored OOXML properties such as `charScale` remain valid. Generic paint
+  `.scale`, `.dpr`, `.displayScale`, Canvas contexts, and paint option/context
+  types are forbidden in layout modules.
+rule:
+  any:
+    - pattern: $OBJ.scale
+    - pattern: $OBJ.dpr
+    - pattern: $OBJ.displayScale
+    - kind: type_identifier
+      regex: "^(CanvasRenderingContext2D|OffscreenCanvasRenderingContext2D|PaintPageOptions|CanvasPaintContext)$"
+files:
+  - "packages/docx/src/layout/**/*.ts"
+ignores:
+  - "packages/docx/src/layout/**/*.test.ts"

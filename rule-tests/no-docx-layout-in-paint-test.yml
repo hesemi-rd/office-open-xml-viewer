@@ -1,0 +1,14 @@
+id: no-docx-layout-in-paint
+valid:
+  - "import type { DrawingLayout } from '../layout/types.js';"
+  - "ctx.fillText(run.text, run.xPt, run.baselinePt);"
+  - "ctx.fillRect(rect.xPt, rect.yPt, rect.widthPt, rect.heightPt);"
+invalid:
+  - "import type { FlowBlockInput } from '../layout/flow.js';"
+  - "import type { DocParagraph } from '../types.js';"
+  - "import type { SectionLayoutContext } from '../layout-context.js';"
+  - "import { layoutFlowBlocks } from '../layout/flow.js';"
+  - "import { layoutLines } from '../line-layout.js';"
+  - "const width = ctx.measureText(text).width;"
+  - "const lines = layoutLines(ctx, segments, width);"
+  - "const table = computeTableLayout(input, services);"

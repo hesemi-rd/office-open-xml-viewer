@@ -1,0 +1,10 @@
+id: no-docx-style-resolution-in-layout-paint
+valid:
+  - "import type { ResolvedParagraphFacts } from '../parser-model.js';"
+  - "function mapResolvedFacts(input: ResolvedParagraphFacts) { return input.font; }"
+  - "const resolvedColor = input.color;"
+invalid:
+  - "import { resolveParagraphStyle } from '../styles.js';"
+  - "function resolveRunStyle(run: Run) { return mergeStyle(run.style); }"
+  - "const cascadeParagraphProperties = (style: Style) => style.parent;"
+  - "function mergeRunProperties(base: Props, direct: Props) { return { ...base, ...direct }; }"

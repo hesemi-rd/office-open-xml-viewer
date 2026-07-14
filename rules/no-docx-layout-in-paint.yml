@@ -1,0 +1,33 @@
+id: no-docx-layout-in-paint
+language: TypeScript
+severity: error
+message: DOCX paint consumes retained layout data and must not import or call layout/measurement algorithms.
+note: |
+  Paint may use `import type` from `layout/types.ts`. It must not reach layout
+  algorithms, parser/renderer objects, pagination, style resolution, or Canvas
+  measurement. The transitive Node boundary checker complements this direct AST
+  rule.
+rule:
+  any:
+    - all:
+        - kind: import_statement
+        - regex: "from\\s+['\"]\\.\\./layout/"
+        - not:
+            regex: "^import\\s+type\\b[\\s\\S]*from\\s+['\"]\\.\\./layout/types(?:\\.js)?['\"]\\s*;?$"
+    - all:
+        - kind: import_statement
+        - regex: "from\\s+['\"]\\.\\./(types|renderer|fragment-paint|layout-context|line-layout|paragraph-measure|table-geometry|table-fragments|layout-fragments)(\\.js)?['\"]"
+    - pattern: $OBJ.measureText($$$ARGS)
+    - pattern: measureText($$$ARGS)
+    - pattern: layoutLines($$$ARGS)
+    - pattern: $OBJ.layoutLines($$$ARGS)
+    - pattern: measureParagraph($$$ARGS)
+    - pattern: $OBJ.measureParagraph($$$ARGS)
+    - pattern: computeTableLayout($$$ARGS)
+    - pattern: $OBJ.computeTableLayout($$$ARGS)
+    - pattern: paginateDocument($$$ARGS)
+    - pattern: $OBJ.paginateDocument($$$ARGS)
+files:
+  - "packages/docx/src/paint/**/*.ts"
+ignores:
+  - "packages/docx/src/paint/**/*.test.ts"

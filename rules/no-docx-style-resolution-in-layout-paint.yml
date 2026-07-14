@@ -1,0 +1,28 @@
+id: no-docx-style-resolution-in-layout-paint
+language: TypeScript
+severity: error
+message: DOCX layout and paint consume resolved facts and must not implement a second style cascade.
+note: |
+  Style inheritance and clearing are resolved at the Rust/parser boundary.
+  Layout may map already-resolved facts; paint consumes retained presentation
+  data. Do not import or declare resolve/merge/cascade style algorithms here.
+rule:
+  any:
+    - kind: import_specifier
+      regex: "^(resolve|merge|cascade|apply)[A-Za-z0-9]*(Style|Properties|Cascade)[A-Za-z0-9]*$"
+    - kind: function_declaration
+      has:
+        field: name
+        kind: identifier
+        regex: "^(resolve|merge|cascade|apply)[A-Za-z0-9]*(Style|Properties|Cascade)[A-Za-z0-9]*$"
+    - kind: variable_declarator
+      has:
+        field: name
+        kind: identifier
+        regex: "^(resolve|merge|cascade|apply)[A-Za-z0-9]*(Style|Properties|Cascade)[A-Za-z0-9]*$"
+files:
+  - "packages/docx/src/layout/**/*.ts"
+  - "packages/docx/src/paint/**/*.ts"
+ignores:
+  - "packages/docx/src/layout/**/*.test.ts"
+  - "packages/docx/src/paint/**/*.test.ts"

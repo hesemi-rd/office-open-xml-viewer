@@ -87,6 +87,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - uses: pnpm/action-setup@v5
 
@@ -121,6 +123,12 @@ jobs:
       - name: Lint
         run: pnpm lint
 
+      - name: DOCX layout boundary tests
+        run: |
+          pnpm test:docx-boundaries
+          pnpm test:docx-public-api
+          node scripts/check-docx-layout-boundaries.mjs
+
       # The WASM parsers are git-ignored build output; the TypeScript packages
       # import their generated .d.ts/.js, so typecheck requires building them first.
       - name: Build WASM
@@ -140,6 +148,9 @@ jobs:
 
       - name: Build packages
         run: pnpm build:packages
+
+      - name: DOCX public API compatibility
+        run: node scripts/check-docx-public-api.mjs
 
   # Rendering smoke: boots Storybook, drives the Layouts stories in a real
   # Chrome, and asserts every canvas receives ink. The only CI job that

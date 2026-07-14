@@ -34,7 +34,7 @@
   ],
   "scripts": {
     "dev": "vite",
-    "build": "tsc --build && vite build",
+    "build": "vite build && tsc --build --force",
     "preview": "vite preview",
     "wasm": "cd parser && wasm-pack build --target web --out-dir ../src/wasm && node ../../../scripts/append-wasm-reinit.mjs ../src/wasm/docx_parser.js",
     "typecheck": "tsc --noEmit",

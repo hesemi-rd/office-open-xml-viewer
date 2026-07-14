@@ -1,0 +1,12 @@
+id: no-docx-display-scale-in-layout
+valid:
+  - "const authoredScale = run.charScale ?? 100;"
+  - "const widthPt = input.flowBounds.widthPt;"
+  - "type PlainTransform = { readonly a: number; readonly d: number };"
+invalid:
+  - "const px = widthPt * options.scale;"
+  - "const ratio = options.dpr;"
+  - "const display = request.displayScale;"
+  - "const context: CanvasRenderingContext2D = canvas.getContext('2d')!;"
+  - "function paint(options: PaintPageOptions) { return options; }"
+  - "function draw(context: CanvasPaintContext) { return context; }"

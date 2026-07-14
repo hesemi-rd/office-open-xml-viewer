@@ -76,7 +76,9 @@
     "test": "vitest run",
     "check:no-inline-wasm": "node scripts/check-no-inline-wasm.mjs dist",
     "lint": "ast-grep scan",
-    "lint:test": "ast-grep test --skip-snapshot-tests"
+    "lint:test": "ast-grep test --skip-snapshot-tests",
+    "test:docx-boundaries": "node --test scripts/check-docx-layout-boundaries.test.mjs",
+    "test:docx-public-api": "node --test scripts/check-docx-public-api.test.mjs"
   },
   "devDependencies": {
     "@ast-grep/cli": "^0.43.0",
