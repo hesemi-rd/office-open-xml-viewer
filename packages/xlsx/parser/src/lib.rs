@@ -11,7 +11,9 @@ mod markdown;
 mod worksheet_reference;
 #[cfg(test)]
 use worksheet_reference::{extract_reference_cells, MAX_REFERENCE_CELLS};
-use worksheet_reference::{resolve_worksheet_reference, ReferencedCellValue};
+use worksheet_reference::{
+    resolve_worksheet_reference, ReferencedCellValue, WorksheetReferenceSession,
+};
 
 mod types;
 pub use types::*;
@@ -263,6 +265,7 @@ fn parse_sheet_with(
     // list; their preview parts are referenced from the worksheet XML + rels.
     ws.images
         .extend(load_sheet_ole_images(archive, &sheet_path, &sheet_xml));
+    let mut reference_session = WorksheetReferenceSession::default();
     ws.charts = load_sheet_charts(
         archive,
         &sheet_path,
@@ -272,6 +275,7 @@ fn parse_sheet_with(
             sheets: &shared.sheets,
             workbook_rels: &rels_doc,
             shared_strings: &shared.shared_strings,
+            session: &mut reference_session,
         }),
         theme_colors,
         (
@@ -294,6 +298,7 @@ fn parse_sheet_with(
         &rels_doc,
         theme_colors,
         &shared.shared_strings,
+        &mut reference_session,
     );
     let (df_family, df_size) = parse_default_font(archive);
     ws.default_font_family = df_family;
@@ -2137,6 +2142,7 @@ fn extract_range_values(sheet_xml: &str, range: &CellRange) -> Vec<Option<f64>> 
 /// `<x14:sparklineGroup>`. Resolves cross-sheet `<xm:f>` data references by
 /// reading the referenced sheet from the archive (cached per call to avoid
 /// re-reads). Theme colors are flattened to `#RRGGBB` via `parse_color`.
+#[allow(clippy::too_many_arguments)]
 fn load_sheet_sparklines(
     archive: &mut XlsxZip,
     sheet_xml: &str,
@@ -2145,16 +2151,12 @@ fn load_sheet_sparklines(
     rels_doc: &roxmltree::Document,
     theme_colors: &[String],
     shared_strings: &[SharedString],
+    reference_session: &mut WorksheetReferenceSession,
 ) -> Vec<SparklineGroup> {
     let Ok(doc) = parse_guarded(sheet_xml) else {
         return Vec::new();
     };
     let mut groups: Vec<SparklineGroup> = Vec::new();
-    // Cache: sheet name → loaded XML. Saves re-reading when many sparklines
-    // reference the same source sheet (typical: one "data" sheet feeds many
-    // dashboard sparklines).
-    let mut xml_cache: HashMap<String, Option<String>> = HashMap::new();
-
     let parse_bool_attr = |n: &roxmltree::Node, key: &str, default: bool| -> bool {
         match n.attribute(key) {
             Some(v) => v == "1" || v.eq_ignore_ascii_case("true"),
@@ -2217,8 +2219,9 @@ fn load_sheet_sparklines(
                     sheets,
                     rels_doc,
                     shared_strings,
-                    &mut xml_cache,
+                    reference_session,
                 )
+                .unwrap_or_default()
                 .into_iter()
                 .map(|value| match value {
                     ReferencedCellValue::Number(number) => Some(number),

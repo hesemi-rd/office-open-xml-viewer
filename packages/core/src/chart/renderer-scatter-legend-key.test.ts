@@ -72,8 +72,10 @@ const LEGEND_Y_MIN = 320; // RECT.h = 360; the bottom legend band starts well be
 function recordingCtx(): {
   ctx: CanvasRenderingContext2D;
   keys: Array<'marker' | 'line'>;
+  plotMarkerYs: number[];
 } {
   const keys: Array<'marker' | 'line'> = [];
+  const plotMarkerYs: number[] = [];
   let pathVerts = 0;
   let lastPathY = 0;   // y of the last moveTo/lineTo/arc vertex (band gating).
   let pendingKey: 'marker' | 'line' | null = null;
@@ -104,7 +106,11 @@ function recordingCtx(): {
         case 'quadraticCurveTo':
           return (_x: number, y: number) => { pathVerts += 1; lastPathY = y; };
         case 'arc':
-          return (_cx: number, cy: number) => { pathVerts += 1; lastPathY = cy; };
+          return (_cx: number, cy: number) => {
+            pathVerts += 1;
+            lastPathY = cy;
+            if (cy < LEGEND_Y_MIN) plotMarkerYs.push(cy);
+          };
         case 'fill':
           // A marker glyph (arc/diamond/triangle/star) fills a closed path.
           return () => { if (inBand()) pendingKey = 'marker'; };
@@ -133,7 +139,11 @@ function recordingCtx(): {
     },
     set(_t, prop: string, value) { state[prop] = value; return true; },
   };
-  return { ctx: new Proxy(state, handler) as unknown as CanvasRenderingContext2D, keys };
+  return {
+    ctx: new Proxy(state, handler) as unknown as CanvasRenderingContext2D,
+    keys,
+    plotMarkerYs,
+  };
 }
 
 const scatterModel = (over: Partial<ChartModel>, serOver: Partial<ChartSeries> = {}): ChartModel =>
@@ -201,5 +211,40 @@ describe('scatter legend key reflects the plotted mark (#803, §21.2.2.42/.198)'
     );
     expect(rec.keys).toContain('line');
     expect(rec.keys).not.toContain('marker');
+  });
+
+  it('does not reuse chart-level X values for an explicitly empty later series', () => {
+    const resolved = series({ name: 'resolved', values: [10], categories: null, showMarker: true });
+    const baseline = recordingCtx();
+    renderChart(
+      baseline.ctx,
+      scatterModel({ showLegend: false, scatterStyle: 'marker', series: [resolved] }),
+      RECT,
+      1,
+    );
+
+    const rec = recordingCtx();
+    renderChart(
+      rec.ctx,
+      scatterModel({
+        showLegend: false,
+        scatterStyle: 'marker',
+        series: [
+          resolved,
+          series({
+            name: 'unresolved',
+            values: [1_000_000],
+            categories: [],
+            showMarker: true,
+          }),
+        ],
+      }),
+      RECT,
+      1,
+    );
+
+    expect(baseline.plotMarkerYs).toHaveLength(1);
+    expect(rec.plotMarkerYs).toHaveLength(1);
+    expect(rec.plotMarkerYs[0]).toBeCloseTo(baseline.plotMarkerYs[0]);
   });
 });

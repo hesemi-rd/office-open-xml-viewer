@@ -348,6 +348,7 @@ function buildLegendEntries(
   chartType: string | undefined,
   scatterStyle?: string | null,
   varyByPoint = false,
+  chartCategories: string[] = [],
 ): LegendEntry[] {
   if (varyByPoint || legendIsCategoryDriven(chartType)) {
     // Category-driven: one entry per data point of the first series, labeled by
@@ -355,7 +356,7 @@ function buildLegendEntries(
     // point (pie slice, or a varyColors bar). §21.2.2.227.
     const first = series[0];
     const n = first ? first.values.length : 0;
-    const cats = first?.categories ?? [];
+    const cats = first?.categories ?? chartCategories;
     return Array.from({ length: n }, (_, i) => ({
       label: (cats[i] ?? `Item ${i + 1}`).toString(),
       color: legendEntryColor(chartType, series, i, varyByPoint),
@@ -396,10 +397,11 @@ function drawLegend(
   style: LegendTextStyle = DEFAULT_LEGEND_STYLE,
   scatterStyle?: string | null,
   varyByPoint = false,
+  chartCategories: string[] = [],
 ): void {
   const sw = 10; const gap = 4;
   const swatchStyle = legendSwatchStyle(chartType);
-  const entries = buildLegendEntries(series, chartType, scatterStyle, varyByPoint);
+  const entries = buildLegendEntries(series, chartType, scatterStyle, varyByPoint, chartCategories);
   const boldPrefix = style.bold ? 'bold ' : '';
   if (orient === 'horizontal') {
     // Excel lays a bottom/top legend as a single horizontal row, centered.
@@ -492,21 +494,21 @@ function drawLegendForLayout(
     // when on left/right. A manual box wider than tall implies horizontal —
     // matches Excel's one-row legend rendering for top/bottom manual layouts.
     const orient = lw >= lh ? 'horizontal' : 'vertical';
-    drawLegend(ctx, chart.series, lx, ly, lw, lh, orient, chart.chartType, legStyle, chart.scatterStyle, varyByPoint);
+    drawLegend(ctx, chart.series, lx, ly, lw, lh, orient, chart.chartType, legStyle, chart.scatterStyle, varyByPoint, chart.categories);
     return;
   }
   switch (leg.side) {
     case 'r':
-      drawLegend(ctx, chart.series, x + w - leg.reserveW + 4, py0, leg.reserveW - 8, ph, 'vertical', chart.chartType, legStyle, chart.scatterStyle, varyByPoint);
+      drawLegend(ctx, chart.series, x + w - leg.reserveW + 4, py0, leg.reserveW - 8, ph, 'vertical', chart.chartType, legStyle, chart.scatterStyle, varyByPoint, chart.categories);
       break;
     case 'l':
-      drawLegend(ctx, chart.series, x + 4, py0, leg.reserveW - 8, ph, 'vertical', chart.chartType, legStyle, chart.scatterStyle, varyByPoint);
+      drawLegend(ctx, chart.series, x + 4, py0, leg.reserveW - 8, ph, 'vertical', chart.chartType, legStyle, chart.scatterStyle, varyByPoint, chart.categories);
       break;
     case 't':
-      drawLegend(ctx, chart.series, px0, y + topBand, pw, leg.reserveH, 'horizontal', chart.chartType, legStyle, chart.scatterStyle, varyByPoint);
+      drawLegend(ctx, chart.series, px0, y + topBand, pw, leg.reserveH, 'horizontal', chart.chartType, legStyle, chart.scatterStyle, varyByPoint, chart.categories);
       break;
     case 'b':
-      drawLegend(ctx, chart.series, px0, y + h - leg.reserveH, pw, leg.reserveH, 'horizontal', chart.chartType, legStyle, chart.scatterStyle, varyByPoint);
+      drawLegend(ctx, chart.series, px0, y + h - leg.reserveH, pw, leg.reserveH, 'horizontal', chart.chartType, legStyle, chart.scatterStyle, varyByPoint, chart.categories);
       break;
   }
 }
@@ -3483,6 +3485,14 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
 // (`useSecondaryAxis` / a right-hand `<c:valAx>` pairs with a category-based
 // family). So `computeSecondaryAxis` is never called here — the CH7 helper is
 // wired only into the category-axis families (bar already; line + area now).
+function scatterXValue(cats: string[], index: number, useIndexX: boolean): number | null {
+  if (useIndexX) return index;
+  const raw = cats[index];
+  if (raw == null) return null;
+  const value = parseFloat(raw);
+  return Number.isNaN(value) ? null : value;
+}
+
 function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect, ptToPx: number): void {
   const { x, y, w, h } = r;
   // Shared frame bands. Title + bottom axis-label bands follow PowerPoint's
@@ -3543,14 +3553,32 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   // X / Y data extents.
   const allX: number[] = []; const allY: number[] = [];
   for (const s of chart.series) {
-    const cats = s.categories ?? [];
+    const cats = s.categories ?? chart.categories;
     for (const c of cats) { const v = parseFloat(c); if (!isNaN(v)) allX.push(v); }
-    for (const v of s.values) if (v != null) allY.push(v);
   }
   const useIndexX = allX.length === 0;
   if (useIndexX) {
     const maxLen = Math.max(...chart.series.map(s => s.values.length));
     for (let i = 0; i < maxLen; i++) allX.push(i);
+    for (const s of chart.series) {
+      for (const value of s.values) if (value != null) allY.push(value);
+    }
+  } else {
+    // Numeric scatter/bubble axes are derived only from paintable X/Y pairs.
+    // A distinct unresolved X source is represented by `categories: []`; its
+    // Y values must not stretch the value axis when none of its points render.
+    allX.length = 0;
+    for (const s of chart.series) {
+      const cats = s.categories ?? chart.categories;
+      for (let i = 0; i < s.values.length; i++) {
+        const y = s.values[i];
+        if (y == null) continue;
+        const x = scatterXValue(cats, i, false);
+        if (x == null) continue;
+        allX.push(x);
+        allY.push(y);
+      }
+    }
   }
 
   let xMin = Math.min(...allX); let xMax = Math.max(...allX);
@@ -3702,7 +3730,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   for (let si = 0; si < chart.series.length; si++) {
     const s = chart.series[si];
     const fallbackColor = chartColor(si, s);
-    const cats = s.categories ?? [];
+    const cats = s.categories ?? chart.categories;
 
     // Error bars (drawn first so markers overlay the bar tip).
     for (const eb of s.errBars ?? []) {
@@ -3718,8 +3746,8 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
       const pts: Array<{ x: number; y: number }> = [];
       for (let ci = 0; ci < s.values.length; ci++) {
         const yv = s.values[ci]; if (yv == null) continue;
-        const xv = useIndexX ? ci : parseFloat(cats[ci] ?? '0');
-        if (isNaN(xv)) continue;
+        const xv = scatterXValue(cats, ci, useIndexX);
+        if (xv == null) continue;
         pts.push({ x: toX(xv), y: toY(yv) });
       }
       if (pts.length >= 2) {
@@ -3772,8 +3800,8 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
 
       for (let ci = 0; ci < s.values.length; ci++) {
         const yv = s.values[ci]; if (yv == null) continue;
-        const xv = useIndexX ? ci : parseFloat(cats[ci] ?? '0');
-        if (isNaN(xv)) continue;
+        const xv = scatterXValue(cats, ci, useIndexX);
+        if (xv == null) continue;
         const dpt = (s.dataPointOverrides ?? []).find(d => d.idx === ci);
         const symbol = (dpt?.markerSymbol ?? s.markerSymbol ?? 'circle') as string;
         let sizePt = dpt?.markerSize ?? s.markerSize ?? 5;
@@ -3940,8 +3968,8 @@ function drawSeriesErrorBars(
   const capHalf = ctx.lineWidth * 1.5;
   for (let i = 0; i < s.values.length; i++) {
     const yv = s.values[i]; if (yv == null) continue;
-    const xv = useIndexX ? i : parseFloat(cats[i] ?? '0');
-    if (isNaN(xv)) continue;
+    const xv = scatterXValue(cats, i, useIndexX);
+    if (xv == null) continue;
     const px = toX(xv); const py = toY(yv);
     const drawSeg = (dataDelta: number) => {
       let x2 = px, y2 = py;
@@ -4009,8 +4037,8 @@ function drawSeriesDataLabels(
   const seriesDef = s.seriesDataLabels;
   for (let i = 0; i < s.values.length; i++) {
     const yv = s.values[i]; if (yv == null) continue;
-    const xv = useIndexX ? i : parseFloat(cats[i] ?? '0');
-    if (isNaN(xv)) continue;
+    const xv = scatterXValue(cats, i, useIndexX);
+    if (xv == null) continue;
     const ovr = overrides.find(o => o.idx === i);
     // A genuine `<c:delete val="1"/>` (§21.2.2.43) skips the point; a per-point
     // `<c:dLbl>` that only carries style / flag overrides (empty `<c:tx>`) is NOT

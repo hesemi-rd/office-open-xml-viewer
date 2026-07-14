@@ -3195,6 +3195,89 @@ pub fn collect_num_cache_positional(ser_node: Node, child_tag: &str) -> Vec<Opti
     result
 }
 
+/// Package-specific resolver for legacy chart formulas whose authored cache or
+/// literal is absent. DrawingML owns the series-field walk; a host package such
+/// as XLSX supplies only the external data lookup. DOCX and PPTX use the
+/// no-op resolver through [`parse_chart_part`].
+pub trait ChartReferenceResolver {
+    /// `None` means the host could not resolve the formula. `Some` with an
+    /// empty or all-gap vector is a successfully resolved empty range.
+    fn resolve_strings(&mut self, formula: &str) -> Option<Vec<String>>;
+    fn resolve_numbers(&mut self, formula: &str) -> Option<Vec<Option<f64>>>;
+}
+
+struct EmptyChartReferenceResolver;
+
+impl ChartReferenceResolver for EmptyChartReferenceResolver {
+    fn resolve_strings(&mut self, _formula: &str) -> Option<Vec<String>> {
+        None
+    }
+
+    fn resolve_numbers(&mut self, _formula: &str) -> Option<Vec<Option<f64>>> {
+        None
+    }
+}
+
+fn has_authored_reference_data(container: Node<'_, '_>) -> bool {
+    container.descendants().any(|node| {
+        node.is_element()
+            && matches!(
+                node.tag_name().name(),
+                "strCache" | "numCache" | "multiLvlStrCache" | "strLit" | "numLit"
+            )
+    })
+}
+
+fn reference_formula(container: Node<'_, '_>) -> Option<String> {
+    container
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == "f")
+        .and_then(|node| node.text())
+        .map(str::trim)
+        .filter(|formula| !formula.is_empty())
+        .map(str::to_owned)
+}
+
+fn collect_string_source(
+    ser_node: Node<'_, '_>,
+    child_tag: &str,
+    references: &mut dyn ChartReferenceResolver,
+) -> Option<Vec<String>> {
+    let container = ser_node
+        .children()
+        .find(|node| node.is_element() && node.tag_name().name() == child_tag)?;
+    if has_authored_reference_data(container) {
+        return Some(collect_str_cache_positional(ser_node, child_tag));
+    }
+    reference_formula(container).and_then(|formula| references.resolve_strings(&formula))
+}
+
+fn collect_number_source(
+    ser_node: Node<'_, '_>,
+    child_tag: &str,
+    references: &mut dyn ChartReferenceResolver,
+) -> Option<Vec<Option<f64>>> {
+    let container = ser_node
+        .children()
+        .find(|node| node.is_element() && node.tag_name().name() == child_tag)?;
+    if has_authored_reference_data(container) {
+        return Some(collect_num_cache_positional(ser_node, child_tag));
+    }
+    reference_formula(container).and_then(|formula| references.resolve_numbers(&formula))
+}
+
+/// Formula identity for a source that genuinely needs the host resolver.
+/// Authored caches/literals deliberately return `None`: even when their `<f>`
+/// text matches another series, their authored point data remains authoritative.
+fn external_reference_formula(ser_node: Node<'_, '_>, child_tag: &str) -> Option<String> {
+    let container = ser_node
+        .children()
+        .find(|node| node.is_element() && node.tag_name().name() == child_tag)?;
+    (!has_authored_reference_data(container))
+        .then(|| reference_formula(container))
+        .flatten()
+}
+
 /// Parse the shared body of a legacy DrawingML chart (`c:` namespace) into a
 /// [`ChartModel`]. `chart_root` is the `<c:chartSpace>` root element; the
 /// crate-specific `<a:solidFill>` resolution (pptx theme map vs. xlsx theme
@@ -3218,6 +3301,19 @@ pub fn collect_num_cache_positional(ser_node: Node, child_tag: &str) -> Vec<Opti
 pub fn parse_chart_part(
     chart_root: Node,
     color_resolver: &dyn ColorResolver,
+) -> Option<ChartModel> {
+    let mut references = EmptyChartReferenceResolver;
+    parse_chart_part_with_references(chart_root, color_resolver, &mut references)
+}
+
+/// Parse a legacy chart with an optional package-supplied formula resolver.
+/// Authored caches and literals always win; the resolver is called only for a
+/// formula-only reference. This keeps series identity and field dispatch in the
+/// shared DrawingML parser while leaving workbook lookup to the host package.
+pub fn parse_chart_part_with_references(
+    chart_root: Node,
+    color_resolver: &dyn ColorResolver,
+    references: &mut dyn ChartReferenceResolver,
 ) -> Option<ChartModel> {
     let root = chart_root;
 
@@ -3471,13 +3567,6 @@ pub fn parse_chart_part(
         return None;
     }
 
-    // ECMA-376 §21.2.2: category data may be in a *Cache (backing a *Ref) or a *Lit (inline literal).
-    // Accept strCache/numCache (external refs with cached values) AND strLit/numLit (inline literals).
-    // Still used for the series-name lookup below; category/value data now flows
-    // through the positional collectors.
-    let is_pt_container =
-        |name: &str| matches!(name, "strCache" | "numCache" | "strLit" | "numLit");
-
     // Chart-level category labels from the first series, using the POSITIONAL
     // collector so a sparse cache (labels that start at `idx=1`, or a hole in
     // the middle) keeps its true length and per-index alignment. The old
@@ -3487,11 +3576,10 @@ pub fn parse_chart_part(
     // so read that instead — the shared category list mirrors the first series'
     // X data, matching how Excel drives the horizontal-axis labels.
     let chart_uses_xval = chart_type == "scatter" || chart_type == "bubble";
-    let categories: Vec<String> = if chart_uses_xval {
-        collect_str_cache_positional(ser_nodes[0], "xVal")
-    } else {
-        collect_str_cache_positional(ser_nodes[0], "cat")
-    };
+    let category_tag = if chart_uses_xval { "xVal" } else { "cat" };
+    let shared_category_formula = external_reference_formula(ser_nodes[0], category_tag);
+    let categories: Vec<String> =
+        collect_string_source(ser_nodes[0], category_tag, references).unwrap_or_default();
 
     let is_scatter_like = chart_type == "scatter" || chart_type == "bubble";
 
@@ -3525,7 +3613,8 @@ pub fn parse_chart_part(
 
     let series: Vec<ChartSeries> = ser_nodes
         .iter()
-        .map(|ser| {
+        .enumerate()
+        .map(|(series_position, ser)| {
             // Each `<c:ser>` is a direct child of its chart-group element
             // (`<c:barChart>`/`<c:lineChart>`/…). `series_type` carries that
             // group's type so the renderer can draw line-group series as a line
@@ -3545,25 +3634,12 @@ pub fn parse_chart_part(
             };
 
             // Series name from <c:tx>  (can be strRef/strCache, strLit, or a bare <c:v>)
-            let name = ser
-                .children()
-                .find(|n| n.is_element() && n.tag_name().name() == "tx")
-                .and_then(|tx| {
-                    // Preferred: first pt > v inside any cache/lit container
-                    tx.descendants()
-                        .find(|n| n.is_element() && is_pt_container(n.tag_name().name()))
-                        .and_then(|cache| {
-                            cache
-                                .children()
-                                .find(|n| n.is_element() && n.tag_name().name() == "pt")
-                                .and_then(|pt| {
-                                    pt.children()
-                                        .find(|n| n.is_element() && n.tag_name().name() == "v")
-                                })
-                                .and_then(|v| v.text().map(|t| t.to_string()))
-                        })
-                        // Fallback: <c:tx><c:v>Name</c:v></c:tx>
-                        .or_else(|| {
+            let name = collect_string_source(*ser, "tx", references)
+                .and_then(|values| values.into_iter().next())
+                .or_else(|| {
+                    ser.children()
+                        .find(|n| n.is_element() && n.tag_name().name() == "tx")
+                        .and_then(|tx| {
                             tx.children()
                                 .find(|n| n.is_element() && n.tag_name().name() == "v")
                                 .and_then(|v| v.text().map(|t| t.to_string()))
@@ -3581,26 +3657,31 @@ pub fn parse_chart_part(
 
             // Per-series category labels. Scatter/bubble put numeric X data in
             // `<c:xVal>` (ECMA-376 §21.2.2.43); every other type reads the
-            // series' own `<c:cat>`, falling back to the shared chart-level
-            // `categories` when this series carries none (mixed / combo charts
-            // share one category axis). Emitted as `None` only when the resulting
-            // list is empty, matching the historical xlsx wire shape (every
-            // series carried its resolved `categories`).
+            // series' own `<c:cat>`. The first series is already represented by
+            // chart-level `categories`; repeated live formulas also use that
+            // canonical vector instead of resolving and retaining duplicate
+            // copies. `ChartSeries.categories = None` explicitly means to fall
+            // back to `ChartModel.categories` (the shared TS contract). Authored
+            // caches/literals and genuinely distinct formulas remain per-series.
             let series_categories: Option<Vec<String>> = {
-                let cats = if is_scatter_like {
-                    collect_str_cache_positional(*ser, "xVal")
-                } else {
-                    let own = collect_str_cache_positional(*ser, "cat");
-                    if own.is_empty() {
-                        categories.clone()
-                    } else {
-                        own
-                    }
-                };
-                if cats.is_empty() {
+                let own_formula = external_reference_formula(*ser, category_tag);
+                let shares_chart_categories = series_position == 0
+                    || (own_formula.is_some()
+                        && own_formula.as_deref() == shared_category_formula.as_deref());
+                if shares_chart_categories {
                     None
                 } else {
-                    Some(cats)
+                    let has_own_source = ser
+                        .children()
+                        .any(|node| node.is_element() && node.tag_name().name() == category_tag);
+                    match collect_string_source(*ser, category_tag, references) {
+                        Some(own) if is_scatter_like || !own.is_empty() => Some(own),
+                        // A distinct scatter/bubble X source that cannot be
+                        // resolved must not inherit the first series' X values.
+                        // `Some([])` explicitly suppresses that fallback.
+                        None if is_scatter_like && has_own_source => Some(Vec::new()),
+                        _ => None,
+                    }
                 }
             };
 
@@ -3611,7 +3692,8 @@ pub fn parse_chart_part(
             // than there are cat labels (cat-less line, sparse radar) keeps all
             // of its data.
             let val_tag = if is_scatter_like { "yVal" } else { "val" };
-            let values: Vec<Option<f64>> = collect_num_cache_positional(*ser, val_tag);
+            let values: Vec<Option<f64>> =
+                collect_number_source(*ser, val_tag, references).unwrap_or_default();
             let series_pt_count = values.len().max(1);
             // Value-cache node for the series-value number format (`<c:formatCode>`).
             let val_cache = ser
@@ -3628,32 +3710,8 @@ pub fn parse_chart_part(
             // Bubble per-point sizes (ECMA-376 §21.2.2.4 `<c:bubbleSize>`).
             // Only meaningful for bubble charts; scatter / others ignore.
             let bubble_sizes: Option<Vec<Option<f64>>> = if chart_type == "bubble" {
-                let bub_cache = ser
-                    .children()
-                    .find(|n| n.is_element() && n.tag_name().name() == "bubbleSize")
-                    .and_then(|b| {
-                        b.descendants().find(|n| {
-                            n.is_element()
-                                && (n.tag_name().name() == "numCache"
-                                    || n.tag_name().name() == "numLit")
-                        })
-                    });
-                bub_cache.map(|cache| {
-                    let mut sizes: Vec<Option<f64>> = vec![None; series_pt_count];
-                    for pt in cache
-                        .children()
-                        .filter(|n| n.is_element() && n.tag_name().name() == "pt")
-                    {
-                        let idx: usize = attr(&pt, "idx").and_then(|v| v.parse().ok()).unwrap_or(0);
-                        let val: Option<f64> = pt
-                            .children()
-                            .find(|n| n.is_element() && n.tag_name().name() == "v")
-                            .and_then(|v| v.text())
-                            .and_then(|t| t.parse().ok());
-                        if idx < sizes.len() {
-                            sizes[idx] = val;
-                        }
-                    }
+                collect_number_source(*ser, "bubbleSize", references).map(|mut sizes| {
+                    sizes.resize(sizes.len().max(series_pt_count), None);
                     sizes
                 })
             } else {
@@ -7442,5 +7500,158 @@ mod tests {
         let m = parse_chart_part(d.root_element(), &FixtureResolver).expect("parses");
         assert_eq!(m.series.len(), 2);
         assert_eq!(m.title, None);
+    }
+
+    struct FormulaResolver;
+
+    impl ChartReferenceResolver for FormulaResolver {
+        fn resolve_strings(&mut self, formula: &str) -> Option<Vec<String>> {
+            Some(match formula {
+                "Name" => vec!["Resolved series".into()],
+                "X" => vec!["1".into(), "2".into()],
+                "CachedCats" => vec!["live value must not win".into()],
+                _ => return None,
+            })
+        }
+
+        fn resolve_numbers(&mut self, formula: &str) -> Option<Vec<Option<f64>>> {
+            Some(match formula {
+                "Y" => vec![Some(10.0), Some(20.0)],
+                "Size" => vec![Some(3.0), Some(5.0)],
+                _ => return None,
+            })
+        }
+    }
+
+    #[test]
+    fn parse_chart_part_resolves_cacheless_bubble_fields() {
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}"><c:chart><c:plotArea><c:bubbleChart>
+              <c:ser><c:idx val="0"/><c:order val="0"/>
+                <c:tx><c:strRef><c:f>Name</c:f></c:strRef></c:tx>
+                <c:xVal><c:numRef><c:f>X</c:f></c:numRef></c:xVal>
+                <c:yVal><c:numRef><c:f>Y</c:f></c:numRef></c:yVal>
+                <c:bubbleSize><c:numRef><c:f>Size</c:f></c:numRef></c:bubbleSize>
+              </c:ser>
+            </c:bubbleChart></c:plotArea></c:chart></c:chartSpace>"#
+        );
+        let doc = root_of(&xml);
+        let mut references = FormulaResolver;
+        let chart =
+            parse_chart_part_with_references(doc.root_element(), &FixtureResolver, &mut references)
+                .expect("bubble chart parses");
+
+        assert_eq!(chart.categories, vec!["1", "2"]);
+        assert_eq!(chart.series[0].name, "Resolved series");
+        assert_eq!(chart.series[0].categories, None);
+        assert_eq!(chart.series[0].values, vec![Some(10.0), Some(20.0)]);
+        assert_eq!(
+            chart.series[0].bubble_sizes,
+            Some(vec![Some(3.0), Some(5.0)])
+        );
+    }
+
+    #[test]
+    fn parse_chart_part_keeps_unresolved_cacheless_bubble_sizes_absent() {
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}"><c:chart><c:plotArea><c:bubbleChart>
+              <c:ser><c:idx val="0"/><c:order val="0"/>
+                <c:xVal><c:numRef><c:f>X</c:f></c:numRef></c:xVal>
+                <c:yVal><c:numRef><c:f>Y</c:f></c:numRef></c:yVal>
+                <c:bubbleSize><c:numRef><c:f>Size</c:f></c:numRef></c:bubbleSize>
+              </c:ser>
+            </c:bubbleChart></c:plotArea></c:chart></c:chartSpace>"#
+        );
+        let doc = root_of(&xml);
+        let chart = parse_chart_part(doc.root_element(), &FixtureResolver)
+            .expect("cacheless bubble chart still parses");
+
+        assert_eq!(chart.categories, Vec::<String>::new());
+        assert_eq!(chart.series[0].categories, None);
+        assert_eq!(chart.series[0].values, Vec::<Option<f64>>::new());
+        assert_eq!(chart.series[0].bubble_sizes, None);
+    }
+
+    struct CountingCategoryResolver {
+        string_calls: usize,
+    }
+
+    impl ChartReferenceResolver for CountingCategoryResolver {
+        fn resolve_strings(&mut self, formula: &str) -> Option<Vec<String>> {
+            self.string_calls += 1;
+            (formula == "Cats").then(|| vec!["A".into(), "B".into(), "C".into()])
+        }
+
+        fn resolve_numbers(&mut self, _formula: &str) -> Option<Vec<Option<f64>>> {
+            None
+        }
+    }
+
+    #[test]
+    fn parse_chart_part_resolves_shared_categories_once_without_series_clones() {
+        let first = r#"<c:ser><c:idx val="0"/><c:order val="0"/><c:cat><c:strRef><c:f>Cats</c:f></c:strRef></c:cat><c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser>"#;
+        let repeated = r#"<c:ser><c:idx val="1"/><c:order val="1"/><c:cat><c:strRef><c:f>Cats</c:f></c:strRef></c:cat><c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>2</c:v></c:pt></c:numLit></c:val></c:ser>"#;
+        let category_less: String = (2..12)
+            .map(|idx| format!(r#"<c:ser><c:idx val="{idx}"/><c:order val="{idx}"/><c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>{idx}</c:v></c:pt></c:numLit></c:val></c:ser>"#))
+            .collect();
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}"><c:chart><c:plotArea><c:lineChart>{first}{repeated}{category_less}</c:lineChart></c:plotArea></c:chart></c:chartSpace>"#
+        );
+        let doc = root_of(&xml);
+        let mut references = CountingCategoryResolver { string_calls: 0 };
+        let chart =
+            parse_chart_part_with_references(doc.root_element(), &FixtureResolver, &mut references)
+                .expect("multi-series chart parses");
+
+        assert_eq!(references.string_calls, 1);
+        assert_eq!(chart.categories, vec!["A", "B", "C"]);
+        assert_eq!(chart.series.len(), 12);
+        assert!(chart
+            .series
+            .iter()
+            .all(|series| series.categories.is_none()));
+    }
+
+    #[test]
+    fn parse_chart_part_does_not_reuse_first_x_for_unresolved_distinct_scatter_x() {
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}"><c:chart><c:plotArea><c:scatterChart>
+              <c:ser><c:idx val="0"/><c:order val="0"/><c:xVal><c:numRef><c:f>X</c:f></c:numRef></c:xVal><c:yVal><c:numLit><c:ptCount val="2"/><c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="1"><c:v>2</c:v></c:pt></c:numLit></c:yVal></c:ser>
+              <c:ser><c:idx val="1"/><c:order val="1"/><c:xVal><c:numRef><c:f>UnavailableX</c:f></c:numRef></c:xVal><c:yVal><c:numLit><c:ptCount val="2"/><c:pt idx="0"><c:v>3</c:v></c:pt><c:pt idx="1"><c:v>4</c:v></c:pt></c:numLit></c:yVal></c:ser>
+              <c:ser><c:idx val="2"/><c:order val="2"/><c:xVal><c:numRef><c:f>X</c:f><c:numCache><c:ptCount val="0"/></c:numCache></c:numRef></c:xVal><c:yVal><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>5</c:v></c:pt></c:numLit></c:yVal></c:ser>
+            </c:scatterChart></c:plotArea></c:chart></c:chartSpace>"#
+        );
+        let doc = root_of(&xml);
+        let mut references = FormulaResolver;
+        let chart =
+            parse_chart_part_with_references(doc.root_element(), &FixtureResolver, &mut references)
+                .expect("two-series scatter parses");
+
+        assert_eq!(chart.categories, vec!["1", "2"]);
+        assert_eq!(chart.series[0].categories, None);
+        assert_eq!(chart.series[1].categories, Some(Vec::new()));
+        assert_eq!(chart.series[2].categories, Some(Vec::new()));
+    }
+
+    #[test]
+    fn parse_chart_part_preserves_authored_multilevel_cache() {
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}"><c:chart><c:plotArea><c:barChart>
+              <c:barDir val="col"/><c:ser><c:idx val="0"/><c:order val="0"/>
+                <c:cat><c:multiLvlStrRef><c:f>CachedCats</c:f><c:multiLvlStrCache>
+                  <c:ptCount val="2"/><c:lvl><c:pt idx="0"><c:v>Authored A</c:v></c:pt><c:pt idx="1"><c:v>Authored B</c:v></c:pt></c:lvl>
+                </c:multiLvlStrCache></c:multiLvlStrRef></c:cat>
+                <c:val><c:numLit><c:ptCount val="2"/><c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="1"><c:v>2</c:v></c:pt></c:numLit></c:val>
+              </c:ser>
+            </c:barChart></c:plotArea></c:chart></c:chartSpace>"#
+        );
+        let doc = root_of(&xml);
+        let mut references = FormulaResolver;
+        let chart =
+            parse_chart_part_with_references(doc.root_element(), &FixtureResolver, &mut references)
+                .expect("bar chart parses");
+
+        assert_eq!(chart.categories, vec!["Authored A", "Authored B"]);
+        assert_eq!(chart.series[0].categories, None);
     }
 }
