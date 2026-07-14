@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { renderDocumentToCanvas } from './renderer';
+import { createLayoutServices, renderDocumentToCanvas } from './renderer';
 import type { DocxDocumentModel, SectionProps } from './types';
+import { createFontResolver } from './layout/font-service.js';
+import { createTextLayoutService } from './layout/text.js';
+import { layoutParseErrorPage } from './layout/error-page.js';
+import { deepFreezeDocumentLayout } from './layout/invariants.js';
 
 /**
  * RB7: a document carrying `parseError` (a degraded `word/document.xml`, or —
@@ -18,7 +22,7 @@ interface DrawCall {
 }
 
 /** A minimal recording 2D context that logs the draw ops we assert on. */
-function recordingCtx(): { ctx: CanvasRenderingContext2D; calls: DrawCall[] } {
+function recordingCtx(throwOnMeasure = false): { ctx: CanvasRenderingContext2D; calls: DrawCall[] } {
   const calls: DrawCall[] = [];
   const rec =
     (op: string) =>
@@ -40,12 +44,16 @@ function recordingCtx(): { ctx: CanvasRenderingContext2D; calls: DrawCall[] } {
     font: '',
     textAlign: 'start',
     textBaseline: 'alphabetic',
+    clearRect: rec('clearRect'),
     fillRect: rec('fillRect'),
     strokeRect: rec('strokeRect'),
     fillText: rec('fillText'),
     setLineDash: rec('setLineDash'),
     beginPath: rec('beginPath'),
-    measureText: (t: string) => ({ width: t.length * 6 }),
+    measureText: (t: string) => {
+      if (throwOnMeasure) throw new Error('target canvas measured text');
+      return { width: t.length * 6 };
+    },
   } as unknown as CanvasRenderingContext2D;
   return { ctx, calls };
 }
@@ -90,15 +98,31 @@ function degradedDoc(parseError: string): DocxDocumentModel {
   };
 }
 
+function retainedErrorLayout(doc: DocxDocumentModel) {
+  const text = createTextLayoutService({
+    fonts: createFontResolver([]),
+    measurer: {
+      fingerprint: 'parse-error-layout-v1',
+      measure: (request) => ({ advancePt: request.text.length * 6, ascentPt: 8, descentPt: 2 }),
+    },
+  });
+  return deepFreezeDocumentLayout(layoutParseErrorPage(
+    doc.parseError as string,
+    { widthPt: doc.section.pageWidth, heightPt: doc.section.pageHeight },
+    text,
+  ));
+}
+
 describe('RB7 renderDocumentToCanvas placeholder', () => {
   it('paints a placeholder carrying the parseError message for a degraded document', async () => {
-    const { ctx, calls } = recordingCtx();
+    const { ctx, calls } = recordingCtx(true);
     const canvas = stubCanvas(ctx);
+    const doc = degradedDoc('word/document.xml: unexpected end of stream');
     await renderDocumentToCanvas(
-      degradedDoc('word/document.xml: unexpected end of stream'),
+      doc,
       canvas,
       0,
-      { width: 816, dpr: 1 },
+      { width: 816, dpr: 1, retainedLayout: retainedErrorLayout(doc) },
     );
 
     const texts = calls.filter((c) => c.op === 'fillText').map((c) => String(c.args[0]));
@@ -111,13 +135,14 @@ describe('RB7 renderDocumentToCanvas placeholder', () => {
   });
 
   it('surfaces a corrupt-CONTAINER parseError (RB7 MAJOR) in the placeholder', async () => {
-    const { ctx, calls } = recordingCtx();
+    const { ctx, calls } = recordingCtx(true);
     const canvas = stubCanvas(ctx);
+    const doc = degradedDoc('(zip container): invalid Zip archive: Could not find EOCD');
     await renderDocumentToCanvas(
-      degradedDoc('(zip container): invalid Zip archive: Could not find EOCD'),
+      doc,
       canvas,
       0,
-      { width: 816, dpr: 1 },
+      { width: 816, dpr: 1, retainedLayout: retainedErrorLayout(doc) },
     );
     const texts = calls.filter((c) => c.op === 'fillText').map((c) => String(c.args[0]));
     expect(texts.join(' ')).toContain('zip container');
@@ -135,5 +160,20 @@ describe('RB7 renderDocumentToCanvas placeholder', () => {
     await renderDocumentToCanvas(healthy, canvas, 0, { width: 816, dpr: 1 });
     const texts = calls.filter((c) => c.op === 'fillText').map((c) => String(c.args[0]));
     expect(texts.some((t) => t.includes('could not be displayed'))).toBe(false);
+  });
+
+  it('restores Canvas measurement state when measurement throws', () => {
+    const ctx = {
+      font: 'before-font',
+      letterSpacing: '3px',
+      measureText: () => { throw new Error('measure failure'); },
+    } as unknown as CanvasRenderingContext2D;
+    const doc = degradedDoc('irrelevant');
+    const services = createLayoutServices(doc, { measureContext: ctx });
+
+    expect(() => services.text.shape({ text: 'x', fontSizePt: 10, fonts: { ascii: 'sans-serif' } }))
+      .toThrow(/measure failure/);
+    expect(ctx.font).toBe('before-font');
+    expect(ctx.letterSpacing).toBe('3px');
   });
 });

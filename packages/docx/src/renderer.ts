@@ -52,8 +52,9 @@ import {
   fillDoubleBorder,
   drawUnderline,
   renderChart,
+  graphemeClusterOffsets,
 } from '@silurus/ooxml-core';
-import type { MathNode, MathRenderer, KinsokuRules, HyperlinkTarget, NumberFormat, Duotone, ResolvedLocalFontMetric } from '@silurus/ooxml-core';
+import type { CanvasFontRoute, MathNode, MathRenderer, KinsokuRules, HyperlinkTarget, NumberFormat, Duotone, ResolvedLocalFontMetric } from '@silurus/ooxml-core';
 import { computePageNumbering } from './page-numbering.js';
 import { docxUnderlineToDrawingML } from './underline-map.js';
 import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
@@ -128,7 +129,41 @@ import {
   type SectionLayoutContext,
   type StoryContext,
 } from './layout-context.js';
-import { justifiedPiecePositions } from '@silurus/ooxml-core';
+import { canvasFontString, justifiedPiecePositions } from '@silurus/ooxml-core';
+import type { LayoutServices } from './layout/types.js';
+import type { DocumentLayout as RetainedDocumentLayout } from './layout/types.js';
+import { normalizeLayoutOptions } from './layout/options.js';
+import type { LayoutOptions } from './layout/options.js';
+import { paintLayoutPage as paintRetainedLayoutPage } from './paint/canvas-page.js';
+import {
+  mathResourceKey,
+  bodyMathOccurrences,
+  createImageMetadataService,
+  createMathMetadataService,
+  documentMathOccurrences,
+  documentImageMetadataRecords,
+  type MathLayoutResource,
+} from './layout/resources.js';
+import { createFontResolver, type FontInventoryFace } from './layout/font-service.js';
+import {
+  attachPrivateResourceLookup,
+  privateResourceLookupOf,
+} from './layout/runtime-state.js';
+import {
+  createTextLayoutService,
+  classifyDocxFontGeneric,
+  snapshotLocalMetrics,
+  type GlyphMeasureRequest,
+} from './layout/text.js';
+import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts.js';
+import { internalDocumentModel, numberingMarkerShapeInput } from './parser-model.js';
+import { normalizeInternalDocumentModel } from './parser-model.js';
+import {
+  shapeNumberingMarkerText,
+  type NumberingMarkerTextLayout,
+} from './layout/numbering-marker.js';
+import { paintNumberingMarkerText } from './paint/numbering-marker.js';
+
 
 export { computeColumns };
 
@@ -152,7 +187,6 @@ import {
   kinsokuRulesEquivalent,
   layoutLines,
   lineBoxHeight,
-  mathRenders,
   nextTabStop,
   paragraphMarkLineHeight,
   paragraphSegsStateSensitive,
@@ -257,6 +291,7 @@ function computeLineKashidaDistribution(
       calcEffectiveFontPx(s, scale),
       s.fontFamily,
       fontFamilyClasses,
+      s.fontRoute,
     );
     const prevKerning = ctx.fontKerning;
     const prevLetterSpacing = ctx.letterSpacing;
@@ -283,30 +318,202 @@ function computeLineKashidaDistribution(
   return computeKashidaDistribution(distSegs, slackPx, level, measureAdvance);
 }
 
-/** True if any run in the body (incl. tables) is an OMML equation. */
-export function documentHasMath(body: BodyElement[]): boolean {
-  return collectMathRuns(body).length > 0;
+function collectMathRuns(
+  body: BodyElement[],
+  story: import('./layout/types.js').SourceRef['story'] = 'body',
+  storyInstance = 'body',
+): ReturnType<typeof bodyMathOccurrences> {
+  return bodyMathOccurrences(body, story, storyInstance);
 }
 
-function collectMathRuns(body: BodyElement[]): { nodes: MathNode[]; display: boolean }[] {
-  const found: { nodes: MathNode[]; display: boolean }[] = [];
-  const fromRuns = (runs: DocRun[]) => {
-    for (const r of runs) {
-      if (r.type === 'math') found.push({ nodes: r.nodes, display: r.display });
-    }
+/** True if any currently representable document story contains OMML. The body
+ * array form remains supported for existing callers. */
+export function documentHasMath(input: BodyElement[] | DocxDocumentModel): boolean {
+  return (Array.isArray(input) ? collectMathRuns(input) : documentMathOccurrences(input)).length > 0;
+}
+
+/** Build the one immutable resource snapshot shared by pagination and paint.
+ * Browser handles remain on this runtime adapter and never enter layout data. */
+export function createLayoutServices(
+  doc: DocxDocumentModel,
+  options: {
+    readonly localMetrics?: Readonly<Record<string, ResolvedLocalFontMetric>>;
+    readonly useGoogleFonts?: boolean;
+    readonly mathResources?: readonly MathLayoutResource[];
+    readonly mathDrawables?: ReadonlyMap<string, CanvasImageSource>;
+    readonly measureContext?: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
+    /** Successfully loaded/registered faces only; declarations are not inventory. */
+    readonly embeddedFaces?: readonly FontFace[];
+    readonly googleFaces?: readonly FontFace[];
+  } = {},
+): LayoutServices {
+  const localMetrics = snapshotLocalMetrics(options.localMetrics);
+  const fontFamilyCharsets = Object.freeze(Object.fromEntries(
+    Object.entries(internalDocumentModel(doc).fontFamilyCharsets ?? {})
+      .map(([family, charset]) => [family.trim().toLowerCase(), charset]),
+  ));
+  const displayFaceFamily = (family: string): string => family
+    .trim()
+    .replace(/^(['"])(.*)\1$/, '$2');
+  const normalizedFaceFamily = (family: string): string => displayFaceFamily(family)
+    .toLocaleLowerCase('en-US');
+  const loadedFaceStyle = (face: FontFace): 'normal' | 'italic' | null => {
+    const style = face.style.trim().toLocaleLowerCase('en-US');
+    return style === 'normal' || style === 'italic' ? style : null;
   };
-  const walk = (el: BodyElement) => {
-    if ('runs' in el) fromRuns((el as DocParagraph).runs);
-    if ('rows' in el) {
-      for (const row of (el as DocTable).rows) {
-        for (const cell of row.cells) {
-          for (const child of cell.content) walk(child as BodyElement);
-        }
+  const loadedFaceWeight = (face: FontFace): number | null => {
+    const weight = face.weight.trim().toLocaleLowerCase('en-US');
+    if (weight === 'normal') return 400;
+    if (weight === 'bold') return 700;
+    if (!/^\d+$/.test(weight)) return null;
+    const numeric = Number(weight);
+    return numeric >= 100 && numeric <= 900 ? numeric : null;
+  };
+  const loadedFaces = (faces: readonly FontFace[]): Array<{ family: string; displayFamily: string; weight: number; style: 'normal' | 'italic' }> =>
+    faces.flatMap((face) => {
+      if (face.status !== 'loaded') return [];
+      const weight = loadedFaceWeight(face);
+      const style = loadedFaceStyle(face);
+      return weight == null || style == null ? [] : [{
+        family: normalizedFaceFamily(face.family),
+        displayFamily: displayFaceFamily(face.family),
+        weight,
+        style,
+      }];
+    });
+  const successfulEmbedded = new Map(loadedFaces(options.embeddedFaces ?? []).map((loaded) => [
+    `${loaded.family}:${loaded.weight}:${loaded.style}`, loaded,
+  ]));
+  const inventory: FontInventoryFace[] = (doc.embeddedFonts ?? []).flatMap((font) => {
+    const weight = font.style === 'bold' || font.style === 'boldItalic' ? 700 : 400;
+    const style = font.style === 'italic' || font.style === 'boldItalic' ? 'italic' as const : 'normal' as const;
+    const loaded = successfulEmbedded.get(`${normalizedFaceFamily(font.fontName)}:${weight}:${style}`);
+    if (!loaded) return [];
+    return [{
+      requestedFamily: font.fontName,
+      resolvedFamily: loaded.displayFamily,
+      source: 'embedded' as const,
+      weight,
+      style,
+    }];
+  });
+  for (const [requestedFamily, metric] of Object.entries(localMetrics)) {
+    inventory.push({
+      requestedFamily: metric.requestedFamily ?? requestedFamily,
+      resolvedFamily: metric.family,
+      source: 'local',
+      weight: metric.weight ?? 400,
+      style: metric.style ?? 'normal',
+    });
+  }
+  if (options.useGoogleFonts) {
+    const successfulGoogle = loadedFaces(options.googleFaces ?? []);
+    const seen = new Set<string>();
+    for (const name of docxFontPreloadNames(doc)) {
+      if (!name) continue;
+      const key = name.toLocaleLowerCase('en-US');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const entry = DOCX_GOOGLE_FONTS[key];
+      const resolvedFamily = entry?.loadFamily ?? name;
+      if (!entry) continue;
+      for (const loaded of successfulGoogle.filter((face) => face.family === normalizedFaceFamily(resolvedFamily))) {
+        inventory.push({
+          requestedFamily: name,
+          resolvedFamily: loaded.displayFamily,
+          source: normalizedFaceFamily(resolvedFamily) === normalizedFaceFamily(name) ? 'google' : 'substitute',
+          weight: loaded.weight,
+          style: loaded.style,
+        });
       }
     }
-  };
-  body.forEach(walk);
-  return found;
+  }
+  const ctx = options.measureContext ?? (typeof OffscreenCanvas !== 'undefined'
+    ? new OffscreenCanvas(1, 1).getContext('2d')
+    : typeof document !== 'undefined'
+      ? document.createElement('canvas').getContext('2d')
+      : null);
+  const textBase = createTextLayoutService({
+    fonts: createFontResolver(inventory),
+    localMetrics,
+    eastAsiaFontCharsets: fontFamilyCharsets,
+    genericFamilies: Object.fromEntries(
+      [...new Set([
+        ...Object.keys(doc.fontFamilyClasses ?? {}),
+        ...Object.keys(doc.fontFamilyPitches ?? {}),
+        ...(doc.majorFont ? [doc.majorFont] : []),
+        ...(doc.minorFont ? [doc.minorFont] : []),
+      ])].map((family) => [
+        family,
+        classifyDocxFontGeneric(family, doc.fontFamilyClasses, doc.fontFamilyPitches),
+      ]),
+    ),
+    measurer: {
+      fingerprint: ctx ? 'canvas-text-metrics-v1' : 'deterministic-text-metrics-v1',
+      measure(request: Readonly<GlyphMeasureRequest>) {
+        if (!ctx) return {
+          advancePt: [...request.text].length * request.fontSizePt * 0.5,
+          ascentPt: request.fontSizePt * 0.8,
+          descentPt: request.fontSizePt * 0.2,
+        };
+        const previousFont = ctx.font;
+        const previousLetterSpacing = ctx.letterSpacing;
+        const previousKerning = ctx.fontKerning;
+        try {
+          ctx.font = canvasFontString(request.fontRoute, request.fontSizePt, request.weight, request.style);
+          ctx.letterSpacing = `${request.letterSpacingPt}px`;
+          if (request.kerning != null) ctx.fontKerning = request.kerning ? 'normal' : 'none';
+          const metrics = ctx.measureText(request.text);
+          return {
+            advancePt: metrics.width,
+            ascentPt: metrics.fontBoundingBoxAscent ?? metrics.actualBoundingBoxAscent ?? 0,
+            descentPt: metrics.fontBoundingBoxDescent ?? metrics.actualBoundingBoxDescent ?? 0,
+          };
+        } finally {
+          ctx.font = previousFont;
+          ctx.letterSpacing = previousLetterSpacing;
+          if (request.kerning != null) ctx.fontKerning = previousKerning;
+        }
+      },
+    },
+  });
+  const mathOccurrences = normalizeInternalDocumentModel(doc).mathOccurrences;
+  const mathResources = options.mathResources ?? mathOccurrences.map(({ display, source }) => ({
+    resourceKey: mathResourceKey(source, display ? 'display' : 'inline'),
+    widthEm: 0,
+    ascentEm: 0,
+    descentEm: 0,
+    available: false,
+    diagnostics: [{
+      code: 'UNSUPPORTED_FEATURE' as const,
+      severity: 'warning' as const,
+      message: 'The optional DOM math engine is unavailable; using the worker-safe text fallback',
+    }],
+  }));
+  const services: LayoutServices = Object.freeze({
+    text: textBase,
+    images: createImageMetadataService(documentImageMetadataRecords(doc)),
+    math: createMathMetadataService(mathResources),
+  });
+  const occurrenceKeys = mathOccurrences.map(({ source, display }) =>
+    mathResourceKey(source, display ? 'display' : 'inline'));
+  const metadataKeys = mathResources.map((resource) => resource.resourceKey);
+  const missingMetadata = occurrenceKeys.filter((key) => !metadataKeys.includes(key));
+  const extraMetadata = metadataKeys.filter((key) => !occurrenceKeys.includes(key));
+  if (missingMetadata.length || extraMetadata.length) {
+    throw new Error(
+      `Math metadata membership mismatch: missing [${missingMetadata.join(', ')}]; extra [${extraMetadata.join(', ')}]`,
+    );
+  }
+  const availableMathKeys = mathResources
+    .filter((resource) => resource.available !== false)
+    .map((resource) => resource.resourceKey);
+  attachPrivateResourceLookup(
+    services,
+    options.mathDrawables ?? new Map(),
+    availableMathKeys,
+  );
+  return services;
 }
 
 /** Rasterize an SVG string to an <img> (browser). Resolves once decoded. */
@@ -320,29 +527,52 @@ function svgToImage(svg: string): Promise<HTMLImageElement> {
   });
 }
 
-/**
- * Convert + rasterize every equation in the document. Must complete before
- * pagination/render (which read extents synchronously). Idempotent per equation.
- */
-export async function prepareMathRuns(body: BodyElement[], math: MathRenderer): Promise<void> {
-  const runs = collectMathRuns(body);
-  if (runs.length === 0) return;
+/** Convert equations before layout. Math resources use only normalized,
+ * structural SourceRef/resourceKey facts; parser object identity is irrelevant. */
+export async function prepareMathRuns(
+  input: BodyElement[] | DocxDocumentModel,
+  math: MathRenderer,
+) {
+  if (Array.isArray(input)) {
+    throw new TypeError('prepareMathRuns requires a document model so every story has an explicit structural source');
+  }
+  const runs = normalizeInternalDocumentModel(input).mathOccurrences;
+  if (runs.length === 0) return { records: [], drawables: new Map() };
   await math.loadMathJax();
+  const records: MathLayoutResource[] = [];
+  const drawables = new Map<string, CanvasImageSource>();
+  const seen = new Set<string>();
   for (const r of runs) {
-    if (mathRenders.has(r.nodes)) continue;
+    const resourceKey = r.resourceKey;
+    if (seen.has(resourceKey)) throw new Error(`Duplicate math occurrence: ${resourceKey}`);
+    seen.add(resourceKey);
     try {
       const out = await math.mathMLToSvg(mathToMathML(r.nodes, r.display));
       const img = await svgToImage(recolorSvg(out.svg, '#000000'));
-      mathRenders.set(r.nodes, {
-        img,
+      records.push({
+        resourceKey,
         widthEm: out.widthEm,
         ascentEm: out.ascentEm,
         descentEm: out.descentEm,
+        diagnostics: [],
       });
+      drawables.set(resourceKey, img);
     } catch {
-      // Conversion failure: leave the equation unrendered (zero-size) rather than throw.
+      records.push({
+        resourceKey,
+        widthEm: 0,
+        ascentEm: 0,
+        descentEm: 0,
+        available: false,
+        diagnostics: [{
+          code: 'UNSUPPORTED_FEATURE',
+          severity: 'warning',
+          message: 'Math conversion failed; using the deterministic text fallback',
+        }],
+      });
     }
   }
+  return { records, drawables };
 }
 
 export interface RenderState {
@@ -419,6 +649,8 @@ export interface RenderState {
   /** Exact local faces and version-adaptive Word line metrics resolved before
    * pagination. Keyed by normalized authored family. */
   resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>>;
+  /** Instance-scoped resource snapshot shared by pagination and paint. */
+  layoutServices?: LayoutServices;
   /** ECMA-376 §17.15.1.58–.60 — resolved Japanese line-breaking rules
    *  (kinsoku enabled flag + line-start/line-end forbidden character sets).
    *  Default is the application's Japanese kinsoku table with kinsoku ON. */
@@ -710,6 +942,12 @@ export interface RenderDocumentOptions {
    *  render). Provide a fixed value to make DATE/TIME field output deterministic
    *  (e.g. in tests / reproducible exports). */
   currentDate?: Date | number;
+  /** Internal per-document service snapshot. Public render options never expose it. */
+  layoutServices?: LayoutServices;
+  /** Prebuilt retained placeholder for a degraded parse; never measured while painting. */
+  retainedLayout?: RetainedDocumentLayout;
+  /** Internal load-time default captured once and mirrored into worker mode. */
+  defaultCurrentDateMs?: number;
 }
 
 // ===== Image preloading =====
@@ -756,13 +994,6 @@ interface ImagePair {
    *  crop, so the decode must prefer the raster (the crop math needs the
    *  bitmap's native pixel grid; an SVG vector original has none). */
   hasCrop?: boolean;
-}
-
-/** Normalize the `currentDate` render option (Date | epoch-ms | undefined) to
- *  epoch milliseconds. Undefined ⇒ the real current time (§17.16.4.1 DATE/TIME). */
-function resolveCurrentDateMs(currentDate: Date | number | undefined): number {
-  if (currentDate == null) return Date.now();
-  return typeof currentDate === 'number' ? currentDate : currentDate.getTime();
 }
 
 /** Returns a stable map key for an (imagePath, colorReplaceFrom, duotone)
@@ -1148,31 +1379,6 @@ export async function preloadImages(
  */
 const renderTokens = new WeakMap<HTMLCanvasElement | OffscreenCanvas, number>();
 
-/** Async font resolution is document-scoped runtime state, not parser output.
- * Keeping it in a WeakMap avoids mutating the public parsed model while both
- * main-thread and worker renderers consume the same explicit document key. */
-const resolvedLocalFontsByDocument = new WeakMap<
-  DocxDocumentModel,
-  Readonly<Record<string, ResolvedLocalFontMetric>>
->();
-
-export function setResolvedLocalFonts(
-  doc: DocxDocumentModel,
-  metrics: Readonly<Record<string, ResolvedLocalFontMetric>>,
-): void {
-  resolvedLocalFontsByDocument.set(doc, metrics);
-}
-
-export function clearResolvedLocalFonts(doc: DocxDocumentModel): void {
-  resolvedLocalFontsByDocument.delete(doc);
-}
-
-function resolvedLocalFontsFor(
-  doc: DocxDocumentModel,
-): Readonly<Record<string, ResolvedLocalFontMetric>> {
-  return resolvedLocalFontsByDocument.get(doc) ?? {};
-}
-
 /** True when a section flows VERTICALLY (glyphs stack top→bottom, lines advance
  *  across the page). `<w:sectPr><w:textDirection>` uses the TRANSITIONAL
  *  ST_TextDirection enum (ECMA-376 Part 4 §14.11.7; Word writes these, not the
@@ -1411,69 +1617,6 @@ export function physicalPageSizeForPage(
     : { widthPt: g.pageWidth, heightPt: g.pageHeight };
 }
 
-/**
- * RB7: paint a placeholder page for a document whose body part failed to parse.
- * A neutral card, a warning glyph, a heading, and the part-tagged error wrapped
- * to a few lines. Coordinates are in CSS px (the ctx is already dpr-scaled by the
- * caller). Only ever called for a document carrying `parseError`.
- */
-function drawParseErrorPlaceholder(
-  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
-  widthPx: number,
-  heightPx: number,
-  message: string,
-): void {
-  ctx.save();
-  // The white page fill is already painted by the caller; add a dashed frame.
-  const pad = Math.max(24, Math.min(widthPx, heightPx) * 0.06);
-  ctx.strokeStyle = '#c8ccd2';
-  ctx.lineWidth = Math.max(1, Math.min(widthPx, heightPx) * 0.003);
-  ctx.setLineDash([ctx.lineWidth * 6, ctx.lineWidth * 5]);
-  ctx.strokeRect(pad, pad, widthPx - pad * 2, heightPx - pad * 2);
-  ctx.setLineDash([]);
-
-  const cx = widthPx / 2;
-  const base = Math.min(widthPx, heightPx);
-
-  const glyph = Math.max(24, base * 0.09);
-  ctx.fillStyle = '#b23b3b';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.font = `${glyph}px sans-serif`;
-  ctx.fillText('⚠', cx, heightPx * 0.34);
-
-  const headSize = Math.max(13, base * 0.032);
-  ctx.fillStyle = '#333333';
-  ctx.font = `600 ${headSize}px sans-serif`;
-  ctx.fillText('This document could not be displayed', cx, heightPx * 0.44);
-
-  const detailSize = Math.max(10, base * 0.02);
-  ctx.fillStyle = '#666666';
-  ctx.font = `${detailSize}px sans-serif`;
-  const maxLineWidth = widthPx - pad * 4;
-  const words = message.split(/\s+/);
-  const lines: string[] = [];
-  let line = '';
-  for (const word of words) {
-    const candidate = line ? `${line} ${word}` : word;
-    if (ctx.measureText(candidate).width > maxLineWidth && line) {
-      lines.push(line);
-      line = word;
-    } else {
-      line = candidate;
-    }
-    if (lines.length >= 4) break;
-  }
-  if (line && lines.length < 4) lines.push(line);
-  const lineHeight = detailSize * 1.4;
-  let y = heightPx * 0.5 + lineHeight;
-  for (const l of lines.slice(0, 4)) {
-    ctx.fillText(l, cx, y);
-    y += lineHeight;
-  }
-  ctx.restore();
-}
-
 export async function renderDocumentToCanvas(
   doc: DocxDocumentModel,
   canvas: HTMLCanvasElement | OffscreenCanvas,
@@ -1505,6 +1648,12 @@ async function renderDocumentToCanvasLeased(
   pageIndex: number,
   opts: RenderDocumentOptions = {},
 ): Promise<void> {
+  const layoutServices = opts.layoutServices ?? createLayoutServices(doc, {
+    measureContext: canvas.getContext('2d') as
+      | CanvasRenderingContext2D
+      | OffscreenCanvasRenderingContext2D
+      | null,
+  });
   // Cancellation guard. renderDocumentToCanvas is async (it awaits image decode
   // via preloadImages), so rapid page navigation can start a newer render of the
   // SAME canvas before this one finishes. Both clear the canvas (`canvas.width =
@@ -1530,7 +1679,11 @@ async function renderDocumentToCanvasLeased(
   // get `doc` unchanged (referential identity ⇒ byte-identical). Text direction
   // is PER-SECTION (issue #1000), so the `vertical` flag is resolved per PAGE
   // below, after the stamped page frame is merged.
-  const resolvedLocalFonts = resolvedLocalFontsFor(doc);
+  const resolvedLocalFonts = layoutServices.text.localMetrics;
+  const layoutOptions = normalizeLayoutOptions(
+    opts.currentDate,
+    opts.defaultCurrentDateMs ?? Date.now(),
+  );
   const layoutDoc = verticalLayoutDoc(doc);
   const layoutSettings = resolveDocumentLayoutSettings(layoutDoc);
   const kinsoku = layoutSettings.kinsoku;
@@ -1541,6 +1694,8 @@ async function renderDocumentToCanvasLeased(
     layoutSettings,
     layoutDoc.footnotes ?? [],
     resolvedLocalFonts,
+    layoutServices,
+    layoutOptions,
   );
   const totalPages = Math.max(opts.totalPages ?? pages.length, pages.length);
   const elements = pages[pageIndex] ?? pages[0] ?? [];
@@ -1626,7 +1781,9 @@ async function renderDocumentToCanvasLeased(
   // short-circuits BEFORE the vertical page rotation below: a degraded page has no
   // logical flow to rotate, and the placeholder is laid out in physical space.
   if (doc.parseError != null) {
-    drawParseErrorPlaceholder(ctx, cssWidth, cssHeight, doc.parseError);
+    const errorLayout = opts.retainedLayout;
+    if (!errorLayout) throw new Error('A degraded document requires a prebuilt retained error layout');
+    await paintRetainedLayoutPage(errorLayout, 0, canvas, { scale, dpr: effectiveDpr });
     return;
   }
 
@@ -1706,6 +1863,7 @@ async function renderDocumentToCanvasLeased(
     docEastAsian: layoutSettings.documentHasEastAsianText,
     fontFamilyClasses: fontClassesWithPitches(doc.fontFamilyClasses, doc.fontFamilyPitches),
     resolvedLocalFonts,
+    layoutServices,
     kinsoku,
     // §17.15.1.25 — automatic tab interval, resolved once and threaded like
     // `kinsoku` so the measure and draw passes agree.
@@ -1718,7 +1876,7 @@ async function renderDocumentToCanvasLeased(
     onTextRun: opts.onTextRun,
     showTrackChanges: opts.showTrackChanges ?? true,
     // §17.16.4.1 — the instant DATE/TIME fields format against (default real time).
-    currentDateMs: resolveCurrentDateMs(opts.currentDate),
+    currentDateMs: layoutOptions.currentDateMs,
     noteNumbers,
     // ECMA-376 §17.6.20 — the frame-level vertical flag. On a tbRl-family page
     // the glyph-draw path counter-rotates upright (CJK) glyphs so they stand up
@@ -2337,6 +2495,9 @@ export function computePages(
   resolvedLayoutSettings?: DocumentLayoutSettings,
   /** Exact local faces resolved before pagination; absent in pure unit callers. */
   resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>> = {},
+  /** Instance-scoped resources; omitted by legacy pure unit callers. */
+  layoutServices?: LayoutServices,
+  layoutOptions?: LayoutOptions,
 ): PaginatedBodyElement[][] {
   // ECMA-376 §17.6.11: the body is inset from each page edge by the margin's MAGNITUDE
   // (a negative margin measures the body |margin| from the edge and overlaps the
@@ -2368,6 +2529,8 @@ export function computePages(
     fontFamilyClasses,
     documentSettings,
     resolvedLocalFonts,
+    layoutServices,
+    layoutOptions,
   );
   // ECMA-376 §17.6.20 + §17.4.80 (issue #988 batch-3 adjudication ④): in a
   // vertical (tbRl) section a block table is an UPRIGHT block: its cells lay
@@ -4376,6 +4539,8 @@ function paginateWithHeaderFooterReserve(
   layoutSettings: DocumentLayoutSettings,
   footnotes: DocNote[],
   resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>> = {},
+  layoutServices?: LayoutServices,
+  layoutOptions?: LayoutOptions,
 ): PaginatedBodyElement[][] {
   // §17.15.1.25 — resolve once here so both pagination passes and the
   // reserve-measure state share the document's automatic tab interval.
@@ -4391,6 +4556,8 @@ function paginateWithHeaderFooterReserve(
     doc.settings,
     layoutSettings,
     resolvedLocalFonts,
+    layoutServices,
+    layoutOptions,
   );
   // ECMA-376 §17.6.20 + §17.10.1 (issue #988): a vertical (tbRl) section lays its
   // header/footer out HORIZONTALLY in physical space with NO body reserve (see the
@@ -4417,6 +4584,8 @@ function paginateWithHeaderFooterReserve(
     fontFamilyClasses,
     layoutSettings,
     resolvedLocalFonts,
+    layoutServices,
+    layoutOptions,
   );
   // Issue #1000 — a horizontal page's header/footer must be measured against its
   // OWN frame: in a vertical-body mixed document the body-level `measure` is the
@@ -4432,6 +4601,8 @@ function paginateWithHeaderFooterReserve(
           fontFamilyClasses,
           layoutSettings,
           resolvedLocalFonts,
+          layoutServices,
+          layoutOptions,
         );
       }
     : (): RenderState => measure;
@@ -4455,6 +4626,8 @@ function paginateWithHeaderFooterReserve(
     doc.settings,
     layoutSettings,
     resolvedLocalFonts,
+    layoutServices,
+    layoutOptions,
   );
 }
 
@@ -4476,9 +4649,14 @@ function paginateWithHeaderFooterReserve(
  *  measure-time and paint-time text metrics are identical), where the old
  *  recompute path would at least have re-wrapped the within-page text under the
  *  late-loaded fonts. */
-export function paginateDocument(doc: DocxDocumentModel): PaginatedBodyElement[][] {
+export function paginateDocument(
+  doc: DocxDocumentModel,
+  services: LayoutServices = createLayoutServices(doc),
+  options: LayoutOptions = normalizeLayoutOptions(undefined, Date.now()),
+): PaginatedBodyElement[][] {
+  const normalizedDoc = normalizeInternalDocumentModel(doc).document;
   const ctx = new OffscreenCanvas(1, 1).getContext('2d');
-  if (!ctx) return [doc.body];
+  if (!ctx) return [normalizedDoc.body];
   // ECMA-376 §17.6.20 — a vertical (tbRl) section is laid out in the SWAPPED
   // logical geometry (see `verticalLayoutDoc`), so pagination — which stamps each
   // page's `sectionGeom` — must run on the swapped section. `renderDocumentToCanvas`
@@ -4486,8 +4664,8 @@ export function paginateDocument(doc: DocxDocumentModel): PaginatedBodyElement[]
   // the swapped doc here keeps the two passes consistent whether the pages are
   // prebuilt (this path) or paginated inline. Horizontal docs are unchanged
   // (referential identity).
-  const resolvedLocalFonts = resolvedLocalFontsFor(doc);
-  const layoutDoc = verticalLayoutDoc(doc);
+  const resolvedLocalFonts = services.text.localMetrics;
+  const layoutDoc = verticalLayoutDoc(normalizedDoc);
   const layoutSettings = resolveDocumentLayoutSettings(layoutDoc);
   return paginateWithHeaderFooterReserve(
     layoutDoc,
@@ -4496,6 +4674,8 @@ export function paginateDocument(doc: DocxDocumentModel): PaginatedBodyElement[]
     layoutSettings,
     layoutDoc.footnotes ?? [],
     resolvedLocalFonts,
+    services,
+    options,
   );
 }
 
@@ -4518,10 +4698,14 @@ export function paginateDocument(doc: DocxDocumentModel): PaginatedBodyElement[]
  * the page top, and each `PlacedFragment.columnIndex` locates its fragment within those
  * columns.
  */
-export function layoutDocument(doc: DocxDocumentModel): DocumentLayout {
+export function layoutDocument(
+  doc: DocxDocumentModel,
+  services: LayoutServices = createLayoutServices(doc),
+  options: LayoutOptions = normalizeLayoutOptions(undefined, Date.now()),
+): DocumentLayout {
   const ctx = new OffscreenCanvas(1, 1).getContext('2d');
   if (!ctx) return Object.freeze({ pages: Object.freeze([]) });
-  const resolvedLocalFonts = resolvedLocalFontsFor(doc);
+  const resolvedLocalFonts = services.text.localMetrics;
   const layoutDoc = verticalLayoutDoc(doc);
   const layoutSettings = resolveDocumentLayoutSettings(layoutDoc);
   const pages = paginateWithHeaderFooterReserve(
@@ -4531,6 +4715,8 @@ export function layoutDocument(doc: DocxDocumentModel): DocumentLayout {
     layoutSettings,
     layoutDoc.footnotes ?? [],
     resolvedLocalFonts,
+    services,
+    options,
   );
   const layoutPages: LayoutPage[] = pages.map((elements, pageIndex) => {
     const firstEl = elements[0] as PaginatedBodyElement | undefined;
@@ -4592,6 +4778,8 @@ function buildMeasureState(
   fontFamilyClasses: Record<string, string> = {},
   layoutSettings: DocumentLayoutSettings,
   resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>> = {},
+  layoutServices?: LayoutServices,
+  layoutOptions?: LayoutOptions,
 ): RenderState {
   const sectionLayout = resolveSectionLayoutContext(layoutSettings, section);
   return {
@@ -4636,6 +4824,8 @@ function buildMeasureState(
     docEastAsian: layoutSettings.documentHasEastAsianText,
     fontFamilyClasses,
     resolvedLocalFonts,
+    layoutServices,
+    currentDateMs: layoutOptions?.currentDateMs,
     kinsoku: layoutSettings.kinsoku,
     defaultTabPt: layoutSettings.defaultTabPt,
     characterSpacingControl: layoutSettings.characterSpacingControl,
@@ -4689,6 +4879,7 @@ function paragraphMeasurementEnvironment(
     | 'verticalAllRotated'
     | 'docEastAsian'
     | 'resolvedLocalFonts'
+    | 'layoutServices'
   >,
 ): ParagraphMeasurementEnvironment {
   return {
@@ -4706,6 +4897,7 @@ function paragraphMeasurementEnvironment(
     verticalCJK: state.verticalCJK && !state.verticalAllRotated,
     documentHasEastAsianText: state.docEastAsian,
     resolvedLocalFonts: state.resolvedLocalFonts,
+    layoutServices: state.layoutServices,
   };
 }
 
@@ -5649,42 +5841,112 @@ function cellMinContentPt(cell: DocTableCell, table: DocTable, state: RenderStat
   const { ctx, fontFamilyClasses } = state;
   let maxTokenPt = 0;
   const scanPara = (para: DocParagraph): void => {
-    for (const run of para.runs) {
-      if (run.type !== 'text') continue;
-      const t = run as unknown as DocxTextRun & { type: 'text' };
-      if (!t.text) continue;
-      // Resolve the complex-script (cs) axis the same way `buildSegments` does
-      // (ECMA-376 §17.3.2.3/§17.3.2.17/§17.3.2.18): a run forcing cs (w:rtl or
-      // the §17.3.2.7 <w:cs/> toggle) measures with the cs bold/italic/size/
-      // family. SIZE (szCs) and FAMILY (rFonts@cs) fall back to their Latin
-      // counterpart when absent, but BOLD (bCs) and ITALIC (iCs) are INDEPENDENT
-      // toggles that default OFF (issue #937), so an absent bCs/iCs must NOT
-      // inherit the Latin `w:b`/`w:i` — mirror buildSegments exactly or the
-      // measured min-content width would drift from the painted glyphs. We pick
-      // the cs axis for the min-content estimate when the run forces cs so wide
-      // Arabic/Hebrew tokens reserve enough column width; otherwise the Latin
-      // axis. NOTE rFonts@cs alone is just a font SLOT — it must not force cs
-      // (a Latin heading whose style defines cstheme would wrongly take szCs).
-      const forceCs = t.rtl === true || t.cs === true;
-      const effBold = forceCs ? (t.boldCs ?? false) : t.bold;
-      const effItalic = forceCs ? (t.italicCs ?? false) : t.italic;
-      const effFontSize = forceCs ? (t.fontSizeCs ?? t.fontSize) : t.fontSize;
-      const effFontFamily = forceCs ? (t.fontFamilyCs ?? t.fontFamily) : t.fontFamily;
-      // Measure in pt-space (font size in pt, scale 1) so the result composes
-      // directly with the pt-based column math.
-      ctx.font = buildFont(effBold, effItalic, effFontSize, effFontFamily, fontFamilyClasses);
-      // Non-breakable tokens are the same units the line layout treats as
-      // atomic (UAX#14 has no break inside a word or between a digit and an
-      // adjacent hyphen/period). CJK breaks per-glyph, so its min is one glyph.
-      for (const piece of t.text.split('\t')) {
-        for (const token of splitTextForLayout(piece)) {
-          const trimmed = token.replace(/\s+$/u, '');
-          if (!trimmed) continue;
-          const w = hasCJKBreakOpportunity(trimmed)
-            ? Math.max(...[...trimmed].map((ch) => ctx.measureText(ch).width))
-            : ctx.measureText(trimmed).width;
-          if (w > maxTokenPt) maxTokenPt = w;
+    // Build the same scalar-routed segments as ordinary line layout. This keeps
+    // hAnsi/theme/charset/CS selection and registered Canvas routes in one
+    // service instead of reconstructing a legacy family in table geometry.
+    const segments = buildSegments(para.runs, segmentEnvironmentOf(state));
+    for (let segmentIndex = 0; segmentIndex < segments.length; segmentIndex++) {
+      const segment = segments[segmentIndex];
+      if (!('text' in segment) || !segment.text) continue;
+      // `joinPrev` is a LINE-BREAK contract, not a font-routing contract. It can
+      // arise from a cross-slot grapheme, UAX #14 no-break pairs, fitText, or a
+      // formatting seam. Keep every piece with its own immutable shape request
+      // and sum those piece widths when the group forms one min-content atom.
+      // Re-shaping concatenated text with the first piece would incorrectly make
+      // that first font authoritative for differently formatted continuations.
+      const pieces: Array<{ segment: LayoutTextSeg; start: number; end: number }> = [];
+      let joinedText = '';
+      const appendPiece = (piece: LayoutTextSeg): void => {
+        const start = joinedText.length;
+        joinedText += piece.text;
+        pieces.push({ segment: piece, start, end: joinedText.length });
+      };
+      appendPiece(segment as LayoutTextSeg);
+      while (segmentIndex + 1 < segments.length) {
+        const following = segments[segmentIndex + 1];
+        if (!('text' in following) || following.joinPrev !== true) break;
+        appendPiece(following as LayoutTextSeg);
+        segmentIndex += 1;
+      }
+      const measureRange = (start: number, end: number): number => {
+        let width = 0;
+        for (const piece of pieces) {
+          const overlapStart = Math.max(start, piece.start);
+          const overlapEnd = Math.min(end, piece.end);
+          if (overlapStart >= overlapEnd) continue;
+          const text = joinedText.slice(overlapStart, overlapEnd);
+          const candidate = { ...piece.segment, text };
+          if (candidate.textLayoutService && candidate.textShapeRequest) {
+            const shaped = candidate.textLayoutService.shape({
+              ...candidate.textShapeRequest,
+              text,
+              fontSizePt: calcEffectiveFontPx(candidate, 1),
+              measure: true,
+            });
+            width += segAdvanceWidth(candidate, shaped.advancePt, 0, 1);
+          } else {
+            ctx.font = buildFont(
+              candidate.bold,
+              candidate.italic,
+              calcEffectiveFontPx(candidate, 1),
+              candidate.fontFamily,
+              fontFamilyClasses,
+              candidate.fontRoute,
+            );
+            width += segAdvanceWidth(candidate, ctx.measureText(text).width, 0, 1);
+          }
         }
+        return width;
+      };
+      let tokenStart = 0;
+      for (const token of splitTextForLayout(joinedText)) {
+        const trimmed = token.replace(/\s+$/u, '');
+        const trimmedStart = tokenStart;
+        const trimmedEnd = tokenStart + trimmed.length;
+        tokenStart += token.length;
+        if (!trimmed) continue;
+        let width: number;
+        if (hasCJKBreakOpportunity(trimmed)) {
+          // CJK contributes one legal grapheme unit, not one Unicode scalar:
+          // combining marks and supplementary characters stay attached exactly
+          // as they do in emergency line wrapping. Boundary discovery is route-
+          // independent; measurement below still dispatches every slice through
+          // the service request retained by its originating segment.
+          const boundaries = [0, ...graphemeClusterOffsets(trimmed), trimmed.length];
+          const clusters: Array<{ text: string; start: number; end: number }> = [];
+          for (let i = 1; i < boundaries.length; i++) {
+            clusters.push({
+              text: trimmed.slice(boundaries[i - 1], boundaries[i]),
+              start: trimmedStart + boundaries[i - 1],
+              end: trimmedStart + boundaries[i],
+            });
+          }
+          const rules = state.kinsoku ?? DEFAULT_KINSOKU_RULES;
+          const atoms: Array<{ text: string; start: number; end: number }> = [];
+          let atom = clusters[0];
+          for (let i = 1; i < clusters.length; i++) {
+            const previous = [...atom.text].at(-1)?.codePointAt(0);
+            const next = clusters[i].text.codePointAt(0);
+            const breakAllowed = previous !== undefined
+              && next !== undefined
+              && !rules.lineEndForbidden.has(previous)
+              && !rules.lineStartForbidden.has(next);
+            if (breakAllowed) {
+              atoms.push(atom);
+              atom = clusters[i];
+            } else {
+              atom = { text: atom.text + clusters[i].text, start: atom.start, end: clusters[i].end };
+            }
+          }
+          if (atom) atoms.push(atom);
+          width = 0;
+          for (const unbreakable of atoms) {
+            width = Math.max(width, measureRange(unbreakable.start, unbreakable.end));
+          }
+        } else {
+          width = measureRange(trimmedStart, trimmedEnd);
+        }
+        if (width > maxTokenPt) maxTokenPt = width;
       }
     }
   };
@@ -7851,7 +8113,7 @@ function renderEmptyMarkParagraph(
   const markRectTop = state.y;
   const emptyH = paragraphMarkLineHeight(
     para, scale, grid, paraHasRuby, state.docEastAsian, ctx, state.fontFamilyClasses,
-    para.lineSpacing, state.resolvedLocalFonts,
+    para.lineSpacing, state.resolvedLocalFonts, state.layoutServices?.text,
   );
   if (para.shading && !dryRun) {
     ctx.fillStyle = `#${para.shading}`;
@@ -7913,6 +8175,7 @@ function frameAnchorLineHeightPx(
       state.fontFamilyClasses,
       p.lineSpacing,
       state.resolvedLocalFonts,
+      state.layoutServices?.text,
     );
   }
   const fp = frameEl as unknown as DocParagraph;
@@ -7926,6 +8189,7 @@ function frameAnchorLineHeightPx(
     state.fontFamilyClasses,
     fp.lineSpacing,
     state.resolvedLocalFonts,
+    state.layoutServices?.text,
   );
 }
 
@@ -8075,6 +8339,7 @@ interface NumberingMarkerLayout {
   /** Resolved marker ink width in px. Uses the decoded picture-bullet width when
    *  present, otherwise the marker glyph measurement in its resolved font. */
   markerWidthPx: number;
+  markerTextLayout: NumberingMarkerTextLayout | null;
   hasMarker: boolean;
 }
 
@@ -8104,6 +8369,7 @@ function resolveNumberingMarker(
   // firstLineX); −markerW/2 = centre. Set in the numbering block below.
   let markerJcShiftPx = 0;
   let markerWidthPx = 0;
+  let markerTextLayout: NumberingMarkerTextLayout | null = null;
   if (para.numbering) {
     numMarker = para.numbering.text;
     numTab = para.numbering.tab * scale;
@@ -8122,12 +8388,32 @@ function resolveNumberingMarker(
     // Marker glyph width (px) with its RESOLVED font (§17.3.2.26 + §17.9.6); the
     // picture bullet's own width when present. Needed for both the suff≠tab abut
     // and the suff=tab overrun check below, so measure once up front.
+    const markerShapeInput = numberingMarkerShapeInput(
+      para.numbering,
+      getDefaultFontSize(para),
+    );
     let markerW: number;
     if (picBullet) {
       markerW = picBullet.w;
     } else {
-      ctx.font = buildFont(false, false, getDefaultFontSize(para) * scale, markerFontFamily(para.numbering), fontFamilyClasses);
-      markerW = ctx.measureText(markerDisplayText(para.numbering)).width;
+      markerTextLayout = shapeNumberingMarkerText(
+        markerShapeInput,
+        markerDisplayText(para.numbering),
+        scale,
+        state.layoutServices?.text,
+      );
+      if (markerTextLayout) {
+        markerW = markerTextLayout.shape.advancePt;
+      } else {
+        // Only synthetic states that bypass the document service reach this
+        // compatibility branch; production pagination and paint always share
+        // the immutable service instance.
+        ctx.font = buildFont(
+          false, false, getDefaultFontSize(para) * scale,
+          para.numbering.fontFamily ?? null, fontFamilyClasses,
+        );
+        markerW = ctx.measureText(markerDisplayText(para.numbering)).width;
+      }
     }
     markerWidthPx = markerW;
     // §17.9.8 lvlJc: shift the marker so its left/right/centre aligns at
@@ -8137,7 +8423,14 @@ function resolveNumberingMarker(
     markerJcShiftPx = lvlJc === 'right' ? -markerW : lvlJc === 'center' ? -markerW / 2 : 0;
     const markerEndFromIndent = indFirst + markerJcShiftPx + markerW;
     if (suff !== 'tab') {
-      const spaceW = suff === 'space' ? ctx.measureText(' ').width : 0;
+      const spaceW = suff === 'space'
+        ? shapeNumberingMarkerText(
+            markerShapeInput,
+            ' ',
+            scale,
+            state.layoutServices?.text,
+          )?.shape.advancePt ?? ctx.measureText(' ').width
+        : 0;
       // body abuts the marker's right edge (+ one space for suff="space").
       numBodyOffset = markerEndFromIndent + spaceW;
     } else {
@@ -8171,7 +8464,15 @@ function resolveNumberingMarker(
   }
   // True when the paragraph has any marker to draw (text glyph OR picture bullet).
   const hasMarker = numMarker !== '' || picBullet !== null;
-  return { numTab, picBullet, numBodyOffset, markerJcShiftPx, markerWidthPx, hasMarker };
+  return {
+    numTab,
+    picBullet,
+    numBodyOffset,
+    markerJcShiftPx,
+    markerWidthPx,
+    markerTextLayout,
+    hasMarker,
+  };
 }
 
 /** Resolved numbering-marker bounds in the paragraph's physical coordinate
@@ -8292,7 +8593,9 @@ function renderParagraph(
   const indFirst = inFrame ? 0 : para.indentFirst * scale;
 
   // Numbering marker layout (§17.9.x): see resolveNumberingMarker.
-  const { numTab, picBullet, numBodyOffset, markerJcShiftPx, markerWidthPx, hasMarker } =
+  const {
+    numTab, picBullet, numBodyOffset, markerJcShiftPx, markerWidthPx, markerTextLayout, hasMarker,
+  } =
     resolveNumberingMarker(para, state, indLeft, indFirst);
 
   const paraX = contentX + indLeft;
@@ -8690,7 +8993,7 @@ function renderParagraph(
   // glyph lands on the box edge, so the painted advance equals measuredWidth by
   // construction. See the gridCharDeltaPx / gridSegDeltaPx header.
   const drawGridDeltaPx = gridCharDeltaPx(grid, scale);
-  const drawCtx: ParagraphLineDrawCtx = { ctx, scale, state, para, dryRun, defaultColor, fontFamilyClasses, contentX, contentW, lines, grid, paraHasRuby, paraX, firstLineX, paraW, indLeft, indFirst, continuesParagraph: lineSlice?.continues === true, baseRtl, hasMarker, markerUsesBodyOffset, numTab, numBodyOffset, markerJcShiftPx, picBullet, isJustified, stretchLastLine, alignEdge, paraNeedsBidi, decimalAutoTabPx, drawGridDeltaPx, canonicalTextScale, lineHForLine };
+  const drawCtx: ParagraphLineDrawCtx = { ctx, scale, state, para, dryRun, defaultColor, fontFamilyClasses, contentX, contentW, lines, grid, paraHasRuby, paraX, firstLineX, paraW, indLeft, indFirst, continuesParagraph: lineSlice?.continues === true, baseRtl, hasMarker, markerUsesBodyOffset, numTab, numBodyOffset, markerJcShiftPx, markerWidthPx, markerTextLayout, picBullet, isJustified, stretchLastLine, alignEdge, paraNeedsBidi, decimalAutoTabPx, drawGridDeltaPx, canonicalTextScale, lineHForLine };
   for (let li = sliceStart; li < paintEnd; li++) {
     drawParagraphLine(li, drawCtx);
   }
@@ -8843,6 +9146,8 @@ interface ParagraphLineDrawCtx {
   numTab: number;
   numBodyOffset: number;
   markerJcShiftPx: number;
+  markerWidthPx: number;
+  markerTextLayout: NumberingMarkerTextLayout | null;
   picBullet: { bmp: DecodedImage; w: number; h: number } | null;
   isJustified: boolean;
   stretchLastLine: boolean;
@@ -8862,7 +9167,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
     ctx, scale, state, para, dryRun, defaultColor, fontFamilyClasses,
     contentX, contentW, lines, grid, paraHasRuby, paraX, firstLineX, paraW, indLeft,
     indFirst, continuesParagraph, baseRtl, hasMarker, markerUsesBodyOffset, numTab, numBodyOffset, markerJcShiftPx,
-    picBullet, isJustified, stretchLastLine, alignEdge, paraNeedsBidi,
+    markerWidthPx, markerTextLayout, picBullet, isJustified, stretchLastLine, alignEdge, paraNeedsBidi,
     decimalAutoTabPx, drawGridDeltaPx, canonicalTextScale, lineHForLine,
   } = c;
     const line = lines[li];
@@ -9092,12 +9397,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
         const left = baseRtl ? x + lineWidth + numTab - w : lineLeft + indFirst + markerJcShiftPx;
         ctx.drawImage(bmp, left, top, w, h);
       } else {
-        const numFontSize = getDefaultFontSize(para) * scale;
-        // Draw the marker with its RESOLVED font (§17.3.2.26 + §17.9.6): the
-        // ascii axis for a Latin number (a decimal "1" → Times → serif), the
-        // eastAsia axis for a CJK marker. Replaces the old hardcoded sans-serif,
-        // which forced every number/bullet sans regardless of the heading's font.
-        ctx.font = buildFont(false, false, numFontSize, markerFontFamily(para.numbering!), fontFamilyClasses);
+        const fallbackFontSize = getDefaultFontSize(para) * scale;
         // Marker ink (§17.9.24 + §17.3.1.29): the level rPr's own color wins;
         // absent that, Word layers the level rPr over the PARAGRAPH MARK's run
         // properties, so the mark's resolved color tints the bullet/number;
@@ -9120,9 +9420,17 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           const prevDir = ctx.direction;
           ctx.textAlign = 'left';
           ctx.direction = 'rtl';
-          const markerText = markerDisplayText(para.numbering!);
-          const markerW = ctx.measureText(markerText).width;
-          ctx.fillText(markerText, x + lineWidth + numTab - markerW, baseline);
+          const markerW = markerTextLayout?.shape.advancePt ?? markerWidthPx;
+          const markerX = x + lineWidth + numTab - markerW;
+          if (markerTextLayout) {
+            paintNumberingMarkerText(ctx, markerTextLayout, markerX, baseline);
+          } else {
+            ctx.font = buildFont(
+              false, false, fallbackFontSize,
+              para.numbering!.fontFamily ?? null, fontFamilyClasses,
+            );
+            ctx.fillText(markerDisplayText(para.numbering!), markerX, baseline);
+          }
           ctx.textAlign = prevAlign;
           ctx.direction = prevDir;
         } else {
@@ -9132,15 +9440,27 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           // shifted by lvlJc (§17.9.8) so a "right" level period-aligns its right
           // edge at firstLineX. The body was advanced past the marker above
           // (numBodyOffset).
-          const markerText = markerDisplayText(para.numbering!);
           const markerX = lineLeft + indFirst + markerJcShiftPx;
-          if (verticalUpright) {
-            // §17.6.20 (tbRl) — draw the bullet/number upright inside the rotated
-            // page, same per-glyph counter-rotation as body glyphs. A btLr page
-            // takes the plain branch: the marker rides the page rotation too.
-            drawVerticalRun(ctx, markerText, markerX, baseline, numFontSize, 0);
+          if (markerTextLayout) {
+            // §17.6.20 (tbRl) uses the same retained scalar routes; each routed
+            // span advances from the geometry that positioned the marker.
+            paintNumberingMarkerText(
+              ctx,
+              markerTextLayout,
+              markerX,
+              baseline,
+              verticalUpright
+                ? (paintCtx, text, drawX, drawBaseline, fontSizePx) => {
+                    drawVerticalRun(paintCtx, text, drawX, drawBaseline, fontSizePx, 0);
+                  }
+                : undefined,
+            );
           } else {
-            ctx.fillText(markerText, markerX, baseline);
+            ctx.font = buildFont(
+              false, false, fallbackFontSize,
+              para.numbering!.fontFamily ?? null, fontFamilyClasses,
+            );
+            ctx.fillText(markerDisplayText(para.numbering!), markerX, baseline);
           }
         }
         // Restore the default ink: everything after the marker previously ran
@@ -9274,13 +9594,17 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
         continue;
       }
       if ('mathNodes' in seg) {
-        const render = mathRenders.get(seg.mathNodes);
-        if (!dryRun && render) {
+        const resourceKey = seg.mathResourceKey;
+        const metadata = state.layoutServices?.math.resolve(resourceKey);
+        const drawable = metadata?.available === false || !state.layoutServices
+          ? undefined
+          : privateResourceLookupOf<CanvasImageSource>(state.layoutServices)?.resolve(resourceKey);
+        if (!dryRun && metadata && metadata.available !== false && drawable) {
           const emPx = seg.fontSize * scale;
-          const w = render.widthEm * emPx;
-          const h = (render.ascentEm + render.descentEm) * emPx;
-          const top = baseline - render.ascentEm * emPx;
-          ctx.drawImage(render.img, x, top, w, h);
+          const w = metadata.widthEm * emPx;
+          const h = (metadata.ascentEm + metadata.descentEm) * emPx;
+          const top = baseline - metadata.ascentEm * emPx;
+          ctx.drawImage(drawable, x, top, w, h);
         } else if (!dryRun && seg.fallbackText) {
           ctx.font = buildFont(false, false, seg.fontSize * scale, null, fontFamilyClasses);
           ctx.fillStyle = seg.color ?? defaultColor;
@@ -9329,7 +9653,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
             : s.vertAlign === 'sub'
               ? s.fontSize * scale * 0.15
               : 0) + positionOffset;
-        ctx.font = buildFont(s.bold, s.italic, glyphSizePx, s.fontFamily, fontFamilyClasses);
+        ctx.font = buildFont(s.bold, s.italic, glyphSizePx, s.fontFamily, fontFamilyClasses, s.fontRoute);
 
         // ECMA-376 §17.3.2.43 `<w:w>` horizontal glyph scale (1 = 100%) and
         // §17.3.2.35 `<w:spacing>` per-code-point character pitch in px. Both were
@@ -9804,7 +10128,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           // Overlay consumers receive paint-space geometry and must see the
           // corresponding paint-size font even though the glyphs themselves were
           // shaped at scale 1 and mapped through the local viewport transform.
-          ctx.font = buildFont(s.bold, s.italic, effSizePx, s.fontFamily, fontFamilyClasses);
+          ctx.font = buildFont(s.bold, s.italic, effSizePx, s.fontFamily, fontFamilyClasses, s.fontRoute);
         }
         // §17.3.2.19 — restore the inherited font-kerning now the run's glyphs are
         // painted (the following ruby / emphasis-mark draws are separate glyphs at
@@ -9814,7 +10138,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
         // Ruby annotation: small text centered above the base glyphs.
         if (s.ruby) {
           const rubySizePx = s.ruby.fontSizePt * scale;
-          const rubyFont = buildFont(s.bold, s.italic, rubySizePx, s.fontFamily, fontFamilyClasses);
+          const rubyFont = buildFont(s.bold, s.italic, rubySizePx, s.fontFamily, fontFamilyClasses, s.fontRoute);
           ctx.save();
           ctx.font = rubyFont;
           const rubyW = ctx.measureText(s.ruby.text).width;
@@ -10968,12 +11292,14 @@ export function measureShapeTextAutoFitHeight(
       ? segmentEastAsiaFloorSingleLinePx(tallest, fontPx, tallestEa)
       : intendedSingleLinePx(eaFamily, fontPx, tallestEa);
     const measureFamily = eaIntended > asciiIntended ? eaFamily : family;
+    const measureRoute = eaIntended > asciiIntended ? tallest?.eaFloorRoute : tallest?.fontRoute;
     ctx.font = buildFont(
       tallest?.bold ?? b.bold ?? false,
       tallest?.italic ?? b.italic ?? false,
       fontPx,
       measureFamily,
       fontFamilyClasses,
+      measureRoute,
     );
     const m = ctx.measureText('Mg');
     const rawAsc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? fontPx * 0.8;
@@ -11317,6 +11643,8 @@ export function renderShapeText(
     // only when the measured segment is East Asian. `eastAsian` above stays
     // line-wide (it gates the §17.6.5 grid cell rounding).
     metricEastAsian = eastAsian,
+    familyRoute?: CanvasFontRoute,
+    familyEaRoute?: CanvasFontRoute,
   ): { lineH: number; baselineOffset: number } => {
     // Floor the single-line box by the TALLEST design line among the run's
     // declared faces (ascii §17.3.2.26 + eastAsia). The common Japanese encoding
@@ -11343,7 +11671,8 @@ export function renderShapeText(
     // both untabled) keep measuring ascii, so an all-untabled line is byte-for-
     // byte unchanged from before this change.
     const measureFamily = eaIntended > asciiIntended ? (familyEa ?? null) : (family ?? null);
-    ctx.font = buildFont(bold, italic, fontPx, measureFamily, fontFamilyClasses);
+    const measureRoute = eaIntended > asciiIntended ? familyEaRoute : familyRoute;
+    ctx.font = buildFont(bold, italic, fontPx, measureFamily, fontFamilyClasses, measureRoute);
     const m = ctx.measureText('Mg');
     const rawAsc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? fontPx * 0.8;
     const rawDesc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? fontPx * 0.2;
@@ -11450,6 +11779,8 @@ export function renderShapeText(
       // METRIC hint = tallest segment's own script (Latin tallest keeps its
       // Canvas box on a CJK-bearing line); grid rounding stays line-wide.
       tallestEa,
+      tallest?.fontRoute,
+      tallest?.eaFloorRoute,
     );
   };
 
@@ -11782,13 +12113,34 @@ export function renderShapeText(
               : block.color ?? block.runs?.find((r) => r.color)?.color ?? null);
           ctx.fillStyle = markerColor ? `#${markerColor}` : defaultColor;
           const markerText = markerDisplayText(block.numbering);
-          const markerW = ctx.measureText(markerText).width;
+          // A2's narrow text-box migration: snapshot private parser facts at the
+          // renderer boundary, then use the same retained service spans for both
+          // marker geometry and paint. The boundary checker recognizes only this
+          // exact sequence so unrelated renderShapeText changes remain frozen.
+          const markerShapeInput = numberingMarkerShapeInput(block.numbering, block.fontSizePt);
+          const markerTextLayout = shapeNumberingMarkerText(
+            markerShapeInput,
+            markerText,
+            scale,
+            effState.layoutServices?.text,
+          );
+          const markerW = markerTextLayout?.shape.advancePt ?? ctx.measureText(markerText).width;
           const lvlJc = block.numbering.jc || 'left';
           const markerShift = lvlJc === 'right' ? -markerW : lvlJc === 'center' ? -markerW / 2 : 0;
           const markerX = innerX + ind.leftPx + ind.markerFirstPx + markerShift;
-          if (eaVertUpright) {
-            // §20.1.10.83 eaVert — the list marker stands upright too (mirrors the
-            // body vertical marker path), advancing down the column like its cell.
+          if (markerTextLayout) {
+            paintNumberingMarkerText(
+              ctx,
+              markerTextLayout,
+              markerX,
+              baseline,
+              eaVertUpright
+                ? (paintCtx, text, drawX, drawBaseline, fontSizePx) => {
+                    drawVerticalRun(paintCtx, text, drawX, drawBaseline, fontSizePx, 0);
+                  }
+                : undefined,
+            );
+          } else if (eaVertUpright) {
             drawVerticalRun(ctx, markerText, markerX, baseline, block.fontSizePt * scale, 0);
           } else {
             ctx.fillText(markerText, markerX, baseline);
@@ -11868,7 +12220,7 @@ export function renderShapeText(
             : s.vertAlign === 'sub'
               ? s.fontSize * scale * 0.15
               : 0;
-          ctx.font = buildFont(s.bold, s.italic, effSizePx, s.fontFamily, fontFamilyClasses);
+          ctx.font = buildFont(s.bold, s.italic, effSizePx, s.fontFamily, fontFamilyClasses, s.fontRoute);
           // §17.3.2.6: a run's own color wins; otherwise fall to `defaultColor`,
           // which folds the shape's §20.1.4.1.17 fontRef default over the
           // document/theme default (black). A color-less run in a fontRef text
@@ -11931,7 +12283,7 @@ export function renderShapeText(
               const step = natural <= spanAlong ? spanAlong / rubyChars.length : rubyPx;
               // ctx.save()/restore() preserves font/textAlign/textBaseline.
               ctx.save();
-              ctx.font = buildFont(s.bold, s.italic, rubyPx, s.fontFamily, fontFamilyClasses);
+              ctx.font = buildFont(s.bold, s.italic, rubyPx, s.fontFamily, fontFamilyClasses, s.fontRoute);
               ctx.textAlign = 'center';
               ctx.textBaseline = 'middle';
               for (let ri = 0; ri < rubyChars.length; ri++) {
@@ -12047,7 +12399,7 @@ export function renderShapeText(
           if (s.ruby) {
             const spanW = s.measuredWidth + internalStretch;
             const rubySizePx = s.ruby.fontSizePt * scale;
-            const rubyFont = buildFont(s.bold, s.italic, rubySizePx, s.fontFamily, fontFamilyClasses);
+            const rubyFont = buildFont(s.bold, s.italic, rubySizePx, s.fontFamily, fontFamilyClasses, s.fontRoute);
             ctx.save();
             ctx.font = rubyFont;
             const rubyW = ctx.measureText(s.ruby.text).width;
@@ -13467,6 +13819,7 @@ function measureCellParagraphWindow(
           state.fontFamilyClasses,
           paragraphContext.lineSpacing,
           state.resolvedLocalFonts,
+          state.layoutServices?.text,
         ),
         totalLines,
       };
@@ -14315,21 +14668,11 @@ function runBordersEqual(a: DocxRunBorder, b: DocxRunBorder): boolean {
   );
 }
 
-/** Resolve the list-marker glyph's font family (ECMA-376 §17.3.2.26 + §17.9.6).
- *  The marker is drawn/measured as a single `fillText`/`measureText`, so it must
- *  be one family. Pick it per the marker's leading code point, exactly like the
- *  body's per-character split ({@link splitByEastAsia}): a CJK marker (e.g. an
- *  ideographic bullet) → the eastAsia axis, anything else (a decimal "1", roman
- *  "i", letter, or "•") → the ascii axis. Realistic markers are single-script, so
- *  the leading code point classifies the whole glyph string. eastAsia falls back
- *  to ascii when absent (older parser output / no eastAsia font). The font CLASS
- *  (serif/sans) is then resolved by `fontFamilyClasses` (fontTable §17.8.3.10),
- *  so e.g. a serif ascii (Times) number renders serif even when the heading's
- *  eastAsia axis is a Gothic (sans). */
+/** Service-less compatibility adapter. It deliberately does not inspect a
+ * leading marker scalar; production body/text-box paths use retained per-scalar
+ * TextLayoutService spans. */
 function markerFontFamily(num: NumberingInfo): string | null {
-  const cp = num.text.codePointAt(0) ?? 0;
-  const ascii = num.fontFamily ?? null;
-  return isCjkBreakChar(cp) ? (num.fontFamilyEastAsia ?? ascii) : ascii;
+  return num.fontFamily ?? null;
 }
 
 /** Marker glyph as it should be drawn/measured. Symbol/Wingdings markers

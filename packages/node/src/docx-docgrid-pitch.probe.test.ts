@@ -148,9 +148,24 @@ function sectPr(opts: { vertical?: boolean; pitchTw?: number; gridType?: string 
  *  page rotated to +x order) for vertical ones. */
 async function measurePitch(bytes: Uint8Array, axis: 'y' | 'x', marker = '国境'): Promise<number> {
   const { parseDocx } = docxMod as { parseDocx: (b: Uint8Array) => Any };
-  const { renderDocumentToCanvas } = rendererMod as Any;
+  const { createLayoutServices, renderDocumentToCanvas } = rendererMod as Any;
   const doc = parseDocx(bytes);
   const canvas = new Canvas(10, 10);
+  const lineHeightRatio = (2257 * 1.3) / 2048;
+  const localMetrics = Object.fromEntries(['Yu Mincho', '游明朝'].flatMap((family) => {
+    const key = family.toLowerCase();
+    const metric = {
+      family: 'serif', requestedFamily: family, weight: 400, style: 'normal',
+      ...(family === '游明朝' ? { lineHeightRatio } : {}),
+      sourceIdentity: 'test-fixture:node-skia-generic-serif',
+      synthesized: false,
+    };
+    return [[key, metric]];
+  }));
+  const layoutServices = createLayoutServices(doc, {
+    localMetrics,
+    measureContext: canvas.getContext('2d'),
+  });
   const pos: number[] = [];
   const rImg = installImageBitmapShim(factory);
   const rOff = installOffscreenCanvasShim(factory);
@@ -161,6 +176,7 @@ async function measurePitch(bytes: Uint8Array, axis: 'y' | 'x', marker = '国境
       onTextRun: (r: Any) => {
         if (String(r.text).includes(marker)) pos.push(axis === 'y' ? r.y : r.x);
       },
+      layoutServices,
     });
   } finally {
     rOff();

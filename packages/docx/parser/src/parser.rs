@@ -347,7 +347,8 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
         })
         .unwrap_or_else(|| "word/fontTable.xml".to_string());
     let font_table_xml = read_zip_string(zip, &font_table_path).unwrap_or_default();
-    let (font_family_classes, font_family_pitches) = parse_font_table(&font_table_xml);
+    let (font_family_classes, font_family_pitches, font_family_charsets) =
+        parse_font_table(&font_table_xml);
     // ECMA-376 §17.8.3.3-.6 — embedded fonts. The `<w:embed*>` r:ids resolve
     // through the fontTable part's OWN relationships (`word/_rels/fontTable.xml.rels`
     // when the part is `word/fontTable.xml`): insert `_rels/` before the filename
@@ -414,6 +415,7 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
         minor_font,
         font_family_classes,
         font_family_pitches,
+        font_family_charsets,
         embedded_fonts,
         revisions,
         comments,
@@ -1032,11 +1034,18 @@ fn find_rel_target(rels_xml: &str, type_suffix: &str) -> Option<String> {
 /// (§17.18.66) is `fixed` (Fixed Width), `variable` (Proportional Width), or
 /// `default` (no pitch information). An omitted `<w:pitch>` is assumed to be
 /// `default`, so only explicitly declared pitch values are added to the map.
-fn parse_font_table(xml: &str) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
+fn parse_font_table(
+    xml: &str,
+) -> (
+    BTreeMap<String, String>,
+    BTreeMap<String, String>,
+    BTreeMap<String, String>,
+) {
     let mut classes = BTreeMap::new();
     let mut pitches = BTreeMap::new();
+    let mut charsets = BTreeMap::new();
     let Ok(doc) = parse_guarded(xml) else {
-        return (classes, pitches);
+        return (classes, pitches, charsets);
     };
     for font in doc.root_element().descendants().filter(|n| {
         n.is_element() && n.tag_name().name() == "font" && is_w_ns(n.tag_name().namespace())
@@ -1085,8 +1094,26 @@ fn parse_font_table(xml: &str) -> (BTreeMap<String, String>, BTreeMap<String, St
         if let Some(p) = pitch {
             pitches.insert(name.to_string(), p.to_string());
         }
+        let charset = font
+            .children()
+            .find(|n| {
+                n.is_element()
+                    && n.tag_name().name() == "charset"
+                    && is_w_ns(n.tag_name().namespace())
+            })
+            .and_then(|n| {
+                attr_ns(
+                    &n,
+                    wordprocessingml::TRANSITIONAL,
+                    wordprocessingml::STRICT,
+                    "val",
+                )
+            });
+        if let Some(value) = charset {
+            charsets.insert(name.to_string(), value.to_uppercase());
+        }
     }
-    (classes, pitches)
+    (classes, pitches, charsets)
 }
 
 #[cfg(test)]
@@ -1101,6 +1128,7 @@ mod font_table_tests {
                  <w:font w:name="Meiryo UI">
                    <w:family w:val="modern"/>
                    <w:pitch w:val="variable"/>
+                   <w:charset w:val="86"/>
                  </w:font>
                  <w:font w:name="No Pitch">
                    <w:family w:val="modern"/>
@@ -1108,7 +1136,7 @@ mod font_table_tests {
                </w:fonts>"#,
         );
 
-        let (classes, pitches) = parse_font_table(&xml);
+        let (classes, pitches, charsets) = parse_font_table(&xml);
 
         assert_eq!(classes.get("Meiryo UI").map(String::as_str), Some("modern"));
         assert_eq!(
@@ -1116,6 +1144,7 @@ mod font_table_tests {
             Some("variable")
         );
         assert!(!pitches.contains_key("No Pitch"));
+        assert_eq!(charsets.get("Meiryo UI").map(String::as_str), Some("86"));
     }
 }
 
@@ -1304,7 +1333,9 @@ fn parse_body_elements(
                         // continues correctly after the break.
                         for piece in split_para_on_page_breaks(result) {
                             match piece {
-                                ParaPiece::Para(p) => body.push(BodyElement::Paragraph(p)),
+                                ParaPiece::Para(p) => {
+                                    body.push(BodyElement::Paragraph(Box::new(p)))
+                                }
                                 ParaPiece::PageBreak => {
                                     body.push(BodyElement::PageBreak { parity: None })
                                 }
@@ -1340,7 +1371,7 @@ fn parse_body_elements(
                     theme,
                     DepthGuard::root(),
                 );
-                body.push(BodyElement::Table(tbl));
+                body.push(BodyElement::Table(Box::new(tbl)));
             }
             // Mid-body loose sectPr (rare) defines the section that ENDS here.
             // Emit a SectionBreak carrying its columns + break kind (see the
@@ -1810,11 +1841,11 @@ fn section_break_element(
     BodyElement::SectionBreak {
         kind,
         columns: parse_columns(sect_pr),
-        headers: resolved.headers,
-        footers: resolved.footers,
+        headers: Box::new(resolved.headers),
+        footers: Box::new(resolved.footers),
         title_page: resolved.title_page,
         // ECMA-376 §17.6.13 / §17.6.11 — this ending section's page geometry.
-        geom: section_geom(sect_pr),
+        geom: section_geom(sect_pr).map(Box::new),
         // ECMA-376 §17.6.12 — this ending section's page-numbering restart/format.
         page_num_type: parse_pgnum_type(sect_pr),
         // ECMA-376 §17.6.20 — this ending section's flow direction (issue #1000
@@ -2362,6 +2393,7 @@ fn parse_paragraph_cond(
                 lvl_jc,
                 marker_ascii,
                 marker_ea,
+                marker_font_facts,
                 marker_color,
                 marker_color_auto,
                 pic_bullet,
@@ -2370,6 +2402,7 @@ fn parse_paragraph_cond(
                 .map(|l| {
                     let mut marker_fmt = base_run.clone();
                     apply_direct_run(&mut marker_fmt, &l.rpr);
+                    let marker_font_facts = resolved_run_font_facts(&marker_fmt, theme);
                     (
                         l.format.clone(),
                         l.indent_left,
@@ -2378,6 +2411,7 @@ fn parse_paragraph_cond(
                         l.lvl_jc.clone(),
                         theme.resolve_font_ref(marker_fmt.font_family_ascii.clone()),
                         theme.resolve_font_ref(marker_fmt.font_family_east_asia.clone()),
+                        Some(marker_font_facts),
                         l.rpr.color.clone(),
                         l.rpr.color_auto,
                         l.pic_bullet.clone(),
@@ -2392,6 +2426,7 @@ fn parse_paragraph_cond(
                         "left".to_string(),
                         theme.resolve_font_ref(base_run.font_family_ascii.clone()),
                         theme.resolve_font_ref(base_run.font_family_east_asia.clone()),
+                        Some(resolved_run_font_facts(&base_run, theme)),
                         None,
                         false,
                         None,
@@ -2428,6 +2463,7 @@ fn parse_paragraph_cond(
                 jc: lvl_jc,
                 font_family: marker_ascii,
                 font_family_east_asia: marker_ea,
+                font_facts: marker_font_facts,
                 color: marker_color,
                 color_auto: marker_color_auto,
                 pic_bullet_image_path,
@@ -2595,6 +2631,7 @@ fn parse_paragraph_cond(
             .or_else(|| theme.resolve_font_ref(mark_run.font_family_east_asia.clone())),
         default_font_family_east_asia: theme
             .resolve_font_ref(mark_run.font_family_east_asia.clone()),
+        paragraph_mark_font_facts: Some(resolved_run_font_facts(&mark_run, theme)),
         // §17.3.1.29 — the mark's resolved color from the SAME `mark_run`
         // chain as `default_font_size` (direct pPr/rPr → pStyle chain →
         // docDefaults; an explicit auto already collapsed to None). Word
@@ -2988,6 +3025,65 @@ fn extract_text_from_runs(node: roxmltree::Node) -> String {
     out
 }
 
+fn resolved_run_font_slots(fmt: &RunFmt, theme: &ThemeColors) -> Option<RunFontSlots> {
+    let direct = RunFontAxisValues {
+        ascii: fmt.font_family_ascii_direct.clone(),
+        high_ansi: fmt.font_family_high_ansi_direct.clone(),
+        east_asia: fmt.font_family_east_asia_direct.clone(),
+        complex_script: fmt.font_family_cs_direct.clone(),
+    };
+    let theme_values = RunFontAxisValues {
+        ascii: theme.resolve_font_ref(fmt.font_family_ascii_theme.clone()),
+        high_ansi: theme.resolve_font_ref(fmt.font_family_high_ansi_theme.clone()),
+        east_asia: theme.resolve_font_ref(fmt.font_family_east_asia_theme.clone()),
+        complex_script: theme.resolve_font_ref(fmt.font_family_cs_theme.clone()),
+    };
+    let theme_present = RunFontAxisPresence {
+        ascii: fmt.font_family_ascii_theme.is_some(),
+        high_ansi: fmt.font_family_high_ansi_theme.is_some(),
+        east_asia: fmt.font_family_east_asia_theme.is_some(),
+        complex_script: fmt.font_family_cs_theme.is_some(),
+    };
+    let any = direct.ascii.is_some()
+        || direct.high_ansi.is_some()
+        || direct.east_asia.is_some()
+        || direct.complex_script.is_some()
+        || theme_present.ascii
+        || theme_present.high_ansi
+        || theme_present.east_asia
+        || theme_present.complex_script;
+    any.then_some(RunFontSlots {
+        direct,
+        theme: theme_values,
+        theme_present,
+    })
+}
+
+fn resolved_run_font_facts(fmt: &RunFmt, theme: &ThemeColors) -> RunFontFacts {
+    let font_family_east_asia = theme.resolve_font_ref(fmt.font_family_east_asia.clone());
+    RunFontFacts {
+        font_family: theme
+            .resolve_font_ref(fmt.font_family_ascii.clone())
+            .or_else(|| font_family_east_asia.clone()),
+        font_family_high_ansi: theme.resolve_font_ref(fmt.font_family_high_ansi.clone()),
+        font_slots: resolved_run_font_slots(fmt, theme),
+        font_family_east_asia,
+        font_hint: fmt.font_hint.clone(),
+        rtl: fmt.rtl,
+        cs: fmt.cs_toggle,
+        font_family_cs: theme.resolve_font_ref(fmt.font_family_cs.clone()),
+        font_size: fmt.font_size,
+        font_size_cs: fmt.font_size_cs,
+        bold: fmt.bold.unwrap_or(false),
+        italic: fmt.italic.unwrap_or(false),
+        bold_cs: fmt.bold_cs,
+        italic_cs: fmt.italic_cs,
+        lang_bidi: fmt.lang_bidi.clone(),
+        lang_east_asia: fmt.lang_east_asia.clone(),
+        kerning: fmt.kerning,
+    }
+}
+
 fn make_field_run(instr: &str, fmt: &RunFmt, fallback: &str, theme: &ThemeColors) -> DocRun {
     let field_type = classify_field(instr);
     DocRun::Field(FieldRun {
@@ -3003,6 +3099,18 @@ fn make_field_run(instr: &str, fmt: &RunFmt, fallback: &str, theme: &ThemeColors
         font_family: theme
             .resolve_font_ref(fmt.font_family_ascii.clone())
             .or_else(|| theme.resolve_font_ref(fmt.font_family_east_asia.clone())),
+        font_family_high_ansi: theme.resolve_font_ref(fmt.font_family_high_ansi.clone()),
+        font_slots: resolved_run_font_slots(fmt, theme),
+        font_family_east_asia: theme.resolve_font_ref(fmt.font_family_east_asia.clone()),
+        font_hint: fmt.font_hint.clone(),
+        rtl: fmt.rtl,
+        cs: fmt.cs_toggle,
+        font_family_cs: theme.resolve_font_ref(fmt.font_family_cs.clone()),
+        font_size_cs: fmt.font_size_cs,
+        bold_cs: fmt.bold_cs,
+        italic_cs: fmt.italic_cs,
+        lang_bidi: fmt.lang_bidi.clone(),
+        lang_east_asia: fmt.lang_east_asia.clone(),
         background: fmt.background.clone(),
         vert_align: fmt.vert_align.clone(),
         all_caps: fmt.all_caps.unwrap_or(false),
@@ -3064,7 +3172,10 @@ fn text_runs_mergeable(a: &TextRun, b: &TextRun) -> bool {
         && a.font_size == b.font_size
         && a.color == b.color
         && a.font_family == b.font_family
+        && a.font_family_high_ansi == b.font_family_high_ansi
+        && a.font_slots == b.font_slots
         && a.font_family_east_asia == b.font_family_east_asia
+        && a.font_hint == b.font_hint
         && a.is_link == b.is_link
         && a.background == b.background
         && a.color_auto == b.color_auto
@@ -3083,6 +3194,7 @@ fn text_runs_mergeable(a: &TextRun, b: &TextRun) -> bool {
         && a.bold_cs == b.bold_cs
         && a.italic_cs == b.italic_cs
         && a.lang_bidi == b.lang_bidi
+        && a.lang_east_asia == b.lang_east_asia
         && a.snap_to_grid == b.snap_to_grid
         // Character metrics change measured or painted geometry, so every one
         // must match before a noBreakHyphen run can be folded into its neighbour.
@@ -3210,6 +3322,8 @@ fn parse_run_inner(
     let font_family = theme
         .resolve_font_ref(fmt.font_family_ascii.clone())
         .or_else(|| theme.resolve_font_ref(fmt.font_family_east_asia.clone()));
+    let font_family_high_ansi = theme.resolve_font_ref(fmt.font_family_high_ansi.clone());
+    let font_slots = resolved_run_font_slots(&fmt, theme);
     // ECMA-376 §17.3.2.26 eastAsia axis, resolved INDEPENDENTLY of ascii so the
     // renderer can pick per character (CJK glyphs → eastAsia face). `font_family`
     // above keeps the conflated single-font fallback for non-per-char paths.
@@ -3263,6 +3377,8 @@ fn parse_run_inner(
     let bold_cs = fmt.bold_cs;
     let italic_cs = fmt.italic_cs;
     let lang_bidi = fmt.lang_bidi.clone();
+    let lang_east_asia = fmt.lang_east_asia.clone();
+    let font_hint = fmt.font_hint.clone();
     let snap_to_grid = fmt.snap_to_grid;
     // Run character metrics (ECMA-376 §17.3.2.35 spacing / §17.3.2.43 w /
     // §17.3.2.24 position / §17.3.2.19 kern), resolved through the style chain
@@ -3318,7 +3434,10 @@ fn parse_run_inner(
                         font_size,
                         color: color.clone(),
                         font_family: font_family.clone(),
+                        font_family_high_ansi: font_family_high_ansi.clone(),
+                        font_slots: font_slots.clone(),
                         font_family_east_asia: font_family_east_asia.clone(),
+                        font_hint: font_hint.clone(),
                         is_link,
                         background: fmt.background.clone(),
                         color_auto,
@@ -3340,6 +3459,7 @@ fn parse_run_inner(
                         bold_cs,
                         italic_cs,
                         lang_bidi: lang_bidi.clone(),
+                        lang_east_asia: lang_east_asia.clone(),
                         snap_to_grid,
                         char_spacing,
                         fit_text_val,
@@ -3393,12 +3513,15 @@ fn parse_run_inner(
                         font_size,
                         color: color.clone(),
                         font_family: sym_font.clone(),
+                        font_family_high_ansi: sym_font.clone(),
+                        font_slots: None,
                         // Keep the eastAsia axis pointed at the sym font too, so a
                         // glyph that happens to classify as CJK still resolves
                         // against the symbol font rather than the run's eastAsia
                         // face. PUA sym chars route to the Latin slot, so the ascii
                         // axis (`font_family`) is what actually drives rendering.
                         font_family_east_asia: sym_font,
+                        font_hint: font_hint.clone(),
                         is_link,
                         background: fmt.background.clone(),
                         color_auto,
@@ -3420,6 +3543,7 @@ fn parse_run_inner(
                         bold_cs,
                         italic_cs,
                         lang_bidi: lang_bidi.clone(),
+                        lang_east_asia: lang_east_asia.clone(),
                         snap_to_grid,
                         char_spacing,
                         fit_text_val,
@@ -3448,7 +3572,10 @@ fn parse_run_inner(
                     font_size,
                     color: color.clone(),
                     font_family: font_family.clone(),
+                    font_family_high_ansi: font_family_high_ansi.clone(),
+                    font_slots: font_slots.clone(),
                     font_family_east_asia: font_family_east_asia.clone(),
+                    font_hint: font_hint.clone(),
                     is_link,
                     background: fmt.background.clone(),
                     color_auto,
@@ -3470,6 +3597,7 @@ fn parse_run_inner(
                     bold_cs,
                     italic_cs,
                     lang_bidi: lang_bidi.clone(),
+                    lang_east_asia: lang_east_asia.clone(),
                     snap_to_grid,
                     char_spacing,
                     fit_text_val,
@@ -3543,7 +3671,10 @@ fn parse_run_inner(
                     font_size,
                     color: color.clone(),
                     font_family: font_family.clone(),
+                    font_family_high_ansi: font_family_high_ansi.clone(),
+                    font_slots: font_slots.clone(),
                     font_family_east_asia: font_family_east_asia.clone(),
+                    font_hint: font_hint.clone(),
                     is_link,
                     background: fmt.background.clone(),
                     color_auto,
@@ -3565,6 +3696,7 @@ fn parse_run_inner(
                     bold_cs,
                     italic_cs,
                     lang_bidi: lang_bidi.clone(),
+                    lang_east_asia: lang_east_asia.clone(),
                     snap_to_grid,
                     char_spacing,
                     fit_text_val,
@@ -3740,7 +3872,10 @@ fn parse_run_inner(
                     font_size,
                     color: color.clone(),
                     font_family: font_family.clone(),
+                    font_family_high_ansi: font_family_high_ansi.clone(),
+                    font_slots: font_slots.clone(),
                     font_family_east_asia: font_family_east_asia.clone(),
+                    font_hint: font_hint.clone(),
                     is_link,
                     background: fmt.background.clone(),
                     color_auto,
@@ -3767,6 +3902,7 @@ fn parse_run_inner(
                     bold_cs,
                     italic_cs,
                     lang_bidi: lang_bidi.clone(),
+                    lang_east_asia: lang_east_asia.clone(),
                     snap_to_grid,
                     char_spacing,
                     fit_text_val,
@@ -5906,6 +6042,7 @@ fn extract_simple_paragraph_text(
             lvl_jc,
             marker_ascii,
             marker_ea,
+            marker_font_facts,
             marker_color,
             marker_color_auto,
             pic_bullet,
@@ -5914,6 +6051,7 @@ fn extract_simple_paragraph_text(
             .map(|l| {
                 let mut marker_fmt = first_fmt.clone();
                 apply_direct_run(&mut marker_fmt, &l.rpr);
+                let marker_font_facts = resolved_run_font_facts(&marker_fmt, theme);
                 (
                     l.format.clone(),
                     l.indent_left,
@@ -5922,6 +6060,7 @@ fn extract_simple_paragraph_text(
                     l.lvl_jc.clone(),
                     theme.resolve_font_ref(marker_fmt.font_family_ascii.clone()),
                     theme.resolve_font_ref(marker_fmt.font_family_east_asia.clone()),
+                    Some(marker_font_facts),
                     l.rpr.color.clone(),
                     l.rpr.color_auto,
                     l.pic_bullet.clone(),
@@ -5936,6 +6075,7 @@ fn extract_simple_paragraph_text(
                     "left".to_string(),
                     theme.resolve_font_ref(first_fmt.font_family_ascii.clone()),
                     theme.resolve_font_ref(first_fmt.font_family_east_asia.clone()),
+                    Some(resolved_run_font_facts(&first_fmt, theme)),
                     None,
                     false,
                     None,
@@ -5968,6 +6108,7 @@ fn extract_simple_paragraph_text(
             jc: lvl_jc,
             font_family: marker_ascii,
             font_family_east_asia: marker_ea,
+            font_facts: marker_font_facts,
             color: marker_color,
             color_auto: marker_color_auto,
             pic_bullet_image_path,
@@ -8121,7 +8262,7 @@ fn parse_table_cell(
     let mut field = FieldState::default();
     for child in element_children_flat(node) {
         match child.tag_name().name() {
-            "p" => content.push(CellElement::Paragraph(parse_paragraph_cond(
+            "p" => content.push(CellElement::Paragraph(Box::new(parse_paragraph_cond(
                 child,
                 style_map,
                 num_map,
@@ -8132,7 +8273,7 @@ fn parse_table_cell(
                 table_style_id,
                 cond,
                 &mut field,
-            ))),
+            )))),
             // A nested table resolves its OWN table style + conditional
             // formatting; the outer cell's `cond` does not propagate into it.
             //
@@ -8143,7 +8284,7 @@ fn parse_table_cell(
             // unaffected.
             "tbl" => {
                 if let Some(child_depth) = depth.descend() {
-                    content.push(CellElement::Table(parse_table(
+                    content.push(CellElement::Table(Box::new(parse_table(
                         child,
                         style_map,
                         num_map,
@@ -8152,7 +8293,7 @@ fn parse_table_cell(
                         rel_map,
                         theme,
                         child_depth,
-                    )));
+                    ))));
                 }
             }
             _ => {}
@@ -8859,6 +9000,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn field_run_carries_inherited_script_slot_metadata() {
+        let base = RunFmt {
+            font_family_ascii: Some("Latin Face".to_string()),
+            font_family_east_asia: Some("EA Face".to_string()),
+            font_hint: Some("eastAsia".to_string()),
+            rtl: Some(true),
+            cs_toggle: Some(true),
+            font_family_cs: Some("CS Face".to_string()),
+            font_size: Some(10.0),
+            font_size_cs: Some(20.0),
+            bold: Some(false),
+            bold_cs: Some(true),
+            italic_cs: Some(true),
+            lang_bidi: Some("ar-sa".to_string()),
+            lang_east_asia: Some("zh-cn".to_string()),
+            ..Default::default()
+        };
+        let runs = parse_para(
+            r#"<w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple>"#,
+            &base,
+            &StyleMap::parse(""),
+        );
+        let field = runs
+            .iter()
+            .find_map(|run| match run {
+                DocRun::Field(field) => Some(field),
+                _ => None,
+            })
+            .expect("field run");
+
+        assert_eq!(field.font_family.as_deref(), Some("Latin Face"));
+        assert_eq!(field.font_family_east_asia.as_deref(), Some("EA Face"));
+        assert_eq!(field.font_hint.as_deref(), Some("eastAsia"));
+        assert_eq!(field.rtl, Some(true));
+        assert_eq!(field.cs, Some(true));
+        assert_eq!(field.font_family_cs.as_deref(), Some("CS Face"));
+        assert_eq!(field.font_size_cs, Some(20.0));
+        assert_eq!(field.bold_cs, Some(true));
+        assert_eq!(field.italic_cs, Some(true));
+        assert_eq!(field.lang_bidi.as_deref(), Some("ar-sa"));
+        assert_eq!(field.lang_east_asia.as_deref(), Some("zh-cn"));
+    }
+
     // ECMA-376 §17.16.5.16 DATE / §17.16.5.72 TIME — a `fldSimple` DATE/TIME
     // field classifies as `date`/`time` (recomputable) and preserves its `\@`
     // date-time picture in `instruction`; the authored text is its `fallback_text`.
@@ -9545,6 +9730,81 @@ mod tests {
         );
     }
 
+    #[test]
+    fn no_break_hyphen_merge_gate_compares_high_ansi_and_slot_metadata() {
+        let first = TextRun::default();
+        let mut high_ansi = first.clone();
+        high_ansi.font_family_high_ansi = Some("HANSI only".to_string());
+        assert!(!text_runs_mergeable(&first, &high_ansi));
+
+        let mut themed = first.clone();
+        let mut slots = RunFontSlots::default();
+        slots.direct.high_ansi = Some("Direct HANSI".to_string());
+        slots.theme_present.high_ansi = true;
+        themed.font_slots = Some(slots);
+        assert!(!text_runs_mergeable(&first, &themed));
+    }
+
+    #[test]
+    fn no_break_hyphen_does_not_merge_runs_that_differ_only_on_high_ansi() {
+        let runs = parse_para(
+            concat!(
+                r#"<w:r><w:rPr><w:rFonts w:hAnsi="HANSI A"/></w:rPr><w:t>999</w:t></w:r>"#,
+                r#"<w:r><w:rPr><w:rFonts w:hAnsi="HANSI B"/></w:rPr><w:noBreakHyphen/><w:t>99</w:t></w:r>"#,
+            ),
+            &RunFmt::default(),
+            &StyleMap::parse(""),
+        );
+        let text: Vec<(&str, Option<&str>)> = runs
+            .iter()
+            .filter_map(|run| match run {
+                DocRun::Text(run) => {
+                    Some((run.text.as_str(), run.font_family_high_ansi.as_deref()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            text,
+            vec![("999", Some("HANSI A")), ("-99", Some("HANSI B"))]
+        );
+    }
+
+    #[test]
+    fn unresolved_theme_presence_suppresses_direct_faces_on_all_four_axes() {
+        let fmt = RunFmt {
+            font_family_ascii_direct: Some("Direct ASCII".to_string()),
+            font_family_ascii_theme: Some("@theme:missingAscii".to_string()),
+            font_family_high_ansi_direct: Some("Direct HANSI".to_string()),
+            font_family_high_ansi_theme: Some("@theme:missingHAnsi".to_string()),
+            font_family_east_asia_direct: Some("Direct EA".to_string()),
+            font_family_east_asia_theme: Some("@theme:missingEA".to_string()),
+            font_family_cs_direct: Some("Direct CS".to_string()),
+            font_family_cs_theme: Some("@theme:missingCS".to_string()),
+            ..RunFmt::default()
+        };
+
+        let slots =
+            resolved_run_font_slots(&fmt, &ThemeColors::default()).expect("authored font slots");
+        assert_eq!(slots.direct.ascii.as_deref(), Some("Direct ASCII"));
+        assert_eq!(slots.direct.high_ansi.as_deref(), Some("Direct HANSI"));
+        assert_eq!(slots.direct.east_asia.as_deref(), Some("Direct EA"));
+        assert_eq!(slots.direct.complex_script.as_deref(), Some("Direct CS"));
+        assert!(slots.theme_present.ascii);
+        assert!(slots.theme_present.high_ansi);
+        assert!(slots.theme_present.east_asia);
+        assert!(slots.theme_present.complex_script);
+        assert_eq!(slots.theme.ascii, None);
+        assert_eq!(slots.theme.high_ansi, None);
+        assert_eq!(slots.theme.east_asia, None);
+        assert_eq!(slots.theme.complex_script, None);
+        let wire = serde_json::to_value(&slots).expect("font slots serialize");
+        assert_eq!(wire["themePresent"]["ascii"], true);
+        assert_eq!(wire["themePresent"]["highAnsi"], true);
+        assert_eq!(wire["themePresent"]["eastAsia"], true);
+        assert_eq!(wire["themePresent"]["complexScript"], true);
+    }
+
     // ECMA-376 §17.3.2.14: a fitText run renders at a MANUAL width, so merging
     // a plain noBreakHyphen run into it (or vice versa) would silently extend
     // the fixed-width region over glyphs that must lay out naturally. The
@@ -9906,13 +10166,25 @@ mod math_jc_tests {
     #[test]
     fn paragraph_mark_default_east_asia_font_surfaces() {
         let p = parse_p(
-            r#"<w:pPr><w:rPr><w:rFonts w:ascii="Century" w:eastAsia="ＭＳ 明朝"/></w:rPr></w:pPr>"#,
+            r#"<w:pPr><w:rPr><w:rFonts w:ascii="Century" w:hAnsi="Arial"
+              w:eastAsia="ＭＳ 明朝" w:cs="Traditional Arabic" w:hint="eastAsia"/>
+              <w:lang w:eastAsia="ja-JP" w:bidi="ar-SA"/>
+            </w:rPr></w:pPr>"#,
         );
         assert_eq!(p.default_font_family.as_deref(), Some("Century"));
         assert_eq!(
             p.default_font_family_east_asia.as_deref(),
             Some("ＭＳ 明朝")
         );
+        let facts = p
+            .paragraph_mark_font_facts
+            .as_ref()
+            .expect("internal paragraph-mark font facts");
+        assert_eq!(facts.font_family_high_ansi.as_deref(), Some("Arial"));
+        assert_eq!(facts.font_family_cs.as_deref(), Some("Traditional Arabic"));
+        assert_eq!(facts.font_hint.as_deref(), Some("eastAsia"));
+        assert_eq!(facts.lang_east_asia.as_deref(), Some("ja-jp"));
+        assert_eq!(facts.lang_bidi.as_deref(), Some("ar-sa"));
     }
 
     // ECMA-376 §22.1.2.30 `m:defJc` — document-wide default math justification in
@@ -10946,7 +11218,8 @@ mod rtl_tests {
     fn complex_script_bold_italic_and_lang_bidi_are_extracted() {
         let body = body_from(
             r#"<w:p><w:r><w:rPr><w:rtl/><w:bCs/><w:iCs/>
-              <w:lang w:val="en-AE" w:bidi="ae-AR"/></w:rPr><w:t>28-02-2026</w:t></w:r></w:p>"#,
+              <w:rFonts w:ascii="Latin" w:eastAsia="EA" w:hint="eastAsia"/>
+              <w:lang w:val="en-AE" w:eastAsia="ZH-cn" w:bidi="ae-AR"/></w:rPr><w:t>28-02-2026</w:t></w:r></w:p>"#,
         );
         let run = body
             .iter()
@@ -10965,6 +11238,8 @@ mod rtl_tests {
             Some("ae-ar"),
             "w:lang@w:bidi lower-cased → run.langBidi"
         );
+        assert_eq!(run.font_hint.as_deref(), Some("eastAsia"));
+        assert_eq!(run.lang_east_asia.as_deref(), Some("zh-cn"));
     }
 
     /// Legacy VML text box (ECMA-376 Part 4 §14.1): `<w:pict>` with a
@@ -11331,7 +11606,7 @@ mod footnote_tests {
         );
         for e in elems {
             if let BodyElement::Paragraph(p) = e {
-                return p;
+                return *p;
             }
         }
         panic!("no paragraph parsed");
@@ -11377,7 +11652,7 @@ mod footnote_tests {
         )
         .into_iter()
         .filter_map(|e| match e {
-            BodyElement::Paragraph(p) => Some(p),
+            BodyElement::Paragraph(p) => Some(*p),
             _ => None,
         })
         .collect()
@@ -16450,7 +16725,7 @@ mod numbering_marker_font_tests {
         elems
             .into_iter()
             .find_map(|e| match e {
-                BodyElement::Paragraph(p) => Some(p),
+                BodyElement::Paragraph(p) => Some(*p),
                 _ => None,
             })
             .expect("heading paragraph present")
@@ -16504,6 +16779,92 @@ mod numbering_marker_font_tests {
             Some("ＭＳ ゴシック"),
             "marker eastAsia axis inherits Heading1's MS Gothic"
         );
+        let facts = num.font_facts.as_ref().expect("internal marker font facts");
+        assert_eq!(facts.font_hint.as_deref(), Some("eastAsia"));
+        assert_eq!(facts.font_family.as_deref(), Some("Times New Roman"));
+        assert_eq!(
+            facts.font_family_high_ansi.as_deref(),
+            Some("Times New Roman"),
+        );
+        assert_eq!(
+            facts.font_family_east_asia.as_deref(),
+            Some("ＭＳ ゴシック")
+        );
+    }
+
+    #[test]
+    fn numbering_marker_retains_four_slot_theme_presence_and_cs_metadata() {
+        let styles = StyleMap::parse(&format!(
+            r#"<w:styles{NS}><w:docDefaults><w:rPrDefault><w:rPr>
+              <w:lang w:eastAsia="zh-CN" w:bidi="ar-SA"/>
+              <w:rFonts w:ascii="Base ASCII" w:hAnsi="Base HANSI"
+                w:eastAsia="Base EA" w:cs="Base CS"/>
+            </w:rPr></w:rPrDefault></w:docDefaults></w:styles>"#,
+        ));
+        let numbering_xml = format!(
+            r#"<w:numbering{NS}>
+              <w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0">
+                <w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/>
+                <w:rPr><w:rFonts w:ascii="Direct ASCII" w:asciiTheme="majorAscii"
+                  w:hAnsi="Direct HANSI" w:hAnsiTheme="majorHAnsi"
+                  w:eastAsia="Direct EA" w:eastAsiaTheme="majorEastAsia"
+                  w:cs="Direct CS" w:cstheme="majorBidi" w:hint="eastAsia"/>
+                  <w:rtl/><w:cs/><w:szCs w:val="28"/><w:bCs/><w:iCs/>
+                </w:rPr>
+              </w:lvl></w:abstractNum>
+              <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+            </w:numbering>"#,
+        );
+        let body_xml = format!(
+            r#"<w:document{NS}><w:body><w:p><w:pPr><w:numPr>
+              <w:ilvl w:val="0"/><w:numId w:val="1"/>
+            </w:numPr></w:pPr><w:r><w:t>body</w:t></w:r></w:p></w:body></w:document>"#,
+        );
+        let doc = roxmltree::Document::parse(&body_xml).unwrap();
+        let body = doc
+            .root_element()
+            .descendants()
+            .find(|n| n.tag_name().name() == "body")
+            .unwrap();
+        let mut num_map = NumberingMap::parse(&numbering_xml, &HashMap::new());
+        let para = parse_body_elements(
+            body,
+            &styles,
+            &mut num_map,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .into_iter()
+        .find_map(|element| match element {
+            BodyElement::Paragraph(para) => Some(para),
+            _ => None,
+        })
+        .expect("numbered paragraph");
+        let facts = para
+            .numbering
+            .as_ref()
+            .and_then(|numbering| numbering.font_facts.as_ref())
+            .expect("internal marker font facts");
+        let slots = facts.font_slots.as_ref().expect("four-slot facts");
+        assert_eq!(slots.direct.ascii.as_deref(), Some("Direct ASCII"));
+        assert_eq!(slots.direct.high_ansi.as_deref(), Some("Direct HANSI"));
+        assert_eq!(slots.direct.east_asia.as_deref(), Some("Direct EA"));
+        assert_eq!(slots.direct.complex_script.as_deref(), Some("Direct CS"));
+        assert!(slots.theme_present.ascii);
+        assert!(slots.theme_present.high_ansi);
+        assert!(slots.theme_present.east_asia);
+        assert!(slots.theme_present.complex_script);
+        assert_eq!(facts.font_hint.as_deref(), Some("eastAsia"));
+        assert_eq!(facts.lang_east_asia.as_deref(), Some("zh-cn"));
+        assert_eq!(facts.lang_bidi.as_deref(), Some("ar-sa"));
+        assert_eq!(facts.rtl, Some(true));
+        assert_eq!(facts.cs, Some(true));
+        assert_eq!(facts.font_size_cs, Some(14.0));
+        assert_eq!(facts.bold_cs, Some(true));
+        assert_eq!(facts.italic_cs, Some(true));
     }
 
     /// No-regression: the COMMON Japanese case (eastAsia = a mincho, no Gothic
@@ -16514,7 +16875,7 @@ mod numbering_marker_font_tests {
         let body_xml = format!(
             r#"<w:document{NS}><w:body>
               <w:p><w:r>
-                <w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="ＭＳ 明朝"/></w:rPr>
+                <w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Arial" w:eastAsia="ＭＳ 明朝"/></w:rPr>
                 <w:t>本文テキスト</w:t>
               </w:r></w:p>
             </w:body></w:document>"#
@@ -16553,7 +16914,15 @@ mod numbering_marker_font_tests {
             })
             .unwrap();
         assert_eq!(run.font_family.as_deref(), Some("Times New Roman"));
+        assert_eq!(run.font_family_high_ansi.as_deref(), Some("Arial"));
         assert_eq!(run.font_family_east_asia.as_deref(), Some("ＭＳ 明朝"));
+        let slots = run
+            .font_slots
+            .as_ref()
+            .expect("internal four-axis font slots");
+        assert_eq!(slots.direct.ascii.as_deref(), Some("Times New Roman"));
+        assert_eq!(slots.direct.high_ansi.as_deref(), Some("Arial"));
+        assert_eq!(slots.direct.east_asia.as_deref(), Some("ＭＳ 明朝"));
     }
 
     // ---- Table conditional formatting: ST_Cnf bit decode (§14.11.9) ----
@@ -17421,7 +17790,7 @@ mod numbering_marker_color_tests {
         )
         .into_iter()
         .find_map(|e| match e {
-            BodyElement::Paragraph(p) => Some(p),
+            BodyElement::Paragraph(p) => Some(*p),
             _ => None,
         })
         .expect("bullet paragraph present")

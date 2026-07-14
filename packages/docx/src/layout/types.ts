@@ -1,4 +1,14 @@
 import type { SectionLayoutContext } from '../layout-context.js';
+import type {
+  TextFontSlotPresence,
+  TextFontSlots,
+  TextLayoutService,
+} from './text.js';
+import type { ImageMetadataService, MathMetadataService } from './resources.js';
+import type { CanvasFontRoute } from '@silurus/ooxml-core';
+
+export type { TextLayoutService } from './text.js';
+export type { ImageMetadataService, MathMetadataService } from './resources.js';
 
 export type LayoutNodeId = string;
 
@@ -71,11 +81,31 @@ interface LayoutNodeBase extends FlowOwnership {
   readonly source: SourceRef;
 }
 
-export type DrawingPaintCommand = Readonly<{
-  kind: 'fill-rect';
-  rect: LayoutRect;
-  fill: string;
-}>;
+export type DrawingPaintCommand =
+  | Readonly<{
+      kind: 'fill-rect';
+      rect: LayoutRect;
+      fill: string;
+    }>
+  | Readonly<{
+      kind: 'stroke-rect';
+      rect: LayoutRect;
+      stroke: string;
+      lineWidthPt: number;
+      dashPt: readonly number[];
+    }>
+  | Readonly<{
+      kind: 'text';
+      rect: LayoutRect;
+      text: string;
+      fill: string;
+      fontRoute: CanvasFontRoute;
+      fontSizePt: number;
+      fontWeight: number;
+      fontStyle: 'normal' | 'italic';
+      align: 'start' | 'center' | 'end';
+      baseline: 'top' | 'middle' | 'alphabetic' | 'bottom';
+    }>;
 
 export interface DrawingLayout extends LayoutNodeBase {
   readonly kind: 'drawing';
@@ -173,22 +203,26 @@ export interface CompatibilityRule {
   readonly description: string;
 }
 
-export interface TextLayoutService {
-  readonly fingerprint: string;
-}
-
-export interface ImageMetadataService {
-  readonly fingerprint: string;
-}
-
-export interface MathMetadataService {
-  readonly fingerprint: string;
-}
-
 export interface LayoutServices {
   readonly text: TextLayoutService;
   readonly images: ImageMetadataService;
   readonly math: MathMetadataService;
+}
+
+/** Plain, parser-independent input for shaping a numbering marker. The renderer
+ * boundary snapshots effective level rPr facts into this contract before the
+ * retained layout service sees them. */
+export interface NumberingMarkerShapeInput {
+  readonly fontSizePt: number;
+  readonly fonts: TextFontSlots;
+  readonly themeFonts?: TextFontSlots;
+  readonly themeFontPresence?: TextFontSlotPresence;
+  readonly weight: number;
+  readonly style: 'normal' | 'italic';
+  readonly complexScript: boolean;
+  readonly fontHint?: 'default' | 'eastAsia' | 'cs';
+  readonly eastAsiaLanguage?: string;
+  readonly kerning?: boolean;
 }
 
 export interface ParagraphLayoutInput {

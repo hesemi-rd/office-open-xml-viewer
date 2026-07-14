@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { paginateDocument, renderDocumentToCanvas } from './renderer.js';
+import { createLayoutServices, paginateDocument, renderDocumentToCanvas } from './renderer.js';
+import { testFontSnapshot } from './layout/test-font-snapshot.js';
 import type { BodyElement, DocParagraph, DocxDocumentModel, SectionProps } from './types';
 
 // ECMA-376 §17.6.4 (newspaper columns) + the renderer's scale-independent
@@ -104,7 +105,8 @@ async function paintedParagraphGeometry() {
   paragraph.spaceBefore = 6;
   paragraph.spaceAfter = 4;
   const model = doc([paragraph as unknown as BodyElement], 80);
-  const pages = paginateDocument(model);
+  const services = createLayoutServices(model, { localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]) });
+  const pages = paginateDocument(model, services);
   const paintedPages: Array<{ lineCount: number; topYPx: number | null }> = [];
   for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
     const { canvas, calls } = makeNonLinearCanvas();
@@ -112,6 +114,7 @@ async function paintedParagraphGeometry() {
       dpr: 1,
       width: 200,
       prebuiltPages: pages,
+      layoutServices: services,
     });
     const textCalls = calls.filter((call) => call.text.includes('w'));
     paintedPages.push({
@@ -158,7 +161,13 @@ describe('paginate/paint line-count divergence — paint never indexes a phantom
     for (let p = 0; p < pageCount; p++) {
       const { canvas, calls } = makeNonLinearCanvas();
       try {
-        await renderDocumentToCanvas(doc(body(), pageHeight), canvas, p, { dpr: 1, width: 400 });
+        const model = doc(body(), pageHeight);
+        await renderDocumentToCanvas(model, canvas, p, {
+          dpr: 1, width: 400,
+          layoutServices: createLayoutServices(model, {
+            localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]), measureContext: canvas.getContext('2d'),
+          }),
+        });
       } catch (e) {
         threw = e;
         break;

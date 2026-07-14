@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { renderDocumentToCanvas } from './renderer.js';
+import { createLayoutServices, renderDocumentToCanvas } from './renderer.js';
+import { testFontSnapshot } from './layout/test-font-snapshot.js';
 import type {
   BodyElement,
   DocParagraph,
@@ -117,9 +118,13 @@ function docWith(...body: BodyElement[]): DocxDocumentModel {
 
 async function renderAndRead(...body: BodyElement[]) {
   const { canvas, fillTextCalls } = makeRecordingCanvas();
-  await renderDocumentToCanvas(docWith(...body), canvas, 0, {
+  const model = docWith(...body);
+  await renderDocumentToCanvas(model, canvas, 0, {
     dpr: 1,
     width: 400, // scale = 400/400 = 1 (px per pt) ⇒ asserts are in pt-equivalent units
+    layoutServices: createLayoutServices(model, {
+      localMetrics: testFontSnapshot([{ family: TEST_FONT }]), measureContext: canvas.getContext('2d'),
+    }),
   });
   return fillTextCalls;
 }
@@ -228,7 +233,13 @@ describe('lineRule=auto — the substituted-font single-line FLOOR is centred; o
   };
   const readTimes = async (ls: LineSpacing): Promise<number> => {
     const { canvas, fillTextCalls } = makeRecordingCanvas();
-    await renderDocumentToCanvas(timesDoc(ls), canvas, 0, { dpr: 1, width: 400 });
+    const model = timesDoc(ls);
+    await renderDocumentToCanvas(model, canvas, 0, {
+      dpr: 1, width: 400,
+      layoutServices: createLayoutServices(model, {
+        localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]), measureContext: canvas.getContext('2d'),
+      }),
+    });
     const t = fillTextCalls.find((c) => c.text === 'T');
     expect(t).toBeDefined();
     return t!.y;
@@ -255,7 +266,13 @@ describe('lineRule=auto on an ACTIVE docGrid keeps the full-box centring (grid g
   };
   it('a gridded auto 2.0× line stays centred in the grid-snapped box (NOT pinned)', async () => {
     const { canvas, fillTextCalls } = makeRecordingCanvas();
-    await renderDocumentToCanvas(gridDoc(auto(2.0)), canvas, 0, { dpr: 1, width: 400 });
+    const model = gridDoc(auto(2.0));
+    await renderDocumentToCanvas(model, canvas, 0, {
+      dpr: 1, width: 400,
+      layoutServices: createLayoutServices(model, {
+        localMetrics: testFontSnapshot([{ family: TEST_FONT }]), measureContext: canvas.getContext('2d'),
+      }),
+    });
     const t = fillTextCalls.find((c) => c.text === 'T');
     expect(t).toBeDefined();
     // Gridded auto: lineH = max(glyphNatural 10, pitch 18 × 2 = 36) = 36. The grid
@@ -308,7 +325,13 @@ function textboxDoc(rule: 'auto' | 'exact' | 'atLeast' | null, val: number): Doc
 
 async function renderTextbox(rule: 'auto' | 'exact' | 'atLeast' | null, val: number): Promise<number> {
   const { canvas, fillTextCalls } = makeRecordingCanvas();
-  await renderDocumentToCanvas(textboxDoc(rule, val), canvas, 0, { dpr: 1, width: 400 });
+  const model = textboxDoc(rule, val);
+  await renderDocumentToCanvas(model, canvas, 0, {
+    dpr: 1, width: 400,
+    layoutServices: createLayoutServices(model, {
+      localMetrics: testFontSnapshot([{ family: TEST_FONT }]), measureContext: canvas.getContext('2d'),
+    }),
+  });
   const t = fillTextCalls.find((c) => c.text === 'T');
   expect(t).toBeDefined();
   return t!.y;

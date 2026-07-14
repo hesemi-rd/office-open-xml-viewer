@@ -90,6 +90,7 @@ absence of a specification rule is not permission to fit a private fixture.
 ```text
 Rust OOXML parser
   -> resolved document facts
+  -> private parser-wire projection into immutable plain inputs
   -> immutable layout contexts
   -> point-space layout engine
   -> immutable DocumentLayout
@@ -104,7 +105,9 @@ layout. It does not decide browser line breaks, page breaks, Canvas scale, or DP
 
 Parser-to-TypeScript model changes remain optional and backward compatible. A
 parser fact that is needed for layout is preserved rather than reconstructed by a
-renderer heuristic.
+renderer heuristic. Private wire-only facts are projected exactly once at the
+parser-model boundary into parser-independent plain data; layout and paint never
+dereference the private parser representation.
 
 ### Layout contexts
 
@@ -133,6 +136,33 @@ export interface LayoutOptions {
 ```
 
 The text service is responsible for font selection, shaping, and measurement.
+It preserves the four independent WordprocessingML `rFonts` axes, applies theme
+precedence within each cascaded slot, and retains authored theme-attribute
+presence even when its theme reference cannot resolve, because the matching
+direct attribute remains suppressed in that case. It returns per-scalar spans
+plus legal grapheme boundaries, which also constrain emergency overlong-word
+splits. Each span carries one immutable core `CanvasFontRoute`;
+measurement, kashida/vertical probes, and paint serialize that same complete CSS
+family list. Exact registered tuples win first. Otherwise an authored family is
+an engine-scoped native CSS request with a fontTable-derived generic tail (or the
+fixed sans default), not a claim that a local face was discovered.
+Non-content glyphs use the same authority. Effective numbering-level run facts
+and paragraph-mark run facts remain private parser-wire metadata. The
+parser-model boundary projects numbering into a plain immutable shape input;
+the parser-free layout module shapes mixed-script body and text-box markers and
+the parser-free paint module serializes the retained spans. This follows
+ECMA-376 §17.9.6 (`w:lvl`) and the §17.3.2.26 (`w:rFonts`) font-slot rules.
+Paragraph-mark run properties follow §17.3.1.29 (`w:pPr`), without
+reconstructing effective formatting in layout. Empty and anchor-only paragraph-
+mark metrics also use the text service, so main and worker execution share one
+font authority.
+
+Auto-fit text enters through the ordinary `buildSegments` pipeline. Each atom
+retains its complete service request and route, including the four independent
+`w:rFonts` slots and theme-presence semantics from ECMA-376 §17.3.2.26. The
+region resolver sums the actual shaped advances across grapheme, kinsoku,
+font-route, and `joinPrev` boundaries instead of replacing them with one leading
+run font. Table auto-fit selection follows §17.4.52 (`w:tblLayout`).
 The image service resolves intrinsic dimensions and metadata. Services are inputs
 only; functions, Canvas objects, and resource handles never enter the layout
 result.
@@ -143,6 +173,24 @@ field convergence. Geometry-affecting render options are normalized before layou
 and participate in a stable layout cache key together with fingerprints derived
 from the injected service instances; callers cannot provide service fingerprints
 independently. Paint-only width, DPR, and color do not participate.
+
+Math resource addressing is normalized once at the parser-model boundary. That
+pure traversal shallow-clones only math-bearing ancestry and attaches typed
+plain-data `SourceRef`/resource keys to internal math runs; neither parser-array
+identity nor a WeakMap participates in layout.
+
+Static enforcement walks the transitive runtime module graph from every
+production layout module and rejects any path to `parser-model.ts`, including
+bridge modules, aliases, literal or non-literal dynamic imports, and CommonJS
+`require`. Only the exact unaliased named runtime import
+`{ normalizeInternalDocumentModel }` from `../parser-model.js` in
+`layout/resources.ts` is a terminal parser projection edge. Its binding has one
+permitted use: the exported `documentMathOccurrences` function returns
+`[...normalizeInternalDocumentModel(doc).mathOccurrences]`. Static enforcement
+rejects local re-export, alias, leak, or extra references. Every other gateway
+edge is traversed normally; erased type-only contracts do not create runtime
+paths. This prevents parser ownership from leaking back into layout without
+false positives for type-only contracts.
 
 ### Document layout
 
@@ -213,6 +261,7 @@ packages/docx/src/layout/
   context.ts
   flow.ts
   text.ts
+  numbering-marker.ts
   resources.ts
   convergence.ts
   compatibility.ts
@@ -229,6 +278,7 @@ packages/docx/src/layout/
 packages/docx/src/paint/
   canvas-page.ts
   canvas-text.ts
+  numbering-marker.ts
   canvas-table.ts
   canvas-drawing.ts
 ```
@@ -239,6 +289,10 @@ not closures over a renderer-wide mutable state.
 
 The current `renderer.ts` ends as a thin internal adapter that prepares resources,
 calls layout, and calls paint. It does not retain a second layout implementation.
+During the A2 transition, its frozen `renderShapeText` boundary permits only the
+exact complete numbering-marker normalization sequence: private-fact snapshot,
+service shape, and retained-span paint. A partial or altered sequence is rejected
+so the temporary allowance cannot conceal unrelated legacy-layout changes.
 
 DrawingML geometry, images, colors, fonts, charts, fills, and effects are shared
 through `packages/core` or `packages/ooxml-common` where the OOXML concept is truly
@@ -401,6 +455,9 @@ Paint tests use a Canvas stub whose `measureText` throws. Static analysis reject
 
 - measurement/layout algorithm imports in paint modules while allowing type-only
   imports from the plain layout result contract;
+- direct or transitive runtime paths from layout to the private parser model,
+  including bridge, dynamic-import, alias, and CommonJS paths, except the exact
+  `layout/resources.ts` named normalization import and its AST-frozen projection;
 - display-scale/DPR state in layout modules without rejecting authored OOXML text
   scale properties;
 - runtime layout stamps on parser model types;

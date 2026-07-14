@@ -32,7 +32,7 @@ function runChecker(root, ...args) {
 
 function initializeRepository() {
   const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-'));
-  write(root, 'packages/docx/src/renderer.ts', 'export function computePages() { return []; }\n');
+  write(root, 'packages/docx/src/renderer.ts', 'function buildMeasureState(ctx: unknown, fonts: unknown) { return [ctx, fonts]; }\nexport function computePages(ctx: unknown, resolvedLocalFonts: unknown = {}) { const measure = buildMeasureState(ctx, resolvedLocalFonts); return [measure]; }\nexport function computeTableLayout() { return []; }\n');
   write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
   write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
   git(root, 'init', '-b', 'main');
@@ -43,6 +43,67 @@ function initializeRepository() {
   git(root, 'switch', '-c', 'a1');
   return root;
 }
+
+function initializeLayoutParserBoundaryRepository() {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-parser-boundary-'));
+  write(root, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
+  write(root, 'packages/docx/src/parser-model.ts', 'export function normalizeInternalDocumentModel(document: unknown) { return { document, mathOccurrences: [] }; }\nexport const parserFacts = true;\nexport interface ParserFacts { value: string; }\n');
+  write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
+  return root;
+}
+
+const exactParserGatewaySource =
+  "import { normalizeInternalDocumentModel } from '../parser-model.js';\n"
+  + 'export function documentMathOccurrences(doc: unknown): unknown[] {\n'
+  + '  return [...normalizeInternalDocumentModel(doc).mathOccurrences];\n'
+  + '}\n';
+
+function initializeShapeRepository() {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-shape-'));
+  write(root, 'packages/docx/src/renderer.ts', 'function buildFont(bold: boolean, italic: boolean, size: number, family: string | null, classes: Record<string, string>) { return String([bold, italic, size, family, classes]); }\nexport function renderShapeText(s: { bold: boolean; italic: boolean; size: number; family: string | null; fontRoute?: unknown }, classes: Record<string, string>) { return buildFont(s.bold, s.italic, s.size, s.family, classes); }\n');
+  write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
+  write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
+  git(root, 'init', '-b', 'main');
+  git(root, 'config', 'user.email', 'boundary-test@example.invalid');
+  git(root, 'config', 'user.name', 'Boundary Test');
+  git(root, 'add', '.');
+  git(root, 'commit', '-m', 'base');
+  git(root, 'switch', '-c', 'a1');
+  establishA1Baseline(root);
+  return root;
+}
+
+function initializeMetricShapeRepository() {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-shape-metric-'));
+  write(root, 'packages/docx/src/renderer.ts', 'function buildFont(bold: boolean, italic: boolean, size: number, family: string | null, classes: Record<string, string>, route?: unknown) { return String([bold, italic, size, family, classes, route]); }\nexport function renderShapeText(s: { bold: boolean; italic: boolean; size: number; family: string | null; fontRoute?: unknown; eaFloorRoute?: unknown }, classes: Record<string, string>) { const shapeLineMetrics = (family: string | null) => { return buildFont(s.bold, s.italic, s.size, family, classes); }; return shapeLineMetrics(s.family); }\n');
+  write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
+  write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
+  git(root, 'init', '-b', 'main');
+  git(root, 'config', 'user.email', 'boundary-test@example.invalid');
+  git(root, 'config', 'user.name', 'Boundary Test');
+  git(root, 'add', '.');
+  git(root, 'commit', '-m', 'base');
+  git(root, 'switch', '-c', 'a1');
+  establishA1Baseline(root);
+  return root;
+}
+
+function initializeNumberingShapeRepository() {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-shape-numbering-'));
+  write(root, 'packages/docx/src/renderer.ts', 'export function renderShapeText(block: any, ctx: any, scale: number, effState: any, eaVertUpright: boolean, markerX: number, baseline: number) { const markerText = markerDisplayText(block.numbering); const markerW = ctx.measureText(markerText).width; if (eaVertUpright) { drawVerticalRun(ctx, markerText, markerX, baseline, block.fontSizePt * scale, 0); } else { ctx.fillText(markerText, markerX, baseline); } return markerW; }\n');
+  write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
+  write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
+  git(root, 'init', '-b', 'main');
+  git(root, 'config', 'user.email', 'boundary-test@example.invalid');
+  git(root, 'config', 'user.name', 'Boundary Test');
+  git(root, 'add', '.');
+  git(root, 'commit', '-m', 'base');
+  git(root, 'switch', '-c', 'a1');
+  establishA1Baseline(root);
+  return root;
+}
+
+const exactNumberingShapeSource = 'export function renderShapeText(block: any, ctx: any, scale: number, effState: any, eaVertUpright: boolean, markerX: number, baseline: number) { const markerText = markerDisplayText(block.numbering); const markerShapeInput = numberingMarkerShapeInput(block.numbering, block.fontSizePt); const markerTextLayout = shapeNumberingMarkerText(markerShapeInput, markerText, scale, effState.layoutServices?.text,); const markerW = markerTextLayout?.shape.advancePt ?? ctx.measureText(markerText).width; if (markerTextLayout) { paintNumberingMarkerText(ctx, markerTextLayout, markerX, baseline, eaVertUpright ? (paintCtx, text, drawX, drawBaseline, fontSizePx) => { drawVerticalRun(paintCtx, text, drawX, drawBaseline, fontSizePx, 0); } : undefined,); } else if (eaVertUpright) { drawVerticalRun(ctx, markerText, markerX, baseline, block.fontSizePt * scale, 0); } else { ctx.fillText(markerText, markerX, baseline); } return markerW; }\n';
 
 function establishA1Baseline(root) {
   const writeResult = runChecker(root, '--write-transitional-baseline', '--base-ref', 'main');
@@ -68,6 +129,194 @@ test('rejects a transitive paint edge to a measurement module', () => {
   assert.notEqual(result.status, 0);
   assert.match(result.output, /FORBIDDEN_PAINT_EDGE/);
   assert.match(result.output, /canvas-page\.ts.*helper\.ts.*line-layout\.ts/s);
+});
+
+test('rejects new parser-model dependencies inside retained layout modules', () => {
+  const root = initializeRepository();
+  establishA1Baseline(root);
+  write(root, 'packages/docx/src/parser-model.ts', 'export const parserFacts = true;\n');
+  write(
+    root,
+    'packages/docx/src/layout/numbering-marker.ts',
+    "import { parserFacts } from '../parser-model.js';\nexport const marker = parserFacts;\n",
+  );
+
+  const result = runChecker(root, '--base-ref', 'main');
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.output, /LAYOUT_PARSER_MODEL_DEPENDENCY/);
+  assert.match(result.output, /layout\/numbering-marker\.ts.*parser-model\.ts/s);
+});
+
+test('rejects transitive layout-to-parser-model bridge modules', () => {
+  const root = initializeLayoutParserBoundaryRepository();
+  write(
+    root,
+    'packages/docx/src/layout/numbering-marker.ts',
+    "import { bridgeFacts as markerFacts } from '../parser-bridge.js';\nexport const marker = markerFacts;\n",
+  );
+  write(
+    root,
+    'packages/docx/src/parser-bridge.ts',
+    "import { parserFacts } from './parser-model.js';\nexport const bridgeFacts = parserFacts;\n",
+  );
+
+  const result = runChecker(root, '--final');
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.output, /LAYOUT_PARSER_MODEL_DEPENDENCY/);
+  assert.match(
+    result.output,
+    /layout\/numbering-marker\.ts.*parser-bridge\.ts.*parser-model\.ts/s,
+  );
+});
+
+test('rejects literal dynamic and CommonJS layout-to-parser-model bridges', () => {
+  for (const source of [
+    "export const load = () => import('../parser-bridge.js');\n",
+    "export const load = () => require('../parser-bridge.js');\n",
+  ]) {
+    const root = initializeLayoutParserBoundaryRepository();
+    write(root, 'packages/docx/src/layout/numbering-marker.ts', source);
+    write(
+      root,
+      'packages/docx/src/parser-bridge.ts',
+      "export { parserFacts } from './parser-model.js';\n",
+    );
+
+    const result = runChecker(root, '--final');
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.output, /LAYOUT_PARSER_MODEL_DEPENDENCY/);
+    assert.match(result.output, /numbering-marker\.ts.*parser-bridge\.ts.*parser-model\.ts/s);
+  }
+});
+
+test('rejects non-literal dynamic and CommonJS imports reachable from layout', () => {
+  for (const source of [
+    "export const load = (name: string) => import(`../${name}.js`);\n",
+    "export const load = (name: string) => require('../' + name + '.js');\n",
+  ]) {
+    const root = initializeLayoutParserBoundaryRepository();
+    write(root, 'packages/docx/src/layout/numbering-marker.ts', source);
+
+    const result = runChecker(root, '--final');
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.output, /NON_LITERAL_LAYOUT_MODULE_EDGE/);
+    assert.match(result.output, /layout\/numbering-marker\.ts/);
+  }
+});
+
+test('allows only the exact parser normalization gateway and erased type-only contracts', () => {
+  const gateway = initializeLayoutParserBoundaryRepository();
+  write(
+    gateway,
+    'packages/docx/src/layout/numbering-marker.ts',
+    "import { documentMathOccurrences } from './resources.js';\nexport const marker = documentMathOccurrences;\n",
+  );
+  write(
+    gateway,
+    'packages/docx/src/layout/resources.ts',
+    exactParserGatewaySource,
+  );
+  assert.equal(runChecker(gateway, '--final').status, 0);
+
+  const typeOnly = initializeLayoutParserBoundaryRepository();
+  write(
+    typeOnly,
+    'packages/docx/src/layout/numbering-marker.ts',
+    "import type { BridgeFacts } from '../parser-contract.js';\nexport type MarkerFacts = BridgeFacts;\n",
+  );
+  write(
+    typeOnly,
+    'packages/docx/src/parser-contract.ts',
+    "import { parserFacts } from './parser-model.js';\nexport interface BridgeFacts { value: typeof parserFacts; }\n",
+  );
+  assert.equal(runChecker(typeOnly, '--final').status, 0);
+});
+
+test('rejects non-exact parser-model syntax in the parser normalization gateway', () => {
+  for (const source of [
+    "import { normalizeInternalDocumentModel, parserFacts } from '../parser-model.js';\nexport const value = [normalizeInternalDocumentModel, parserFacts];\n",
+    "import { normalizeInternalDocumentModel as normalize } from '../parser-model.js';\nexport const value = normalize;\n",
+    "import * as parserModel from '../parser-model.js';\nexport const value = parserModel;\n",
+    "export { normalizeInternalDocumentModel } from '../parser-model.js';\n",
+    "export * from '../parser-model.js';\n",
+  ]) {
+    const root = initializeLayoutParserBoundaryRepository();
+    write(root, 'packages/docx/src/layout/resources.ts', source);
+
+    const result = runChecker(root, '--final');
+
+    assert.notEqual(result.status, 0, source);
+    assert.match(result.output, /LAYOUT_PARSER_MODEL_DEPENDENCY/, source);
+    assert.match(result.output, /layout\/resources\.ts.*parser-model\.ts/s, source);
+  }
+});
+
+test('rejects parser normalizer re-exports, leaks, and local aliases in the gateway', () => {
+  for (const source of [
+    `${exactParserGatewaySource}export { normalizeInternalDocumentModel };\n`,
+    `${exactParserGatewaySource}export const leak = normalizeInternalDocumentModel;\n`,
+    "import { normalizeInternalDocumentModel } from '../parser-model.js';\nconst normalize = normalizeInternalDocumentModel;\nexport function documentMathOccurrences(doc: unknown): unknown[] { return [...normalize(doc).mathOccurrences]; }\n",
+  ]) {
+    const root = initializeLayoutParserBoundaryRepository();
+    write(root, 'packages/docx/src/layout/resources.ts', source);
+
+    const result = runChecker(root, '--final');
+
+    assert.notEqual(result.status, 0, source);
+    assert.match(result.output, /LAYOUT_PARSER_MODEL_DEPENDENCY/, source);
+    assert.match(result.output, /layout\/resources\.ts.*normalizeInternalDocumentModel/s, source);
+  }
+});
+
+test('traverses gateway bridges and rejects literal dynamic and CommonJS parser edges', () => {
+  const bridge = initializeLayoutParserBoundaryRepository();
+  write(
+    bridge,
+    'packages/docx/src/layout/resources.ts',
+    "import { normalizeInternalDocumentModel } from '../parser-model.js';\nimport { bridgeFacts } from '../parser-bridge.js';\nexport const value = [normalizeInternalDocumentModel, bridgeFacts];\n",
+  );
+  write(
+    bridge,
+    'packages/docx/src/parser-bridge.ts',
+    "import { parserFacts } from './parser-model.js';\nexport const bridgeFacts = parserFacts;\n",
+  );
+  const bridged = runChecker(bridge, '--final');
+  assert.notEqual(bridged.status, 0);
+  assert.match(bridged.output, /LAYOUT_PARSER_MODEL_DEPENDENCY/);
+  assert.match(bridged.output, /layout\/resources\.ts.*parser-bridge\.ts.*parser-model\.ts/s);
+
+  for (const source of [
+    "export const load = () => import('../parser-model.js');\n",
+    "export const load = () => require('../parser-model.js');\n",
+  ]) {
+    const root = initializeLayoutParserBoundaryRepository();
+    write(root, 'packages/docx/src/layout/resources.ts', source);
+
+    const result = runChecker(root, '--final');
+
+    assert.notEqual(result.status, 0, source);
+    assert.match(result.output, /LAYOUT_PARSER_MODEL_DEPENDENCY/, source);
+  }
+});
+
+test('rejects non-literal dynamic and CommonJS edges in the parser gateway', () => {
+  for (const source of [
+    "export const load = (name: string) => import(`../${name}.js`);\n",
+    "export const load = (name: string) => require('../' + name + '.js');\n",
+  ]) {
+    const root = initializeLayoutParserBoundaryRepository();
+    write(root, 'packages/docx/src/layout/resources.ts', source);
+
+    const result = runChecker(root, '--final');
+
+    assert.notEqual(result.status, 0, source);
+    assert.match(result.output, /NON_LITERAL_LAYOUT_MODULE_EDGE/, source);
+    assert.match(result.output, /layout\/resources\.ts/, source);
+  }
 });
 
 test('rejects any paint runtime dependency outside the paint owner directory', () => {
@@ -102,6 +351,21 @@ test('allows only named shared atomic painters from core', () => {
   write(root, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
   write(root, 'packages/docx/src/paint/canvas-page.ts', "import { renderChart } from '@silurus/ooxml-core';\nexport { renderChart };\n");
   assert.equal(runChecker(root, '--final').status, 0);
+
+  write(root, 'packages/docx/src/paint/canvas-page.ts', "import { canvasFontString } from '@silurus/ooxml-core';\nexport { canvasFontString };\n");
+  assert.equal(runChecker(root, '--final').status, 0);
+
+  for (const source of [
+    "import { createCanvasFontRoute } from '@silurus/ooxml-core';\nexport { createCanvasFontRoute };\n",
+    "import { canvasFontString as fontString } from '@silurus/ooxml-core';\nexport { fontString };\n",
+    "import * as core from '@silurus/ooxml-core';\nexport { core };\n",
+    "export const load = () => import('@silurus/ooxml-core');\n",
+  ]) {
+    write(root, 'packages/docx/src/paint/canvas-page.ts', source);
+    const rejected = runChecker(root, '--final');
+    assert.notEqual(rejected.status, 0);
+    assert.match(rejected.output, /FORBIDDEN_PAINT_EDGE/);
+  }
 
   write(root, 'packages/docx/src/paint/canvas-page.ts', "import { measureTextWidth as renderChart } from '@silurus/ooxml-core';\nexport { renderChart };\n");
   const result = runChecker(root, '--final');
@@ -200,7 +464,7 @@ test('rejects moving a legacy symbol to another file without increasing its glob
   assert.match(result.output, /BASELINE_EXPANSION/);
 });
 
-test('rejects renaming a migration flag and changing a legacy declaration body', () => {
+test('rejects renaming a migration flag and changing a hash-frozen leaf declaration', () => {
   const renamed = initializeRepository();
   establishA1Baseline(renamed);
   write(renamed, 'packages/docx/src/new-switch.ts', 'export const useLegacyLayout = true;\n');
@@ -210,10 +474,142 @@ test('rejects renaming a migration flag and changing a legacy declaration body',
 
   const changed = initializeRepository();
   establishA1Baseline(changed);
-  write(changed, 'packages/docx/src/renderer.ts', 'export function computePages() { return [1]; }\n');
+  write(changed, 'packages/docx/src/renderer.ts', 'export function computePages() { return []; }\nexport function computeTableLayout() { return [1]; }\n');
   const changedResult = runChecker(changed, '--base-ref', 'main');
   assert.notEqual(changedResult.status, 0);
   assert.match(changedResult.output, /LEGACY_DECLARATION_CHANGED/);
+});
+
+test('allows only exact A2 service and option dependency threading through computePages', () => {
+  const root = initializeRepository();
+  establishA1Baseline(root);
+  write(root, 'packages/docx/src/renderer.ts', 'function buildMeasureState(ctx: unknown, fonts: unknown, services?: LayoutServices, options?: LayoutOptions) { return [ctx, fonts, services, options]; }\nexport function createLayoutServices() {}\nexport function computePages(ctx: unknown, resolvedLocalFonts: unknown = {}, layoutServices?: LayoutServices, layoutOptions?: LayoutOptions) { const measure = buildMeasureState(ctx, resolvedLocalFonts, layoutServices, layoutOptions); return [measure]; }\nexport function computeTableLayout() { return []; }\n');
+
+  const result = runChecker(root, '--base-ref', 'main');
+
+  assert.equal(result.status, 0, result.output);
+});
+
+test('allows only an exact A2 Canvas route argument on renderShapeText font calls', () => {
+  const root = initializeShapeRepository();
+  write(root, 'packages/docx/src/renderer.ts', 'function buildFont(bold: boolean, italic: boolean, size: number, family: string | null, classes: Record<string, string>, route?: unknown) { return String([bold, italic, size, family, classes, route]); }\nexport function renderShapeText(s: { bold: boolean; italic: boolean; size: number; family: string | null; fontRoute?: unknown }, classes: Record<string, string>) { return buildFont(s.bold, s.italic, s.size, s.family, classes, s.fontRoute); }\n');
+
+  const result = runChecker(root, '--base-ref', 'main');
+
+  assert.equal(result.status, 0, result.output);
+});
+
+test('allows only exact A2 routes on renderShapeText line-metric probes', () => {
+  const root = initializeMetricShapeRepository();
+  write(root, 'packages/docx/src/renderer.ts', 'function buildFont(bold: boolean, italic: boolean, size: number, family: string | null, classes: Record<string, string>, route?: unknown) { return String([bold, italic, size, family, classes, route]); }\nexport function renderShapeText(s: { bold: boolean; italic: boolean; size: number; family: string | null; fontRoute?: unknown; eaFloorRoute?: unknown }, classes: Record<string, string>) { const shapeLineMetrics = (family: string | null, familyRoute?: CanvasFontRoute, familyEaRoute?: CanvasFontRoute) => { const measureRoute = eaIntended > asciiIntended ? familyEaRoute : familyRoute; return buildFont(s.bold, s.italic, s.size, family, classes, measureRoute); }; return shapeLineMetrics(s.family, s.fontRoute, s.eaFloorRoute); }\n');
+
+  const result = runChecker(root, '--base-ref', 'main');
+
+  assert.equal(result.status, 0, result.output);
+});
+
+test('allows only exact A2 numbering snapshot, shape, and retained paint threading in renderShapeText', () => {
+  const root = initializeNumberingShapeRepository();
+  write(root, 'packages/docx/src/renderer.ts', exactNumberingShapeSource);
+
+  const result = runChecker(root, '--base-ref', 'main');
+
+  assert.equal(result.status, 0, result.output);
+});
+
+test('rejects non-exact renderShapeText numbering shape and paint migrations', () => {
+  const cases = [
+    exactNumberingShapeSource.replace('block.fontSizePt);', 'block.fontSizePt + 1);'),
+    exactNumberingShapeSource.replace('markerTextLayout?.shape.advancePt', 'markerTextLayout?.shape.advancePt + 1'),
+    exactNumberingShapeSource.replace('paintNumberingMarkerText(ctx, markerTextLayout', 'paintNumberingMarkerText(ctx, alteredLayout'),
+    exactNumberingShapeSource.replace('const markerShapeInput = numberingMarkerShapeInput(block.numbering, block.fontSizePt); ', ''),
+    exactNumberingShapeSource.replace('return markerW;', 'sideEffect(); return markerW;'),
+  ];
+  for (const source of cases) {
+    const root = initializeNumberingShapeRepository();
+    write(root, 'packages/docx/src/renderer.ts', source);
+    const result = runChecker(root, '--base-ref', 'main');
+    assert.notEqual(result.status, 0);
+    assert.match(result.output, /LEGACY_DECLARATION_CHANGED/);
+  }
+});
+
+test('rejects non-exact renderShapeText line-metric route threading', () => {
+  for (const source of [
+    'function buildFont(bold: boolean, italic: boolean, size: number, family: string | null, classes: Record<string, string>, route?: unknown) { return String([bold, italic, size, family, classes, route]); }\nexport function renderShapeText(s: { bold: boolean; italic: boolean; size: number; family: string | null; fontRoute?: unknown; eaFloorRoute?: unknown }, classes: Record<string, string>) { const shapeLineMetrics = (family: string | null, familyRoute?: CanvasFontRoute, familyEaRoute?: CanvasFontRoute) => { const measureRoute = s.size > 0 ? familyEaRoute : undefined; return buildFont(s.bold, s.italic, s.size, family, classes, measureRoute); }; return shapeLineMetrics(s.family, s.fontRoute, s.eaFloorRoute); }\n',
+    'function buildFont(bold: boolean, italic: boolean, size: number, family: string | null, classes: Record<string, string>, route?: unknown) { return String([bold, italic, size, family, classes, route]); }\nexport function renderShapeText(s: { bold: boolean; italic: boolean; size: number; family: string | null; fontRoute?: unknown; eaFloorRoute?: unknown }, classes: Record<string, string>) { const shapeLineMetrics = (family: string | null, familyRoute?: unknown, familyEaRoute?: CanvasFontRoute) => { const measureRoute = s.size > 0 ? familyEaRoute : familyRoute; return buildFont(s.bold, s.italic, s.size, family, classes, measureRoute); }; return shapeLineMetrics(s.family, s.fontRoute, s.eaFloorRoute); }\n',
+    'function buildFont(bold: boolean, italic: boolean, size: number, family: string | null, classes: Record<string, string>, route?: unknown) { return String([bold, italic, size, family, classes, route]); }\nexport function renderShapeText(s: { bold: boolean; italic: boolean; size: number; family: string | null; fontRoute?: unknown; eaFloorRoute?: unknown }, classes: Record<string, string>) { const shapeLineMetrics = (family: string | null, familyRoute?: CanvasFontRoute, familyEaRoute?: CanvasFontRoute) => { const measureRoute = s.size > 0 ? familyEaRoute : familyRoute; buildFont(s.bold, s.italic, s.size, family, classes, measureRoute); return "changed"; }; return shapeLineMetrics(s.family, s.fontRoute, s.eaFloorRoute); }\n',
+    'function buildFont(bold: boolean, italic: boolean, size: number, family: string | null, classes: Record<string, string>, route?: unknown) { return String([bold, italic, size, family, classes, route]); }\nexport function renderShapeText(s: { bold: boolean; italic: boolean; size: number; family: string | null; fontRoute?: unknown; eaFloorRoute?: unknown }, classes: Record<string, string>) { const shapeLineMetrics = (family: string | null, familyRoute?: CanvasFontRoute, familyEaRoute?: CanvasFontRoute) => { const measureRoute = sideEffect() ? familyEaRoute : familyRoute; return buildFont(s.bold, s.italic, s.size, family, classes, measureRoute); }; return shapeLineMetrics(s.family, s.fontRoute, s.eaFloorRoute); }\n',
+    'function buildFont(bold: boolean, italic: boolean, size: number, family: string | null, classes: Record<string, string>, route?: unknown) { return String([bold, italic, size, family, classes, route]); }\nexport function renderShapeText(s: { bold: boolean; italic: boolean; size: number; family: string | null; fontRoute?: unknown; eaFloorRoute?: unknown }, classes: Record<string, string>) { const shapeLineMetrics = (family: string | null, familyRoute?: CanvasFontRoute, familyEaRoute?: CanvasFontRoute) => { let measureRoute = eaIntended > asciiIntended ? familyEaRoute : familyRoute; return buildFont(s.bold, s.italic, s.size, family, classes, measureRoute); }; return shapeLineMetrics(s.family, s.fontRoute, s.eaFloorRoute); }\n',
+    'function buildFont(bold: boolean, italic: boolean, size: number, family: string | null, classes: Record<string, string>, route?: unknown) { return String([bold, italic, size, family, classes, route]); }\nexport function renderShapeText(s: { bold: boolean; italic: boolean; size: number; family: string | null; fontRoute?: unknown; eaFloorRoute?: unknown }, classes: Record<string, string>) { const shapeLineMetrics = (familyRoute?: CanvasFontRoute, familyEaRoute?: CanvasFontRoute, family: string | null) => { const measureRoute = eaIntended > asciiIntended ? familyEaRoute : familyRoute; return buildFont(s.bold, s.italic, s.size, family, classes, measureRoute); }; return shapeLineMetrics(s.fontRoute, s.eaFloorRoute, s.family); }\n',
+  ]) {
+    const root = initializeMetricShapeRepository();
+    write(root, 'packages/docx/src/renderer.ts', source);
+    const result = runChecker(root, '--base-ref', 'main');
+    assert.notEqual(result.status, 0);
+    assert.match(result.output, /LEGACY_DECLARATION_CHANGED/);
+  }
+});
+
+test('rejects other renderShapeText changes beside exact Canvas route threading', () => {
+  for (const source of [
+    'function buildFont(bold: boolean, italic: boolean, size: number, family: string | null, classes: Record<string, string>, route?: unknown) { return String([bold, italic, size, family, classes, route]); }\nexport function renderShapeText(s: { bold: boolean; italic: boolean; size: number; family: string | null; fontRoute?: unknown }, classes: Record<string, string>) { buildFont(s.bold, s.italic, s.size, s.family, classes, s.fontRoute); return "changed"; }\n',
+    'function buildFont(bold: boolean, italic: boolean, size: number, family: string | null, classes: Record<string, string>, route?: unknown) { return String([bold, italic, size, family, classes, route]); }\nexport function renderShapeText(s: { bold: boolean; italic: boolean; size: number; family: string | null; fontRoute?: unknown }, classes: Record<string, string>) { return buildFont(s.bold, s.italic, s.size, s.family, classes, undefined); }\n',
+  ]) {
+    const root = initializeShapeRepository();
+    write(root, 'packages/docx/src/renderer.ts', source);
+    const result = runChecker(root, '--base-ref', 'main');
+    assert.notEqual(result.status, 0);
+    assert.match(result.output, /LEGACY_DECLARATION_CHANGED/);
+  }
+});
+
+test('rejects unrelated computePages control-flow, calls, and parameters during A2 threading', () => {
+  const cases = [
+    'function buildMeasureState(ctx: unknown, fonts: unknown, services?: LayoutServices, options?: LayoutOptions) { return [ctx, fonts, services, options]; }\nexport function computePages(ctx: unknown, resolvedLocalFonts: unknown = {}, layoutServices?: LayoutServices, layoutOptions?: LayoutOptions) { const measure = buildMeasureState(ctx, resolvedLocalFonts, layoutServices, layoutOptions); return []; }\nexport function computeTableLayout() { return []; }\n',
+    'function buildMeasureState(ctx: unknown, fonts: unknown, services?: LayoutServices, options?: LayoutOptions) { return [ctx, fonts, services, options]; }\nexport function computePages(ctx: unknown, resolvedLocalFonts: unknown = {}, layoutServices?: LayoutServices, layoutOptions?: LayoutOptions) { buildMeasureState(ctx, resolvedLocalFonts, layoutServices, layoutOptions); const measure = buildMeasureState(ctx, resolvedLocalFonts, layoutServices, layoutOptions); return [measure]; }\nexport function computeTableLayout() { return []; }\n',
+    'function buildMeasureState(ctx: unknown, fonts: unknown, services?: LayoutServices, options?: LayoutOptions) { return [ctx, fonts, services, options]; }\nexport function computePages(ctx: unknown, resolvedLocalFonts: unknown = {}, layoutServices?: LayoutServices, layoutOptions?: LayoutOptions, unrelated?: boolean) { const measure = buildMeasureState(ctx, resolvedLocalFonts, layoutServices, layoutOptions); return [measure]; }\nexport function computeTableLayout() { return []; }\n',
+  ];
+  for (const source of cases) {
+    const root = initializeRepository();
+    establishA1Baseline(root);
+    write(root, 'packages/docx/src/renderer.ts', source);
+    const result = runChecker(root, '--base-ref', 'main');
+    assert.notEqual(result.status, 0);
+    assert.match(result.output, /LEGACY_DECLARATION_CHANGED|BASELINE_EXPANSION/);
+  }
+});
+
+test('rejects any non-exact A2 parameter syntax and pass-through expression', () => {
+  const variants = [
+    'layoutServices: LayoutServices, layoutOptions?: LayoutOptions',
+    'layoutServices?: LayoutServices = undefined, layoutOptions?: LayoutOptions',
+    '...layoutServices: LayoutServices[], layoutOptions?: LayoutOptions',
+    'readonly layoutServices?: LayoutServices, layoutOptions?: LayoutOptions',
+    'layoutOptions?: LayoutOptions, layoutServices?: LayoutServices',
+  ];
+  for (const tail of variants) {
+    const root = initializeRepository();
+    establishA1Baseline(root);
+    write(root, 'packages/docx/src/renderer.ts', `function buildMeasureState(ctx: unknown, fonts: unknown, services?: LayoutServices, options?: LayoutOptions) { return [ctx, fonts, services, options]; }\nexport function createLayoutServices() {}\nexport function computePages(ctx: unknown, resolvedLocalFonts: unknown = {}, ${tail}) { const measure = buildMeasureState(ctx, resolvedLocalFonts, layoutServices, layoutOptions); return [measure]; }\nexport function computeTableLayout() { return []; }\n`);
+    const result = runChecker(root, '--base-ref', 'main');
+    assert.notEqual(result.status, 0, tail);
+    assert.match(result.output, /LEGACY_DECLARATION_CHANGED|BASELINE_EXPANSION/);
+  }
+
+  const expressions = [
+    'layoutServices as LayoutServices, layoutOptions',
+    'layoutServices, layoutOptions ?? undefined',
+    '{ ...layoutServices }, layoutOptions',
+  ];
+  for (const args of expressions) {
+    const root = initializeRepository();
+    establishA1Baseline(root);
+    write(root, 'packages/docx/src/renderer.ts', `function buildMeasureState(ctx: unknown, fonts: unknown, services?: LayoutServices, options?: LayoutOptions) { return [ctx, fonts, services, options]; }\nexport function createLayoutServices() {}\nexport function computePages(ctx: unknown, resolvedLocalFonts: unknown = {}, layoutServices?: LayoutServices, layoutOptions?: LayoutOptions) { const measure = buildMeasureState(ctx, resolvedLocalFonts, ${args}); return [measure]; }\nexport function computeTableLayout() { return []; }\n`);
+    const result = runChecker(root, '--base-ref', 'main');
+    assert.notEqual(result.status, 0, args);
+    assert.match(result.output, /LEGACY_DECLARATION_CHANGED|BASELINE_EXPANSION/);
+  }
 });
 
 test('final mode enforces the renderer adapter export and import allowlists', () => {

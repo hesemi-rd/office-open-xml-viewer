@@ -1,11 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import {
-  clearResolvedLocalFonts,
   paginateDocument,
   renderDocumentToCanvas,
-  setResolvedLocalFonts,
 } from './renderer.js';
+import { createLayoutServices } from './renderer.js';
 import { paragraphMarkBelowBaselinePt, paragraphMarkLineHeight } from './line-layout.js';
+import { canvasFontString } from '@silurus/ooxml-core';
 import type {
   BodyElement,
   DocParagraph,
@@ -279,6 +279,81 @@ describe('empty paragraph mark line height (§17.3.1.29 / §17.3.1.33)', () => {
     expect(font).toBe('');
   });
 
+  it('resolves an empty mark probe through the same registered substitute route in main and worker services', () => {
+    const makeContext = () => {
+      let font = '';
+      const measured: Array<{ text: string; font: string }> = [];
+      const ctx = {
+        get font() { return font; },
+        set font(value: string) { font = value; },
+        letterSpacing: '0px',
+        fontKerning: 'auto' as CanvasFontKerning,
+        measureText(text: string) {
+          measured.push({ text, font });
+          const substitute = font.includes('Carlito');
+          return {
+            width: 0,
+            fontBoundingBoxAscent: substitute ? 12 : 8,
+            fontBoundingBoxDescent: substitute ? 3 : 2,
+            actualBoundingBoxAscent: substitute ? 12 : 8,
+            actualBoundingBoxDescent: substitute ? 3 : 2,
+          } as TextMetrics;
+        },
+      } as unknown as CanvasRenderingContext2D;
+      return { ctx, measured };
+    };
+    const p = {
+      ...para(''),
+      defaultFontSize: 10,
+      defaultFontFamily: 'Legacy Mark',
+      paragraphMarkFontFacts: {
+        fontFamily: 'Legacy Mark',
+        fontSlots: {
+          direct: { ascii: 'Legacy Direct' },
+          theme: { ascii: 'Calibri' },
+          themePresent: { ascii: true, highAnsi: false, eastAsia: false, complexScript: false },
+        },
+      },
+    } as unknown as DocParagraph;
+    const model = {
+      ...docOf([]),
+      majorFont: 'Calibri',
+    };
+    const mainContext = makeContext();
+    const workerContext = makeContext();
+    const options = (ctx: CanvasRenderingContext2D) => ({
+      useGoogleFonts: true,
+      googleFaces: [{
+        family: 'Carlito', weight: '400', style: 'normal', status: 'loaded',
+      } as FontFace],
+      measureContext: ctx,
+    });
+    const main = createLayoutServices(model, options(mainContext.ctx));
+    const worker = createLayoutServices(model, options(workerContext.ctx));
+    const measureMark = (
+      ctx: CanvasRenderingContext2D,
+      service: typeof main.text,
+    ) => paragraphMarkLineHeight(
+      p, 1, { type: null, linePitchPt: null }, false, false,
+      ctx, {}, null, service.localMetrics, service,
+    );
+
+    expect(main.text.fingerprint).toBe(worker.text.fingerprint);
+    expect(measureMark(mainContext.ctx, main.text)).toBe(15);
+    expect(measureMark(workerContext.ctx, worker.text)).toBe(15);
+    const expectedRoute = main.text.shape({
+      text: 'x', fontSizePt: 10,
+      fonts: { ascii: 'Legacy Direct' },
+      themeFonts: { ascii: 'Calibri' },
+      themeFontPresence: { ascii: true },
+    }).spans[0]!.fontRoute;
+    const expectedFont = canvasFontString(expectedRoute, 10, 400, 'normal');
+    expect(mainContext.measured.filter(({ text }) => text === 'x').map(({ font }) => font))
+      .toContain(expectedFont);
+    expect(workerContext.measured.filter(({ text }) => text === 'x').map(({ font }) => font))
+      .toContain(expectedFont);
+  });
+
   it('uses the same resolved local mark metrics for pagination and paint', async () => {
     const authoredFamily = 'Authored Family';
     const localPara = (text: string, shading?: string): DocParagraph => ({
@@ -306,13 +381,13 @@ describe('empty paragraph mark line height (§17.3.1.29 / §17.3.1.33)', () => {
     globalWithCanvas.OffscreenCanvas = class {
       getContext() { return makeResolvedMetricCanvas().canvas.getContext('2d'); }
     };
-    setResolvedLocalFonts(model, resolved);
+    const services = createLayoutServices(model, { localMetrics: resolved });
 
     try {
       // Three 15pt local-face line boxes do not fit in the 40pt content band.
       // Before the fix the empty mark used the authored fallback's 10pt box, so
       // all three paragraphs were incorrectly packed onto one page.
-      const pages = paginateDocument(model);
+      const pages = paginateDocument(model, services);
       expect(pages).toHaveLength(2);
       expect(pages[0]).toHaveLength(2);
       expect(pages[1]).toHaveLength(1);
@@ -325,6 +400,7 @@ describe('empty paragraph mark line height (§17.3.1.29 / §17.3.1.33)', () => {
           dpr: 1,
           width: 200,
           prebuiltPages: pages,
+          layoutServices: services,
         });
       }
 
@@ -333,7 +409,6 @@ describe('empty paragraph mark line height (§17.3.1.29 / §17.3.1.33)', () => {
       expect(painted[1].textCalls.map((call) => call.text)).toContain('B');
       expect(painted[0].rectCalls.some((call) => Math.abs(call.height - 15) < 1e-6)).toBe(true);
     } finally {
-      clearResolvedLocalFonts(model);
       if (previousOffscreenCanvas === undefined) delete globalWithCanvas.OffscreenCanvas;
       else globalWithCanvas.OffscreenCanvas = previousOffscreenCanvas;
     }

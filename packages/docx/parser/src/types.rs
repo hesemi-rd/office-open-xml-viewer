@@ -39,6 +39,9 @@ pub struct Document {
     /// no pitches. BTreeMap for deterministic (byte-stable) JSON key order.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub font_family_pitches: BTreeMap<String, String>,
+    /// ECMA-376 §17.8.3.1 font name → w:charset hexadecimal byte.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub font_family_charsets: BTreeMap<String, String>,
     /// ECMA-376 §17.8.3.3-.6 — embedded fonts declared in `word/fontTable.xml`
     /// (`<w:embedRegular>` / `embedBold` / `embedItalic` / `embedBoldItalic`),
     /// resolved through `word/_rels/fontTable.xml.rels` to their obfuscated
@@ -459,8 +462,13 @@ pub struct ColSpec {
 #[derive(Serialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum BodyElement {
-    Paragraph(DocParagraph),
-    Table(DocTable),
+    // Keep the block wrapper compact as paragraph metadata grows. `Box` is
+    // transparent to Serde, so the parser wire shape remains unchanged while
+    // body vectors avoid reserving the largest paragraph payload per element.
+    Paragraph(Box<DocParagraph>),
+    // Tables are similarly recursive and substantially larger than marker
+    // variants; indirection keeps every body-vector slot compact.
+    Table(Box<DocTable>),
     /// Page break. `parity` carries section-break parity intent:
     /// `Some("odd")` = oddPage break (next content must start on an odd
     /// 1-based page), `Some("even")` = evenPage. `None` = a plain `nextPage`
@@ -510,13 +518,13 @@ pub enum BodyElement {
         /// `columns` lets it pick the section's column geometry. Empty when no
         /// section in the inheritance chain declared a header.
         #[serde(default)]
-        headers: HeadersFooters,
+        headers: Box<HeadersFooters>,
         /// ECMA-376 §17.10.1 — the resolved footer set for the section that ENDS
         /// at this marker (see `headers`). sample-13's first section declares a
         /// `first` footer (the DOI line) here; the renderer renders it on that
         /// section's first page.
         #[serde(default)]
-        footers: HeadersFooters,
+        footers: Box<HeadersFooters>,
         /// ECMA-376 §17.10.1 `<w:titlePg>` — whether THIS ending section has a
         /// distinct first-page header/footer. NOT inherited (each sectPr's flag
         /// stands alone, like the body-level `Document.section.title_page`).
@@ -526,7 +534,7 @@ pub enum BodyElement {
         /// `<w:pgMar>` (the renderer then falls back to the body-level section).
         /// The final (body-level) section's geometry stays on `Document.section`.
         #[serde(skip_serializing_if = "Option::is_none")]
-        geom: Option<SectionGeom>,
+        geom: Option<Box<SectionGeom>>,
         /// ECMA-376 §17.6.12 `<w:pgNumType>` — this ENDING section's page-numbering
         /// settings (start / fmt). `None` when the sectPr omits `<w:pgNumType>` (or
         /// carries only chapter attributes) — numbering continues; decimal. Carried
@@ -633,6 +641,11 @@ pub struct DocParagraph {
     /// the ASCII fallback.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_font_family_east_asia: Option<String>,
+    /// Internal effective paragraph-mark run facts used by the shared text
+    /// resolver for empty and anchor-only line metrics. Not part of the stable
+    /// public TypeScript document model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paragraph_mark_font_facts: Option<RunFontFacts>,
     /// ECMA-376 §17.3.1.29 — the paragraph MARK run's resolved `<w:color>`
     /// (direct `pPr/rPr` → pStyle chain → docDefaults, the same `mark_run`
     /// resolution that feeds `default_font_size`; hex 6 lowercased; an
@@ -830,6 +843,11 @@ pub struct NumberingInfo {
     /// bullet) with this family. `None` ⇒ renderer falls back to `font_family`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_family_east_asia: Option<String>,
+    /// Internal effective numbering-level run facts. Kept outside the stable TS
+    /// public model, but serialized so layout can apply the normative four-slot
+    /// §17.3.2.26 selection to every scalar in mixed marker text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_facts: Option<RunFontFacts>,
     /// ECMA-376 §17.9.24 — the numbering level rPr's `<w:color w:val>` (hex 6,
     /// lowercased like run colors). Colors the marker glyph only, never the
     /// paragraph's runs. `None` (absent `<w:color>`) lets the renderer fall
@@ -1264,6 +1282,79 @@ pub enum PathCmd {
     Close,
 }
 
+#[derive(Serialize, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunFontAxisValues {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ascii: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub high_ansi: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub east_asia: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub complex_script: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunFontAxisPresence {
+    pub ascii: bool,
+    pub high_ansi: bool,
+    pub east_asia: bool,
+    pub complex_script: bool,
+}
+
+#[derive(Serialize, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunFontSlots {
+    pub direct: RunFontAxisValues,
+    pub theme: RunFontAxisValues,
+    pub theme_present: RunFontAxisPresence,
+}
+
+/// Internal projection of the effective run properties needed by the DOCX text
+/// service. This is shared by numbering-level text (§17.9.6) and paragraph-mark
+/// line probes (§17.3.1.29); the stable public TypeScript model intentionally
+/// remains unchanged.
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RunFontFacts {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_high_ansi: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_slots: Option<RunFontSlots>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_east_asia: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtl: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_cs: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_size: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_size_cs: Option<f64>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub bold: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub italic: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bold_cs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub italic_cs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang_bidi: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang_east_asia: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kerning: Option<f64>,
+}
+
 #[derive(Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct FieldRun {
@@ -1281,6 +1372,30 @@ pub struct FieldRun {
     pub font_size: f64,
     pub color: Option<String>,
     pub font_family: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_high_ansi: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_slots: Option<RunFontSlots>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_east_asia: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtl: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_cs: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_size_cs: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bold_cs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub italic_cs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang_bidi: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang_east_asia: Option<String>,
     pub background: Option<String>,
     /// "super" | "sub" | None
     pub vert_align: Option<String>,
@@ -1323,6 +1438,11 @@ pub struct TextRun {
     pub font_size: f64,
     pub color: Option<String>,
     pub font_family: Option<String>,
+    /// ECMA-376 §17.3.2.26 hAnsi axis, preserved independently from ascii.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_high_ansi: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_slots: Option<RunFontSlots>,
     /// ECMA-376 §17.3.2.26 eastAsia axis (`<w:rFonts w:eastAsia>`), resolved
     /// through the style chain + docDefaults. CJK characters in this run render
     /// with this family; `font_family` keeps the conflated single-font fallback
@@ -1333,6 +1453,9 @@ pub struct TextRun {
     /// falls back to `font_family`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_family_east_asia: Option<String>,
+    /// Resolved ECMA-376 §17.3.2.26 rFonts@hint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_hint: Option<String>,
     pub is_link: bool,
     pub background: Option<String>,
     /// ECMA-376 §17.3.2.6 — `<w:color w:val="auto"/>` was set on this run. The
@@ -1422,6 +1545,9 @@ pub struct TextRun {
     /// Arabic/Hebrew digit ordering). `None` when unspecified.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lang_bidi: Option<String>,
+    /// Resolved ECMA-376 §17.3.2.20 w:lang/@w:eastAsia.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang_east_asia: Option<String>,
     /// ECMA-376 §17.3.2.34 `<w:snapToGrid>` — run participation in the section
     /// character grid. `Some(false)` opts this run out; `None` inherits.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2070,8 +2196,10 @@ pub struct DocTableRow {
 #[derive(Serialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum CellElement {
-    Paragraph(DocParagraph),
-    Table(DocTable),
+    // Match `BodyElement`: nested cell block vectors must not inherit the full
+    // inline size of the paragraph model, and Serde still emits the same wire.
+    Paragraph(Box<DocParagraph>),
+    Table(Box<DocTable>),
 }
 
 #[derive(Serialize, Debug, Clone, Default)]

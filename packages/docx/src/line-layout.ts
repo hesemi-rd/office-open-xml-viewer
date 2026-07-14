@@ -19,7 +19,7 @@ import type {
   DocParagraph, DocRun, DocxTextRun, ImageRun, ShapeTextRun, FieldRun,
   LineSpacing, TabStop, DocxRunBorder, DocSettings, EmphasisMark,
 } from './types';
-import type { MathNode, KinsokuRules, ChartModel, HyperlinkTarget, NumberFormat, Duotone, ResolvedLocalFontMetric } from '@silurus/ooxml-core';
+import type { CanvasFontRoute, MathNode, KinsokuRules, ChartModel, HyperlinkTarget, NumberFormat, Duotone, ResolvedLocalFontMetric } from '@silurus/ooxml-core';
 import type { RenderState, DecodedImage } from './renderer.js';
 import {
   classifyCjkFont,
@@ -47,6 +47,7 @@ import {
   parseDateTimePictureSwitch,
   fontAdvanceBiasEm,
   normalizeLocalFontMetricFamily,
+  canvasFontString,
 } from '@silurus/ooxml-core';
 import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
 import { groupFitTextRegions, type FitTextRun } from './fit-text.js';
@@ -56,6 +57,11 @@ import {
   wordMinLineStartPx,
 } from './float-layout.js';
 import { verticalRunInkExtraPx } from './vertical-text.js';
+import type { LayoutServices } from './layout/types.js';
+import type { TextLayoutService, TextShapeRequest, TextShapeSpan } from './layout/text.js';
+import { internalParagraph } from './parser-model.js';
+import type { InternalMathRun, InternalTextBearingRun } from './parser-model.js';
+import type { MathLayoutResource } from './layout/resources.js';
 
 export interface LineBoundary {
   segIndex: number;
@@ -88,12 +94,17 @@ export interface LayoutTextSeg extends LayoutSegSource {
   fontSize: number;  // pt
   color: string | null;
   fontFamily: string | null;
+  fontRoute?: CanvasFontRoute;
   /** Exact local face selected during async document loading. The family above
    * is its isolated alias; this measured ratio supplies Word's design-line floor
    * without a version-specific font constant. */
   resolvedLineHeightRatio?: number;
   vertAlign: 'super' | 'sub' | null;
   measuredWidth: number;  // px (set during layout)
+  /** A2 text authority captured during segmentation; production text width and
+   * metrics are resolved through this same service during line layout. */
+  textLayoutService?: TextLayoutService;
+  textShapeRequest?: TextShapeRequest;
   smallCaps?: boolean;
   /** This segment is GLUED to the preceding one (no inter-segment break): they
    *  are case-pieces of the same word emitted at different sizes for small caps
@@ -139,6 +150,8 @@ export interface LayoutTextSeg extends LayoutSegSource {
    *  per segment, so body behaviour is unchanged); the TEXT-BOX metrics
    *  (`lineMetricsFor`) floor on it so a text box matches PR #640/#646/#648. */
   eaFloorFamily?: string | null;
+  /** Exact Canvas route for the explicit East Asian design-line probe. */
+  eaFloorRoute?: CanvasFontRoute;
   resolvedEaFloorLineHeightRatio?: number;
   /** IX1 — the resolved hyperlink target of the originating run (ECMA-376
    *  §17.16.22 external `r:id` URL / §17.16.23 internal `w:anchor` bookmark),
@@ -298,6 +311,8 @@ export interface LayoutImageSeg extends LayoutSegSource {
 /** An inline OMML equation. Measured + drawn via the core math engine. */
 export interface LayoutMathSeg extends LayoutSegSource {
   mathNodes: import('@silurus/ooxml-core').MathNode[];
+  mathResourceKey: string;
+  mathMetadata?: MathLayoutResource;
   display: boolean;
   fontSize: number;  // pt
   color: string | null;
@@ -447,23 +462,13 @@ export interface LineLayoutEnvironment {
   readonly currentNoteNumber?: number;
   readonly verticalCJK?: boolean;
   readonly resolvedLocalFonts?: Readonly<Record<string, ResolvedLocalFontMetric>>;
+  readonly layoutServices?: LayoutServices;
 }
 
 // ── Math (OMML) rendering via MathJax ───────────────────────────────────────
 // Each equation is converted OMML AST -> MathML -> MathJax SVG, then rasterized to
 // an <img> once (async, before pagination). Layout reads cached em-extents
 // synchronously; drawing blits the image. Skipped entirely for math-free documents.
-export interface MathRender {
-  img: CanvasImageSource;
-  /** baseline-relative extents in em (1em = the equation's font size). */
-  widthEm: number;
-  ascentEm: number;
-  descentEm: number;
-}
-
-// Keyed by the run's MathNode[] reference, which is stable from parse through render.
-export const mathRenders = new WeakMap<MathNode[], MathRender>();
-
 /** Arabic-script faces that hosts rarely ship; we substitute them with Noto
  *  Naskh/Sans Arabic web fonts (see DOCX_GOOGLE_FONTS in document.ts — this
  *  list MUST mirror the Arabic entries there). A run whose font is one of these
@@ -582,7 +587,7 @@ export function serifTail(cjk: ReturnType<typeof classifyCjkFont>): string {
  * that object identity gives per-doc caching with zero call-site churn (both
  * callers already pass `fontFamilyClasses`) and no leak: the inner
  * family→result Map is collected with the document's classes object. Same idiom
- * as `sheetAxisCache` / `mathRenders`. Chosen over threading an explicit cache
+ * as `sheetAxisCache`. Chosen over threading an explicit cache
  * param through buildFont because both call sites already carry the classes
  * object, so identity-keying needs no signature changes anywhere.
  */
@@ -763,7 +768,9 @@ export function buildFont(
   sizePx: number,
   family: string | null,
   fontFamilyClasses: Record<string, string> = {},
+  fontRoute?: CanvasFontRoute,
 ): string {
+  if (fontRoute) return canvasFontString(fontRoute, sizePx, bold ? 700 : 400, italic ? 'italic' : 'normal');
   const w = bold ? 'bold' : 'normal';
   const s = italic ? 'italic' : 'normal';
   const f = normalizeFontFamily(family, fontFamilyClasses);
@@ -1256,8 +1263,13 @@ export function paragraphMarkLineMetrics(
   fontFamilyClasses: Record<string, string> = {},
   effectiveLineSpacing: LineSpacing | null = para.lineSpacing,
   resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>> = {},
+  textLayoutService?: TextLayoutService,
 ): MarkLineMetrics {
-  const fs = getDefaultFontSize(para);
+  const facts = internalParagraph(para).paragraphMarkFontFacts;
+  const forceCs = facts?.rtl === true || facts?.cs === true;
+  const fs = forceCs
+    ? (facts?.fontSizeCs ?? facts?.fontSize ?? getDefaultFontSize(para))
+    : (facts?.fontSize ?? getDefaultFontSize(para));
   const authoredFamily = getDefaultFontFamily(para, eastAsian);
   const resolvedLocalFont = authoredFamily
     ? resolvedLocalFonts[normalizeLocalFontMetricFamily(authoredFamily)]
@@ -1265,7 +1277,44 @@ export function paragraphMarkLineMetrics(
   const measuredFamily = resolvedLocalFont?.family ?? authoredFamily;
   let asc: number;
   let desc: number;
-  if (ctx) {
+  if (textLayoutService) {
+    const bold = forceCs ? (facts?.boldCs ?? false) : (facts?.bold ?? false);
+    const italic = forceCs ? (facts?.italicCs ?? false) : (facts?.italic ?? false);
+    const ascii = facts?.fontFamily ?? para.defaultFontFamily ?? authoredFamily;
+    const shaped = textLayoutService.shape({
+      text: eastAsian ? 'あ' : 'x',
+      fontSizePt: fs * scale,
+      fonts: facts?.fontSlots?.direct ?? {
+        ascii,
+        highAnsi: facts?.fontFamilyHighAnsi ?? ascii,
+        eastAsia: facts?.fontFamilyEastAsia ?? para.defaultFontFamilyEastAsia ?? ascii,
+        complexScript: facts?.fontFamilyCs ?? ascii,
+      },
+      themeFonts: facts?.fontSlots?.theme,
+      themeFontPresence: facts?.fontSlots?.themePresent,
+      weight: bold ? 700 : 400,
+      style: italic ? 'italic' : 'normal',
+      complexScript: forceCs,
+      fontHint: facts?.fontHint,
+      eastAsiaLanguage: facts?.langEastAsia,
+      kerning: facts?.kerning == null ? undefined : fs >= facts.kerning,
+      measure: true,
+    });
+    const face = shaped.spans[0]?.font.resolvedFamily ?? authoredFamily;
+    ({ ascent: asc, descent: desc } = correctedLineMetrics(
+      {
+        width: shaped.advancePt,
+        actualBoundingBoxAscent: shaped.ascentPt,
+        actualBoundingBoxDescent: shaped.descentPt,
+        fontBoundingBoxAscent: shaped.ascentPt,
+        fontBoundingBoxDescent: shaped.descentPt,
+      } as TextMetrics,
+      face,
+      fs * scale,
+      fs * scale,
+      eastAsian,
+    ));
+  } else if (ctx) {
     // ECMA-376 §17.3.1.29 / §17.3.1.33: an empty paragraph's mark line reserves
     // the mark font's REAL single-line height — the SAME fontBoundingBox a text
     // line of that font and size uses (layoutLines), so an empty paragraph is
@@ -1295,7 +1344,7 @@ export function paragraphMarkLineMetrics(
   } else {
     ({ asc, desc } = emptyLineNaturalPx(fs, scale));
   }
-  const intendedSingle = resolvedLocalFont
+  const intendedSingle = resolvedLocalFont?.lineHeightRatio != null
     ? fs * scale * resolvedLocalFont.lineHeightRatio
     : emptyIntendedSingleForScriptPx(para, scale, eastAsian);
   const gridCountSingle = eastAsian
@@ -1325,10 +1374,11 @@ export function paragraphMarkLineHeight(
   fontFamilyClasses: Record<string, string> = {},
   effectiveLineSpacing: LineSpacing | null = para.lineSpacing,
   resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>> = {},
+  textLayoutService?: TextLayoutService,
 ): number {
   return paragraphMarkLineMetrics(
     para, scale, grid, paraHasRuby, eastAsian, ctx, fontFamilyClasses, effectiveLineSpacing,
-    resolvedLocalFonts,
+    resolvedLocalFonts, textLayoutService,
   ).advancePx;
 }
 
@@ -1365,11 +1415,12 @@ export function paragraphMarkBelowBaselinePt(
   fontFamilyClasses: Record<string, string>,
   effectiveLineSpacing: LineSpacing | null,
   resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>> = {},
+  textLayoutService?: TextLayoutService,
 ): number {
   // Measured at scale 1 so the returned px value is already in points.
   const m = paragraphMarkLineMetrics(
     para, 1, grid, paraHasRuby, eastAsian, ctx, fontFamilyClasses, effectiveLineSpacing,
-    resolvedLocalFonts,
+    resolvedLocalFonts, textLayoutService,
   );
   return lineBelowBaselinePx(m.advancePx, m.ascentPx, m.descentPx);
 }
@@ -2172,8 +2223,25 @@ function resolveFitTextSegments(
 
 export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment): LayoutSeg[] {
   const segs: LayoutSeg[] = [];
-  const resolvedFont = (family: string | null | undefined): ResolvedLocalFontMetric | undefined =>
-    family ? environment.resolvedLocalFonts?.[normalizeLocalFontMetricFamily(family)] : undefined;
+  const resolvedFont = (
+    family: string | null | undefined,
+    weight = 400,
+    style: 'normal' | 'italic' = 'normal',
+  ): ResolvedLocalFontMetric | undefined => {
+    if (!family) return undefined;
+    const normalized = normalizeLocalFontMetricFamily(family);
+    const metrics = environment.resolvedLocalFonts;
+    if (!metrics) return undefined;
+    const tuple = metrics[`${normalized}:${weight}:${style}`];
+    if (tuple) return tuple;
+    const normal = metrics[normalized];
+    if (weight === 400 && style === 'normal' && normal) return normal;
+    return Object.values(metrics).find((metric) =>
+      normalizeLocalFontMetricFamily(metric.requestedFamily ?? '') === normalized
+      && (metric.weight ?? 400) === weight
+      && (metric.style ?? 'normal') === style,
+    );
+  };
   // Group §17.3.2.14 adjacency over SOURCE RUNS before script/font, word, or
   // small-caps segmentation, but model each tab-delimited fragment as its own
   // source unit. A tab is a position-dependent advance rather than a glyph, so a
@@ -2215,6 +2283,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
     sourceRunIndex: number,
     sourceFragmentIndex?: number,
   ) => {
+    const r: InternalTextBearingRun = base;
     // §17.3.2.33 small caps are sized per character: lowercase LETTERS render two
     // points smaller, uppercase letters and non-alphabetic characters at the full
     // run size. `reduced` (set per case-piece in the loop below) carries that onto
@@ -2224,7 +2293,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
     // Ruby annotation rides with the WHOLE base text (typically 1-2 chars).
     // Splitting on word boundaries would lose the association, so attach
     // the annotation only to the first emitted segment.
-    const baseRuby = (base as DocxTextRun).ruby;
+    const baseRuby = r.ruby;
     const ruby = baseRuby
       ? {
           text: baseRuby.text,
@@ -2232,8 +2301,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
           ...(baseRuby.hpsRaisePt != null ? { hpsRaisePt: baseRuby.hpsRaisePt } : {}),
         }
       : undefined;
-    const revision = (base as DocxTextRun).revision;
-    const r = base as DocxTextRun;
+    const revision = r.revision;
     const rtl = r.rtl === true ? true : undefined;
     const fitTextFragmentEntryIndex = sourceFragmentIndex === undefined
       ? undefined
@@ -2253,10 +2321,9 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         ? { kind: 'internal', ref: r.hyperlinkAnchor }
         : undefined;
 
-    // ECMA-376 §17.3.2.26 content classification. A run with `w:rtl`
-    // (§17.3.2.30) or the `<w:cs/>` toggle (§17.3.2.7) applies complex-script
-    // formatting to ALL of its characters; otherwise each character is routed by
-    // its Unicode block (Arabic/Hebrew/... → cs; Latin/digits/CJK → ascii/hAnsi).
+    // ECMA-376 §17.3.2.26 content classification. w:rtl/w:cs selects the cs
+    // axis except for a character assigned eastAsia while rFonts@hint=eastAsia;
+    // that protected span keeps the non-cs East Asian formatting axis.
     // NOTE rFonts@cs (fontFamilyCs) alone is just a font SLOT and must NOT
     // force cs — e.g. sample-1's Heading1 (Latin) has cstheme + szCs=52 but
     // renders at w:sz=24; forcing cs blew its size up to 26pt.
@@ -2274,6 +2341,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
     // `w:rtl`+`w:cs`+`w:b` (no `w:bCs`) Arabic headings render at regular weight.
     const csFontSize = r.fontSizeCs ?? base.fontSize;
     const csFontFamily = r.fontFamilyCs ?? base.fontFamily;
+    const highAnsiFontFamily = r.fontFamilyHighAnsi ?? base.fontFamily;
     const csBold = r.boldCs ?? false;
     const csItalic = r.italicCs ?? false;
 
@@ -2284,7 +2352,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
     // this same builder (via `shapeRunToDocRun`), so a text box's per-script face
     // is picked here too. Bold/italic/size are NOT axis-specific here — eastAsia
     // shares the Latin (non-cs) toggles, so only the family differs.
-    const eaFontFamily = (base as DocxTextRun).fontFamilyEastAsia ?? base.fontFamily;
+    const eaFontFamily = r.fontFamilyEastAsia ?? base.fontFamily;
 
     // Word classifies European digits in an Arabic/Hebrew complex-script run as
     // AN (§17.3.2.20 w:lang w:bidi): use the bidi language's primary subtag when
@@ -2302,18 +2370,89 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
     // Latin/digits/neutral (ascii face). Each segment stays SINGLE-FONT — one
     // family for its whole `.text` — so the measure==draw / docGrid char-grid
     // invariant holds and the draw loop needs no per-segment font switching.
-    const pushSeg = (text: string, cs: boolean, fontFamily: string | null) => {
+    const pushSeg = (
+      text: string,
+      cs: boolean,
+      fontFamily: string | null,
+      authoritativeSpan?: TextShapeSpan,
+    ) => {
       const bold = cs ? csBold : base.bold;
       const italic = cs ? csItalic : base.italic;
-      const localFont = resolvedFont(fontFamily);
-      const localEaFloor = resolvedFont(eaFontFamily);
-      // Local-metric aliases intentionally register the normal face only. A
-      // bold/italic Canvas request against that alias would synthesize the
-      // style instead of resolving the installed family's real styled face.
-      // Keep the authored family for styled paint/measurement, while retaining
-      // the family-level design line ratio used by Word's line-box calculation.
-      const localPaintFamily = !bold && !italic ? localFont?.family : undefined;
-      const localEaFloorFamily = !bold && !italic ? localEaFloor?.family : undefined;
+      const weight = bold ? 700 : 400;
+      const style = italic ? 'italic' as const : 'normal' as const;
+      const textShapeRequest: TextShapeRequest = Object.freeze({
+        text,
+        fontSizePt: cs ? csFontSize : base.fontSize,
+        fonts: r.fontSlots?.direct ?? {
+          ascii: base.fontFamily,
+          highAnsi: highAnsiFontFamily,
+          eastAsia: eaFontFamily,
+          complexScript: csFontFamily,
+        },
+        themeFonts: r.fontSlots?.theme,
+        themeFontPresence: r.fontSlots?.themePresent,
+        weight,
+        style,
+        complexScript: cs,
+        fontHint: r.fontHint,
+        eastAsiaLanguage: r.langEastAsia,
+        kerning: r.kerning == null
+          ? undefined
+          : (cs ? csFontSize : base.fontSize) >= r.kerning,
+        measure: false,
+      });
+      const shaped = authoritativeSpan
+        ? { spans: [authoritativeSpan] }
+        : environment.layoutServices?.text.shape(textShapeRequest);
+      const resolvedAxisDiffers = shaped?.spans.some((span) =>
+        (span.script === 'complexScript') !== cs,
+      ) ?? false;
+      if (shaped && (shaped.spans.length > 1 || resolvedAxisDiffers)) {
+        for (const span of shaped.spans) {
+          const spanCs = span.script === 'complexScript';
+          const spanFamily = spanCs
+            ? csFontFamily
+            : span.script === 'eastAsia'
+              ? eaFontFamily
+              : span.script === 'highAnsi'
+                ? highAnsiFontFamily
+                : base.fontFamily;
+          pushSeg(span.text, spanCs, spanFamily, span);
+        }
+        return;
+      }
+      const resolvedSpan = shaped?.spans[0];
+      const serviceMetric = (resolvedFamily: string | undefined, requestedFamily?: string) => {
+        if (!resolvedFamily) return undefined;
+        const candidates = Object.values(environment.layoutServices?.text.localMetrics ?? {}).filter((metric) =>
+            normalizeLocalFontMetricFamily(metric.family) === normalizeLocalFontMetricFamily(resolvedFamily)
+            && (metric.weight ?? 400) === weight
+            && (metric.style ?? 'normal') === style,
+          );
+        return candidates.find((metric) => requestedFamily
+          && normalizeLocalFontMetricFamily(metric.requestedFamily ?? '')
+            === normalizeLocalFontMetricFamily(requestedFamily)) ?? candidates[0];
+      };
+      const localFont = resolvedSpan
+        ? serviceMetric(resolvedSpan.font.resolvedFamily, resolvedSpan.font.requestedFamily)
+        : resolvedFont(fontFamily, weight, style);
+      const eaResolution = environment.layoutServices?.text.resolve({
+        fonts: textShapeRequest.fonts,
+        themeFonts: textShapeRequest.themeFonts,
+        themeFontPresence: textShapeRequest.themeFontPresence,
+        slot: 'eastAsia',
+        weight,
+        style,
+      });
+      const localEaFloor = eaResolution
+        ? serviceMetric(eaResolution.resolvedFamily, eaResolution.requestedFamily)
+        : resolvedFont(eaFontFamily, weight, style);
+      const familyLineMetric = localFont ?? (fontFamily
+        ? environment.resolvedLocalFonts?.[normalizeLocalFontMetricFamily(fontFamily)]
+        : undefined);
+      const eaLineMetric = localEaFloor ?? (eaFontFamily
+        ? environment.resolvedLocalFonts?.[normalizeLocalFontMetricFamily(eaFontFamily)]
+        : undefined);
       segs.push({
         text,
         bold,
@@ -2322,17 +2461,20 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         // §17.3.2.40 underline style / colour — carried only on DocxTextRun (a
         // FieldRun draws single). Kept raw ST_Underline; the renderer normalizes
         // to DrawingML §20.1.10.82 at draw time.
-        underlineStyle: (base as DocxTextRun).underlineStyle,
-        underlineColor: (base as DocxTextRun).underlineColor,
+        underlineStyle: r.underlineStyle,
+        underlineColor: r.underlineColor,
         strikethrough: base.strikethrough,
         fontSize: cs ? csFontSize : base.fontSize,
         color: base.color,
-        fontFamily: localPaintFamily ?? fontFamily,
-        resolvedLineHeightRatio: localFont?.lineHeightRatio,
+        fontFamily: resolvedSpan?.font.resolvedFamily ?? localFont?.family ?? fontFamily,
+        fontRoute: resolvedSpan?.fontRoute,
+        resolvedLineHeightRatio: familyLineMetric?.lineHeightRatio,
         vertAlign,
         measuredWidth: 0,
+        textLayoutService: environment.layoutServices?.text,
+        textShapeRequest,
         smallCaps: reduced,
-        joinPrev: gluePending ? true : undefined,
+        joinPrev: gluePending || authoritativeSpan?.breakBefore === false ? true : undefined,
         doubleStrikethrough: base.doubleStrikethrough ?? false,
         highlight: base.highlight ?? null,
         // §17.3.2.12 w:em — carried on both DocxTextRun and FieldRun (a field's
@@ -2347,8 +2489,9 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         digitsAsAN: digitsAsAN ? true : undefined,
         // §17.3.2.26 declared eastAsia axis — recorded for the text-box line-box
         // floor only (see LayoutTextSeg.eaFloorFamily). Inert for the body path.
-        eaFloorFamily: localEaFloorFamily ?? eaFontFamily,
-        resolvedEaFloorLineHeightRatio: localEaFloor?.lineHeightRatio,
+        eaFloorFamily: eaResolution?.resolvedFamily ?? localEaFloor?.family ?? eaFontFamily,
+        eaFloorRoute: eaResolution?.route,
+        resolvedEaFloorLineHeightRatio: eaLineMetric?.lineHeightRatio,
         // IX1 — resolved hyperlink target of the originating run, for the
         // text-layer clickable overlay. Does not affect layout or drawing.
         hyperlink,
@@ -2413,6 +2556,10 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
     // (ascii). Keeps each emitted segment single-font (so a serif ascii digit
     // sits next to a gothic eastAsia title) without changing the cs path.
     const emitNonCs = (slice: string) => {
+      if (environment.layoutServices?.text) {
+        pushSeg(slice, false, base.fontFamily);
+        return;
+      }
       for (const part of splitByEastAsia(slice)) emit(part.text, part.ea ? 'ea' : 'latin');
     };
 
@@ -2449,10 +2596,11 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
           // Mixed Arabic+Latin word (no w:rtl / w:cs): split at script boundaries
           // so each side gets its own (cs vs Latin) size and typeface; the non-cs
           // side then sub-splits at CJK boundaries for the eastAsia face.
-          for (const slice of splitByComplexScript(word)) {
-            if (slice.cs) emit(slice.text, 'cs');
-            else emitNonCs(slice.text);
-          }
+          // ECMA-376 §17.3.2.26 selects the cs axis only when w:cs/w:rtl
+          // forces the run. Arabic/Hebrew code points in an ordinary run stay
+          // on ascii/hAnsi; the text service performs the remaining grapheme-
+          // safe East Asian slot split.
+          emitNonCs(word);
         }
       }
     }
@@ -2549,8 +2697,17 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
       // The parser resolves the paragraph font size; fall back to a nearby run only
       // if it is somehow absent.
       const fontSize = run.fontSize || findNearbyFontSize(runs, runs.indexOf(run));
+      const resourceKey = (run as Partial<InternalMathRun>).resourceKey;
+      if (environment.layoutServices && !resourceKey) {
+        throw new Error('Service-backed math layout requires a normalized structural resource key');
+      }
+      const mathMetadata = resourceKey
+        ? environment.layoutServices?.math.resolve(resourceKey)
+        : undefined;
       segs.push({
         mathNodes: run.nodes,
+        mathResourceKey: resourceKey ?? '',
+        mathMetadata,
         display: run.display,
         fontSize,
         color: null,
@@ -2576,9 +2733,16 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
       const bold = run.bold ?? false;
       const italic = run.italic ?? false;
       const authoredFamily = run.fontFamilyEastAsia ?? run.fontFamily ?? null;
-      const localFont = resolvedFont(authoredFamily);
-      const localEaFloor = resolvedFont(run.fontFamilyEastAsia ?? null);
-      const normalFace = !bold && !italic;
+      const weight = bold ? 700 : 400;
+      const style = italic ? 'italic' as const : 'normal' as const;
+      const localFont = resolvedFont(authoredFamily, weight, style);
+      const localEaFloor = resolvedFont(run.fontFamilyEastAsia ?? null, weight, style);
+      const familyLineMetric = localFont ?? (authoredFamily
+        ? environment.resolvedLocalFonts?.[normalizeLocalFontMetricFamily(authoredFamily)]
+        : undefined);
+      const eaLineMetric = localEaFloor ?? (run.fontFamilyEastAsia
+        ? environment.resolvedLocalFonts?.[normalizeLocalFontMetricFamily(run.fontFamilyEastAsia)]
+        : undefined);
       segs.push({
         text: '',
         metricOnly: true,
@@ -2589,13 +2753,13 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         strikethrough: false,
         fontSize: run.fontSize,
         color: null,
-        fontFamily: (normalFace ? localFont?.family : undefined) ?? authoredFamily,
-        resolvedLineHeightRatio: localFont?.lineHeightRatio,
+        fontFamily: localFont?.family ?? authoredFamily,
+        resolvedLineHeightRatio: familyLineMetric?.lineHeightRatio,
         vertAlign: null,
         measuredWidth: 0,
         eaFloorFamily:
-          (normalFace ? localEaFloor?.family : undefined) ?? run.fontFamilyEastAsia ?? null,
-        resolvedEaFloorLineHeightRatio: localEaFloor?.lineHeightRatio,
+          localEaFloor?.family ?? run.fontFamilyEastAsia ?? null,
+        resolvedEaFloorLineHeightRatio: eaLineMetric?.lineHeightRatio,
         snapToCharacterGrid: false,
       });
     }
@@ -3079,7 +3243,22 @@ export function layoutLines(
   };
 
   const measureText = (s: LayoutTextSeg): TextMetrics => {
-    setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses));
+    if (s.textLayoutService && s.textShapeRequest) {
+      const shaped = s.textLayoutService.shape({
+        ...s.textShapeRequest,
+        text: s.text,
+        fontSizePt: effectiveFontPx(s),
+        measure: true,
+      });
+      return {
+        width: shaped.advancePt,
+        actualBoundingBoxAscent: shaped.ascentPt,
+        actualBoundingBoxDescent: shaped.descentPt,
+        fontBoundingBoxAscent: shaped.ascentPt,
+        fontBoundingBoxDescent: shaped.descentPt,
+      } as TextMetrics;
+    }
+    setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses, s.fontRoute));
     const prevKern = setSegKerning(s);
     const m = ctx.measureText(s.text);
     restoreKerning(prevKern);
@@ -3097,6 +3276,10 @@ export function layoutLines(
   // select it via measureText / setMeasureFont immediately before).
   const verticalInkExtra = (s: LayoutTextSeg, text: string): number => {
     if (!s.verticalRun) return 0;
+    // The format-neutral text service may measure on a different adapter and
+    // restores its Canvas state. The vertical-feature probe is intentionally
+    // paint-context-local, so select the same resolved face explicitly here.
+    setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses, s.fontRoute));
     const prevKern = setSegKerning(s);
     try {
       return verticalRunInkExtraPx(ctx, text);
@@ -3183,7 +3366,16 @@ export function layoutLines(
   // text/length so char-spacing scales with the piece — the split-prefix vs
   // whole-segment advances must agree.
   const strAdvance = (s: LayoutTextSeg, text: string): number => {
-    setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses));
+    if (s.textLayoutService && s.textShapeRequest) {
+      const shaped = s.textLayoutService.shape({
+        ...s.textShapeRequest,
+        text,
+        fontSizePt: effectiveFontPx(s),
+        measure: true,
+      });
+      return segAdvanceWidth({ ...s, text }, shaped.advancePt + verticalInkExtra(s, text), gridDeltaPx, scale);
+    }
+    setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses, s.fontRoute));
     const prevKern = setSegKerning(s);
     const natural = ctx.measureText(text).width;
     restoreKerning(prevKern);
@@ -3413,8 +3605,8 @@ export function layoutLines(
 
     // ── Math segment ─────────────────────────────────────
     if ('mathNodes' in seg) {
-      const render = mathRenders.get(seg.mathNodes);
-      if (!render) {
+      const render = seg.mathMetadata;
+      if (!render || render.available === false) {
         const emPx = seg.fontSize * scale;
         setMeasureFont(buildFont(false, false, emPx, null, fontFamilyClasses));
         const m = ctx.measureText(seg.fallbackText);
@@ -3483,10 +3675,26 @@ export function layoutLines(
     let metricM = m;
     let metricEmPx = effectiveFontPx(s);
     if (s.smallCaps && !s.vertAlign && metricEmPx !== fullPx) {
-      const prevFont = ctx.font;
-      ctx.font = buildFont(s.bold, s.italic, fullPx, s.fontFamily, fontFamilyClasses);
-      metricM = ctx.measureText(s.text || 'X');
-      ctx.font = prevFont;
+      if (s.textLayoutService && s.textShapeRequest) {
+        const shaped = s.textLayoutService.shape({
+          ...s.textShapeRequest,
+          text: s.text || 'X',
+          fontSizePt: fullPx,
+          measure: true,
+        });
+        metricM = {
+          width: shaped.advancePt,
+          actualBoundingBoxAscent: shaped.ascentPt,
+          actualBoundingBoxDescent: shaped.descentPt,
+          fontBoundingBoxAscent: shaped.ascentPt,
+          fontBoundingBoxDescent: shaped.descentPt,
+        } as TextMetrics;
+      } else {
+        const prevFont = ctx.font;
+        ctx.font = buildFont(s.bold, s.italic, fullPx, s.fontFamily, fontFamilyClasses, s.fontRoute);
+        metricM = ctx.measureText(s.text || 'X');
+        ctx.font = prevFont;
+      }
       metricEmPx = fullPx;
     }
     // FE design correction for EA segments only; ruby keeps its measured box
@@ -3740,7 +3948,7 @@ export function layoutLines(
       //  separate: it sums per-char advances, whereas this path uses substring
       //  binary-search + the cross-run 追い出し below. Don't naively unify them.)
       const available = availW() - currentWidth;
-      setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses));
+      setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses, s.fontRoute));
       const prevKern = setSegKerning(s);
       let rawPrefix = '';
       try {
@@ -3959,29 +4167,42 @@ export function layoutLines(
       // already one space-delimited word (splitTextForLayout), so this never
       // breaks where a space could have wrapped.
       const available = availW();
-      setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses));
-      const allChars = [...s.text];
+      setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses, s.fontRoute));
       const prevKern = setSegKerning(s);
-      let split = 0;
+      let fittedUtf16 = 0;
       try {
-        split = available > 0 ? [...fitCJKPrefix(ctx, s.text, available, segmentCharacterGridDeltaPx(s, gridDeltaPx), charScaleFactor(s), charSpacingDeltaPx(s, scale), s.verticalRun === true)].length : 0;
+        fittedUtf16 = available > 0
+          ? fitCJKPrefix(
+              ctx,
+              s.text,
+              available,
+              segmentCharacterGridDeltaPx(s, gridDeltaPx),
+              charScaleFactor(s),
+              charSpacingDeltaPx(s, scale),
+              s.verticalRun === true,
+            ).length
+          : 0;
       } finally {
         restoreKerning(prevKern);
       }
-      if (split < 1) split = 1;
-      split = extendThroughTrailingIdeographicSpaces(allChars, split);
-      if (split >= allChars.length) {
+      const graphemeOffsets = [0, ...graphemeClusterOffsets(s.text), s.text.length];
+      let split = graphemeOffsets.filter((offset) => offset <= fittedUtf16).at(-1) ?? 0;
+      if (split <= 0) split = graphemeOffsets[1] ?? s.text.length;
+      // Preserve the existing JLReq/Word line-end hanging rule after switching
+      // the emergency splitter from code-point indexes to UTF-16 grapheme offsets.
+      while (s.text.startsWith('\u3000', split)) split += 1;
+      if (split >= s.text.length) {
         // The visible glyphs actually fit (only a trailing space pushed it over the
         // fit test) — place the word whole.
         s.measuredWidth = w;
         addToLine(s, w, h, asc, desc);
       } else {
-        const prefix = allChars.slice(0, split).join('');
+        const prefix = s.text.slice(0, split);
         const pw = strAdvance(s, prefix);
         addToLine({ ...s, text: prefix, measuredWidth: pw }, pw, h, asc, desc);
         queue.unshift({
           ...s,
-          text: allChars.slice(split).join(''),
+          text: s.text.slice(split),
           measuredWidth: 0,
           src: {
             segIndex: s.src!.segIndex,
@@ -3990,6 +4211,14 @@ export function layoutLines(
         });
       }
     } else {
+      if (s.joinPrev) {
+        // A scalar span that continues the preceding grapheme (or another
+        // explicitly glued piece) may overflow a pathological narrow line, but
+        // it must never become a new line head and tear the cluster.
+        s.measuredWidth = w;
+        addToLine(s, w, h, asc, desc, trailingSpaceW);
+        continue;
+      }
       // Latin word does not fit on the current (non-empty) line: move it to a fresh
       // line and re-process. There it either fits, or — when it is wider than the
       // whole column — the empty-line branch above breaks it at the character level
@@ -4112,9 +4341,34 @@ export function rescaleLayoutLines(
     }
   };
 
-  const naturalWidth = (s: LayoutTextSeg, text: string): number =>
-    withSegKerning(s, () =>
-      ctx.measureText(text).width + (s.verticalRun ? verticalRunInkExtraPx(ctx, text) : 0));
+  const measureTextMetrics = (s: LayoutTextSeg, text: string, fontPx: number): TextMetrics => {
+    if (s.textLayoutService && s.textShapeRequest) {
+      const shaped = s.textLayoutService.shape({
+        ...s.textShapeRequest,
+        text,
+        fontSizePt: fontPx,
+        measure: true,
+      });
+      return {
+        width: shaped.advancePt,
+        actualBoundingBoxAscent: shaped.ascentPt,
+        actualBoundingBoxDescent: shaped.descentPt,
+        fontBoundingBoxAscent: shaped.ascentPt,
+        fontBoundingBoxDescent: shaped.descentPt,
+      } as TextMetrics;
+    }
+    ctx.font = buildFont(s.bold, s.italic, fontPx, s.fontFamily, fontFamilyClasses, s.fontRoute);
+    return withSegKerning(s, () => ctx.measureText(text));
+  };
+
+  const verticalInkExtra = (s: LayoutTextSeg, text: string, fontPx: number): number => {
+    if (!s.verticalRun) return 0;
+    // Vertical feature capability belongs to the paint context, not the
+    // format-neutral text service. Select the exact resolved paint face before
+    // applying this narrow glyph-cell correction.
+    ctx.font = buildFont(s.bold, s.italic, fontPx, s.fontFamily, fontFamilyClasses, s.fontRoute);
+    return withSegKerning(s, () => verticalRunInkExtraPx(ctx, text));
+  };
 
   // Per-text-segment measurement at the PAINT scale — the SAME model layoutLines
   // uses (segAdvance + the text-segment metric block), so measure == draw.
@@ -4126,12 +4380,16 @@ export function rescaleLayoutLines(
     gridCount: number;
   } => {
     const effPx = calcEffectiveFontPx(s, scale);
-    ctx.font = buildFont(s.bold, s.italic, effPx, s.fontFamily, fontFamilyClasses);
-    const m = withSegKerning(s, () => ctx.measureText(s.text));
+    const m = measureTextMetrics(s, s.text, effPx);
     // #1014 — fold in the vo=Tr rotate-fallback ink-extent deficit for a vertical
     // run so the rescaled box matches the ink-sized cell (measure == draw); 0 on
     // horizontal pages and non-under-reporting fonts. `ctx.font` is set above.
-    const advance = segAdvanceWidth(s, naturalWidth(s, s.text), gridDeltaPx, scale);
+    const advance = segAdvanceWidth(
+      s,
+      m.width + verticalInkExtra(s, s.text, effPx),
+      gridDeltaPx,
+      scale,
+    );
     // §17.3.2.33 — a small-caps run's LINE BOX follows the FULL run size (measure
     // the box at fullPx, not the 2pt-reduced glyphs); super/subscript keeps its
     // shrunk contribution. Mirrors layoutLines' fullPx / metricEmPx split.
@@ -4139,8 +4397,7 @@ export function rescaleLayoutLines(
     let metricM = m;
     let metricEmPx = effPx;
     if (s.smallCaps && !s.vertAlign && metricEmPx !== fullPx) {
-      ctx.font = buildFont(s.bold, s.italic, fullPx, s.fontFamily, fontFamilyClasses);
-      metricM = ctx.measureText(s.text || 'X');
+      metricM = measureTextMetrics(s, s.text || 'X', fullPx);
       metricEmPx = fullPx;
     }
     // FE design correction for EA segments only; ruby keeps its measured box
@@ -4183,10 +4440,10 @@ export function rescaleLayoutLines(
       scale,
       (segment) => {
         const effPx = calcEffectiveFontPx(segment, scale);
-        ctx.font = buildFont(segment.bold, segment.italic, effPx, segment.fontFamily, fontFamilyClasses);
         // #1014 — include the vo=Tr ink deficit so the rescaled fitText gap stays
         // measure==paint against the ink-grown cell; 0 for non-under-reporting runs.
-        return naturalWidth(segment, segment.text);
+        return measureTextMetrics(segment, segment.text, effPx).width
+          + verticalInkExtra(segment, segment.text, effPx);
       },
     );
     const segments = scaledSource.map((s) => {

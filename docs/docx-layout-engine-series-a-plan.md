@@ -215,6 +215,13 @@ Use the roadmap review gate and merge only with all checks and findings clear.
 - Create: `packages/docx/src/layout/options.test.ts`
 - Create: `packages/docx/src/layout/error-page.ts`
 - Create: `packages/docx/src/layout/error-page.test.ts`
+- Create: `packages/docx/src/layout/numbering-marker.ts`
+- Create: `packages/docx/src/paint/numbering-marker.ts`
+- Modify: `packages/docx/parser/src/types.rs`
+- Modify: `packages/docx/parser/src/parser.rs`
+- Modify: `packages/docx/src/parser-model.ts`
+- Modify: `packages/docx/src/line-layout.ts`
+- Modify: `packages/docx/src/paragraph-measure.ts`
 - Modify: `packages/docx/src/local-font-metrics.ts`
 - Modify: `packages/docx/src/embedded-fonts.ts`
 - Modify: `packages/docx/src/google-fonts.ts`
@@ -222,6 +229,8 @@ Use the roadmap review gate and merge only with all checks and findings clear.
 - Modify: `packages/docx/src/document.ts`
 - Modify: `packages/docx/src/render-worker.ts`
 - Modify: `packages/docx/src/worker-protocol.ts`
+- Modify: `scripts/check-docx-layout-boundaries.mjs`
+- Modify: `scripts/check-docx-layout-boundaries.test.mjs`
 - Modify: `scripts/docx-layout-boundary-baseline.json`
 
 **Interfaces:**
@@ -234,19 +243,42 @@ Use the roadmap review gate and merge only with all checks and findings clear.
 - Produces: the final `TextLayoutService`, `ImageMetadataService`, `MathMetadataService`, `FontResolver`, `LayoutOptions`, `layoutOptionsKey`, `convergeLayout`, and parse-error `DocumentLayout` contracts used unchanged by all later PRs.
 
 ```ts
-export interface FontResolution { readonly requestedFamily: string; readonly resolvedFamily: string; readonly source: 'embedded' | 'local' | 'google' | 'substitute' | 'generic'; readonly weight: number; readonly style: 'normal' | 'italic'; readonly diagnostics: readonly LayoutDiagnostic[] }
+export interface CanvasFontRoute { readonly familyList: string; readonly scope: 'registered' | 'native' | 'generic'; readonly fingerprint: string }
+export interface FontResolution { readonly requestedFamily: string; readonly resolvedFamily: string; readonly source: 'embedded' | 'local' | 'google' | 'substitute' | 'native' | 'generic'; readonly route: CanvasFontRoute; readonly weight: number; readonly style: 'normal' | 'italic'; readonly diagnostics: readonly LayoutDiagnostic[] }
 export interface FontResolver { resolve(request: Readonly<FontRequest>): FontResolution }
-export interface TextLayoutService { readonly fingerprint: string; shape(request: Readonly<TextShapeRequest>): TextShapeResult }
+export interface TextLayoutService { readonly fingerprint: string; resolve(request: Readonly<TextFontResolveRequest>): FontResolution; shape(request: Readonly<TextShapeRequest>): TextShapeResult }
 export interface ImageMetadataService { readonly fingerprint: string; resolve(resourceKey: string): Readonly<{ widthPt: number; heightPt: number; mimeType: string }> }
 export interface MathMetadataService { readonly fingerprint: string; resolve(resourceKey: string): DeepReadonly<MathLayoutResource> }
+export interface NumberingMarkerShapeInput { readonly fontSizePt: number; readonly fonts: TextFontSlots; readonly themeFonts?: TextFontSlots; readonly themeFontPresence?: TextFontSlotPresence; readonly weight: number; readonly style: 'normal' | 'italic'; readonly complexScript: boolean; readonly fontHint?: 'default' | 'eastAsia' | 'cs'; readonly eastAsiaLanguage?: string; readonly kerning?: boolean }
 export interface LayoutOptions { readonly currentDateMs: number }
 export function layoutOptionsKey(options: LayoutOptions, services: LayoutServices): string;
 export function convergeLayout(seed: LayoutIteration, step: (iteration: LayoutIteration) => LayoutIteration, limit: number): LayoutIteration;
 ```
 
+`CanvasFontRoute` is a format-neutral, immutable CSS request created and
+serialized by core. DOCX retains Word-specific four-slot/theme/fontTable policy.
+An uninventoried authored family uses an engine-scoped `native` route with an
+explicit metadata-derived generic tail; this makes no portable availability or
+geometry claim. Inventory faces are exact `(family, weight, style)` tuples, not
+Cartesian products. Service fingerprints identify immutable resources and route
+syntax; A3's retained/document-layout geometry is the downstream boundary. It
+preserves same-browser main/worker parity without claiming cross-browser Canvas
+geometry portability; cross-browser guarantees remain semantic invariants.
+
+The parser wire may retain private effective numbering-level and paragraph-mark
+font facts, but `parser-model.ts` is their projection boundary. It snapshots
+those facts into immutable plain inputs such as `NumberingMarkerShapeInput`.
+The layout numbering-marker module consumes only that input and the text service,
+and the paint module serializes only the retained shaped spans. Neither layout
+nor paint dereferences the private parser wire representation.
+
 **Specification evidence:** ECMA-376 §17.3.2.26 (`w:rFonts`), §17.8 embedded
 fonts, §17.16.5.13/§17.16.5.65 DATE/TIME, §17.16.5.42 NUMPAGES and
-§17.16.5.44 PAGE define layout-affecting font/field facts. DrawingML inline and
+§17.16.5.44 PAGE define layout-affecting font/field facts. Numbering-level
+properties apply to the marker under §17.9.6 (`w:lvl`) together with the
+§17.3.2.26 font-slot rules. Paragraph-mark run properties are defined by
+§17.3.1.29 (`w:pPr`). Table auto-fit selection is defined by §17.4.52
+(`w:tblLayout`). DrawingML inline and
 anchor extents (`wp:extent`) supply image/chart intrinsic layout size. Font
 substitution is environment/Office compatibility behavior and must emit a
 resolution record, not hide inside paragraph geometry.
@@ -260,8 +292,24 @@ and plain metadata. Assert `layoutOptionsKey` changes for `currentDateMs` or any
 service-owned resource fingerprint but not paint width/DPR/default color. Prove
 there is no overload accepting caller-supplied environment strings. Assert convergence returns on
 a stable fingerprint, throws `NON_CONVERGENCE` on a repeated cycle or limit, and
-never returns a stale iteration. Assert parse-error text wraps during layout and
-its paint calls no `measureText`.
+never returns a stale iteration. Assert parse-error text wraps during layout,
+retains the exact `CanvasFontRoute` used for that measurement, and paints with
+the same core serialization without calling `measureText`.
+
+Add focused Red cases proving that auto-fit preserves the requested `hAnsi`,
+theme, and substitute route on every grapheme/kinsoku segment and sums
+differently formatted `joinPrev` pieces per route. Cover body and text-box
+numbering for mixed `第1章` and `U+2022` markers across all four font slots and
+theme precedence, retaining the shaped spans for paint. Cover empty and
+anchor-only paragraph marks in main and worker mode through the same text-service
+metrics. Boundary tests must reject direct and transitive parser-model reachability
+through bridge modules, aliases, literal/non-literal dynamic imports, and
+CommonJS `require`, while proving that only the exact unaliased named runtime
+import `{ normalizeInternalDocumentModel }` from `../parser-model.js` in
+`layout/resources.ts` is terminal, and that binding is used only by the exact
+`documentMathOccurrences` projection to return `.mathOccurrences`. Local
+re-export, alias, leak, or extra reference cases fail. All other gateway edges
+remain traversed; erased type-only contracts remain valid.
 
 - [ ] **Step 2: Run tests to verify Red**
 
@@ -296,19 +344,52 @@ worker-safe fallback is retained as an explicit diagnostic result when the
 optional DOM math engine is unavailable. Keep glyph shaping in the injected
 service; later PRs consume it without replacing its algorithm or interface.
 
+Route auto-fit through `buildSegments` and preserve the complete service request
+per atom so region widths sum the actual shaped advances even across font-route
+and `joinPrev` boundaries. Route empty and anchor-only paragraph-mark metrics
+through that same service authority. Preserve effective numbering and
+paragraph-mark run facts on the private parser wire, project numbering at the
+renderer boundary into `NumberingMarkerShapeInput`, and retain the service-shaped
+body/text-box marker spans for paint. This implements the whole class defined by
+the cited `w:rFonts`, numbering-level, and paragraph-mark rules rather than
+tuning one marker string.
+
+Keep the transitional `renderShapeText` hash normalization mechanically exact:
+it may erase only the complete marker snapshot -> service shape -> retained-span
+paint sequence, and must reject any partial or altered sequence. Enforce the
+layout/parser boundary with a transitive runtime import-graph walk from every
+production layout module. Reject indirect bridge, alias, dynamic-import, and
+CommonJS paths. Treat only the exact unaliased named runtime import
+`{ normalizeInternalDocumentModel }` from `../parser-model.js` in
+`layout/resources.ts` as a terminal parser projection edge, and AST-freeze its
+sole use to the exported `documentMathOccurrences` return of
+`[...normalizeInternalDocumentModel(doc).mathOccurrences]`. Reject local
+re-export, alias, leak, or extra references; traverse every other gateway edge
+normally. Erased type-only contracts do not create runtime paths.
+
 - [ ] **Step 4: Verify Green and main/worker service parity**
 
 Run:
 
 ```bash
 pnpm vitest run packages/docx/src/layout/{font-service,resources,options,convergence,error-page}.test.ts
+pnpm vitest run packages/docx/src/layout/services-integration.test.ts packages/docx/src/fit-text-fixes.test.ts packages/docx/src/column-widths.test.ts packages/docx/src/paragraph-measure.test.ts packages/docx/src/empty-paragraph-mark-height.test.ts packages/docx/src/numbering-marker-font.test.ts
+cargo test -p docx-parser
+pnpm test:docx-boundaries
+node scripts/check-docx-layout-boundaries.mjs --base-ref 02863444
+pnpm test:docx-public-api
+pnpm test:docx-public-api -- --exact
 rg -n 'drawParseErrorPlaceholder|setResolvedLocalFonts|clearResolvedLocalFonts' packages/docx/src --glob '!**/*.test.ts'
 pnpm typecheck
 ```
 
 Expected: tests pass; main and worker factories given identical inventories
-produce identical resolution/service fingerprints; `rg` has no production
-global-state or paint-error-wrapper matches.
+produce identical resolution/service fingerprints; auto-fit, numbering, and
+paragraph marks use that service in both modes; direct and transitive parser-model
+paths fail except for the exact normalization import, while all other gateway
+edges are inspected and type-only contracts stay erased; the exact public API
+surface is unchanged; and `rg` has no production global-state or
+paint-error-wrapper matches.
 
 - [ ] **Step 5: Commit, independently review, fix, and merge PR A2**
 

@@ -349,9 +349,11 @@ function routedVerticalGlyphCell(
  * ECMA-376 §17.6.20 (tbRl), issues #1014/#1024 — the along-column cell delta
  * (px, before §17.3.2.43 `w:w` scaling and §17.3.2.35 pitch) beyond ordinary
  * `measureText`. Reachable Tu/Tr glyphs contribute their feature advances;
- * unreachable glyphs contribute their manual per-glyph advances, with the
- * positive #1014 ink-overrun growth where needed. Subtracting the whole-string
- * width also removes horizontal kern pairs that do not apply to vertical cells.
+ * unreachable upright/transform glyphs contribute their manual per-glyph
+ * advances, with the positive #1014 ink-overrun growth where needed. Consecutive
+ * vo=R glyphs contribute one contextual sideways-piece advance, preserving the
+ * same shaping and kerning as paint. Subtracting the whole-string width removes
+ * only kern pairs that cross independent vertical-cell boundaries.
  * Layout folds this into the
  * segment's natural advance (`segAdvanceWidth`'s `naturalWidthPx`) so the grown
  * cell {@link drawVerticalRun} paints is matched by the measured box — measure ==
@@ -374,13 +376,19 @@ export function verticalRunInkExtraPxWithCapability(
   vertCapability: VertCapability,
 ): number {
   let routedWidth = 0;
-  for (const ch of text) {
-    const cp = ch.codePointAt(0) ?? 0;
-    const routed = routedVerticalGlyphCell(ctx, ch, cp, vertCapability, true);
-    routedWidth += routed.naturalPx;
+  for (const piece of splitVerticalOrientationRuns(text)) {
+    if (piece.mode === 'sideways') {
+      routedWidth += ctx.measureText(piece.text).width;
+      continue;
+    }
+    for (const ch of piece.text) {
+      const cp = ch.codePointAt(0) ?? 0;
+      const routed = routedVerticalGlyphCell(ctx, ch, cp, vertCapability, true);
+      routedWidth += routed.naturalPx;
+    }
   }
   // Canvas whole-string measurement may apply horizontal JIS punctuation kern
-  // pairs (for example 。「), but vertical paint advances independent cells.
+  // pairs (for example 。「), but vertical paint advances those independent cells.
   // Subtract the SAME whole width the caller adds so their sum is exactly the
   // routed per-glyph width at every layout call site.
   return routedWidth - ctx.measureText(text).width;
@@ -456,7 +464,35 @@ export function drawVerticalRunWithCapability(
   // the cross axis.
   const scaled = charScale !== 1;
   let ax = 0; // cumulative advance from run left (logical +x)
-  for (const ch of text) {
+  for (const piece of splitVerticalOrientationRuns(text)) {
+    if (piece.mode === 'sideways') {
+      // vo=R remains horizontal text inside the rotated page frame. Paint the
+      // maximal piece in one call so contextual shaping/kerning is identical to
+      // the advance used by layout (and therefore to btLr's rotated-horizontal
+      // frame). Letter spacing is applied inside the shaped piece, while the
+      // trailing pitch remains part of the explicit cell advance as before.
+      const naturalPx = ctx.measureText(piece.text).width;
+      const glyphCount = [...piece.text].length;
+      const pieceAdvance = naturalPx * charScale + letterSpacingPx * glyphCount;
+      const prevLetterSpacing = ctx.letterSpacing;
+      ctx.textAlign = prevAlign;
+      ctx.textBaseline = 'alphabetic';
+      ctx.save();
+      if (scaled) {
+        ctx.translate(x + ax, 0);
+        ctx.scale(charScale, 1);
+        ctx.letterSpacing = `${letterSpacingPx / charScale}px`;
+        ctx.fillText(piece.text, 0, baseline + emBoxCenterPx);
+      } else {
+        ctx.letterSpacing = `${letterSpacingPx}px`;
+        ctx.fillText(piece.text, x + ax, baseline + emBoxCenterPx);
+      }
+      ctx.restore();
+      ctx.letterSpacing = prevLetterSpacing;
+      ax += pieceAdvance;
+      continue;
+    }
+    for (const ch of piece.text) {
     const cp = ch.codePointAt(0) ?? 0;
     const mode = verticalDrawMode(cp);
     // A vo=Tr code point with a substituted Unicode vertical presentation form — the
@@ -590,31 +626,9 @@ export function drawVerticalRunWithCapability(
       } else {
         ctx.fillText(ch, cx, baseline);
       }
-    } else {
-      // vo=R (Latin/digit): drawn SIDEWAYS (rotated with the page). Keep the
-      // caller's alphabetic baseline and position the glyph's left at the current
-      // advance, but shift the cross axis by the em-box centre so the glyph's ink
-      // centres on the SAME column centreline the upright cells use — otherwise a
-      // baseline-anchored sideways glyph sits ~0.38em off (its ink is above the
-      // baseline), the "電話 / 03-…" left-right drift. A group of consecutive
-      // sideways glyphs would ideally be one fillText for shaping, but per-glyph
-      // keeps the advance model uniform and Latin advances are context-free enough
-      // at these sizes.
-      // `alphabetic` baseline pins the em-box-centre shift (emBoxCenterPx is
-      // measured relative to the alphabetic baseline).
-      ctx.textAlign = prevAlign;
-      ctx.textBaseline = 'alphabetic';
-      if (scaled) {
-        ctx.save();
-        ctx.translate(x + ax, 0);
-        ctx.scale(charScale, 1);
-        ctx.fillText(ch, 0, baseline + emBoxCenterPx);
-        ctx.restore();
-      } else {
-        ctx.fillText(ch, x + ax, baseline + emBoxCenterPx);
-      }
     }
     ax += adv;
+    }
   }
   ctx.textAlign = prevAlign;
   ctx.textBaseline = prevBaseline;

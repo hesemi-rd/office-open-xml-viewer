@@ -14,6 +14,10 @@ const BASELINE_PATH = 'scripts/docx-layout-boundary-baseline.json';
 const DOCX_SOURCE = 'packages/docx/src';
 const PAINT_SOURCE = `${DOCX_SOURCE}/paint`;
 const LAYOUT_SOURCE = `${DOCX_SOURCE}/layout`;
+const PARSER_MODEL = `${DOCX_SOURCE}/parser-model.ts`;
+const LAYOUT_PARSER_MODEL_GATEWAY = `${LAYOUT_SOURCE}/resources.ts`;
+const LAYOUT_PARSER_MODEL_GATEWAY_IMPORT = '../parser-model.js';
+const LAYOUT_PARSER_MODEL_GATEWAY_SYMBOL = 'normalizeInternalDocumentModel';
 
 const FINAL_RENDERER_EXPORTS = new Set([
   'DocxTextRunInfo',
@@ -39,7 +43,7 @@ const PLANNED_NON_LAYOUT_MODULES = new Set([
 ]);
 
 const SHARED_PAINT_IMPORTS = new Map([
-  ['@silurus/ooxml-core', new Set(['renderChart'])],
+  ['@silurus/ooxml-core', new Set(['renderChart', 'canvasFontString'])],
 ]);
 
 const LEGACY_SYMBOLS = [
@@ -147,10 +151,13 @@ function moduleEdges(path) {
           ]
         : [];
       edges.push({
+        kind: 'import',
         specifier: statement.moduleSpecifier.text,
         typeOnly: importIsTypeOnly(statement),
         literal: true,
         importedNames,
+        aliased: !!(bindings && ts.isNamedImports(bindings)
+          && bindings.elements.some((element) => element.propertyName && element.propertyName.text !== element.name.text)),
         bare: !statement.importClause,
       });
     }
@@ -158,6 +165,7 @@ function moduleEdges(path) {
       && statement.moduleSpecifier
       && ts.isStringLiteral(statement.moduleSpecifier)) {
       edges.push({
+        kind: 'export',
         specifier: statement.moduleSpecifier.text,
         typeOnly: exportIsTypeOnly(statement),
         literal: true,
@@ -172,16 +180,16 @@ function moduleEdges(path) {
       && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
       const argument = node.arguments[0];
       edges.push(argument && (ts.isStringLiteral(argument) || ts.isNoSubstitutionTemplateLiteral(argument))
-        ? { specifier: argument.text, typeOnly: false, literal: true }
-        : { specifier: '<dynamic>', typeOnly: false, literal: false });
+        ? { kind: 'dynamic-import', specifier: argument.text, typeOnly: false, literal: true }
+        : { kind: 'dynamic-import', specifier: '<dynamic>', typeOnly: false, literal: false });
     }
     if (ts.isCallExpression(node)
       && ts.isIdentifier(node.expression)
       && node.expression.text === 'require') {
       const argument = node.arguments[0];
       edges.push(argument && (ts.isStringLiteral(argument) || ts.isNoSubstitutionTemplateLiteral(argument))
-        ? { specifier: argument.text, typeOnly: false, literal: true }
-        : { specifier: '<dynamic>', typeOnly: false, literal: false });
+        ? { kind: 'require', specifier: argument.text, typeOnly: false, literal: true }
+        : { kind: 'require', specifier: '<dynamic>', typeOnly: false, literal: false });
     }
     ts.forEachChild(node, visit);
   };
@@ -239,6 +247,7 @@ function paintBoundaryViolations(root) {
         if (!edge.specifier.startsWith('.')) {
           const allowedNames = SHARED_PAINT_IMPORTS.get(edge.specifier);
           const allowed = !edge.typeOnly
+            && !edge.aliased
             && allowedNames
             && edge.importedNames?.length > 0
             && edge.importedNames?.every((name) => allowedNames.has(name));
@@ -297,6 +306,129 @@ function assertCapabilityBoundaries(root) {
       ts.forEachChild(node, visit);
     };
     visit(source);
+  }
+}
+
+function isExactLayoutParserModelGatewayImportEdge(currentRel, edge, dependency, parserModel) {
+  return currentRel === LAYOUT_PARSER_MODEL_GATEWAY
+    && dependency === parserModel
+    && edge.kind === 'import'
+    && edge.specifier === LAYOUT_PARSER_MODEL_GATEWAY_IMPORT
+    && edge.typeOnly === false
+    && edge.aliased === false
+    && edge.bare === false
+    && edge.importedNames?.length === 1
+    && edge.importedNames[0] === LAYOUT_PARSER_MODEL_GATEWAY_SYMBOL;
+}
+
+function hasExactLayoutParserModelGatewayProjection(path) {
+  const source = sourceFile(path);
+  let bindingReferences = 0;
+  const countBindingReferences = (node) => {
+    if (ts.isIdentifier(node) && node.text === LAYOUT_PARSER_MODEL_GATEWAY_SYMBOL) {
+      bindingReferences += 1;
+    }
+    ts.forEachChild(node, countBindingReferences);
+  };
+  countBindingReferences(source);
+  if (bindingReferences !== 2) return false;
+
+  const projections = source.statements.filter((statement) => (
+    ts.isFunctionDeclaration(statement)
+    && statement.name?.text === 'documentMathOccurrences'
+  ));
+  if (projections.length !== 1) return false;
+  const projection = projections[0];
+  const exported = projection.modifiers?.some((modifier) => (
+    modifier.kind === ts.SyntaxKind.ExportKeyword
+  ));
+  if (!exported || !projection.body || projection.parameters.length !== 1) return false;
+  const parameter = projection.parameters[0];
+  if (!ts.isIdentifier(parameter.name) || projection.body.statements.length !== 1) return false;
+  const returned = projection.body.statements[0];
+  if (!ts.isReturnStatement(returned)
+    || !returned.expression
+    || !ts.isArrayLiteralExpression(returned.expression)
+    || returned.expression.elements.length !== 1) return false;
+  const spread = returned.expression.elements[0];
+  if (!ts.isSpreadElement(spread)
+    || !ts.isPropertyAccessExpression(spread.expression)
+    || spread.expression.name.text !== 'mathOccurrences') return false;
+  const call = spread.expression.expression;
+  return ts.isCallExpression(call)
+    && ts.isIdentifier(call.expression)
+    && call.expression.text === LAYOUT_PARSER_MODEL_GATEWAY_SYMBOL
+    && call.arguments.length === 1
+    && ts.isIdentifier(call.arguments[0])
+    && call.arguments[0].text === parameter.name.text;
+}
+
+function layoutParserModelBoundaryViolations(root) {
+  const graph = dependencyGraph(root);
+  const parserModel = resolve(root, PARSER_MODEL);
+  const entries = [...graph.keys()].filter((path) => (
+    posixPath(relative(root, path)).startsWith(`${LAYOUT_SOURCE}/`)
+  ));
+  const violations = [];
+  const nonLiteral = [];
+
+  for (const entry of entries) {
+    const stack = [{ path: entry, chain: [entry] }];
+    const visited = new Set([entry]);
+    while (stack.length > 0) {
+      const current = stack.pop();
+      const currentRel = posixPath(relative(root, current.path));
+      for (const edge of graph.get(current.path) ?? []) {
+        if (!edge.literal) {
+          nonLiteral.push(current.chain.map((path) => posixPath(relative(root, path))));
+          continue;
+        }
+        if (!edge.specifier.startsWith('.')) continue;
+        const dependency = resolveLocalImport(current.path, edge.specifier);
+        if (!dependency) continue;
+        const chain = [...current.chain, dependency];
+        if (dependency === parserModel) {
+          // The parser-model gateway permits exactly one projection edge. Only
+          // that edge is terminal; every other resources.ts dependency remains
+          // part of the transitive runtime graph and is inspected normally.
+          if (isExactLayoutParserModelGatewayImportEdge(currentRel, edge, dependency, parserModel)) {
+            if (hasExactLayoutParserModelGatewayProjection(current.path)) continue;
+            violations.push([
+              ...chain.map((path) => posixPath(relative(root, path))),
+              `invalid use of ${LAYOUT_PARSER_MODEL_GATEWAY_SYMBOL}`,
+            ]);
+            continue;
+          }
+          violations.push(chain.map((path) => posixPath(relative(root, path))));
+          continue;
+        }
+        // A type-only edge is erased and cannot create a runtime parser-model
+        // dependency through the referenced contract. A direct parser-model
+        // type import was rejected above so layout stays parser-model-free.
+        if (edge.typeOnly) continue;
+        if (graph.has(dependency) && !visited.has(dependency)) {
+          visited.add(dependency);
+          stack.push({ path: dependency, chain });
+        }
+      }
+    }
+  }
+  return { violations, nonLiteral };
+}
+
+function assertLayoutParserModelBoundaries(root) {
+  const { violations, nonLiteral } = layoutParserModelBoundaryViolations(root);
+  if (nonLiteral.length > 0) {
+    fail(
+      'NON_LITERAL_LAYOUT_MODULE_EDGE',
+      nonLiteral.map((chain) => chain.join(' -> ')).join('\n'),
+    );
+  }
+  if (violations.length > 0) {
+    fail(
+      'LAYOUT_PARSER_MODEL_DEPENDENCY',
+      violations.map((chain) => chain.join(' -> ')).join('\n'),
+    );
   }
 }
 
@@ -373,6 +505,193 @@ function normalizedNodeHash(node, source) {
   return createHash('sha256').update(normalized).digest('hex');
 }
 
+/** A2 permits one mechanically constrained edit to computePages: append the
+ * two dependency parameters, then append those identifiers to its existing
+ * buildMeasureState call. Everything else remains represented in the hash. */
+function normalizedComputePagesHash(node, source) {
+  const allowedNames = ['layoutServices', 'layoutOptions'];
+  const allowedParameterSyntax = [
+    'layoutServices?: LayoutServices',
+    'layoutOptions?: LayoutOptions',
+  ];
+  const appendedParameters = node.parameters?.slice(-2) ?? [];
+  const hasAllowedParameters = appendedParameters.length === 2
+    && appendedParameters.every((parameter, index) => (
+      ts.isIdentifier(parameter.name) && parameter.name.text === allowedNames[index]
+      && parameter.getText(source).replace(/\s+/g, ' ').trim() === allowedParameterSyntax[index]
+    ));
+  const omittedParameters = new Set(hasAllowedParameters ? appendedParameters : []);
+  const shape = (current) => {
+    if (omittedParameters.has(current)) return null;
+    if (ts.isCallExpression(current)
+      && ts.isIdentifier(current.expression)
+      && current.expression.text === 'buildMeasureState') {
+      const tail = current.arguments.slice(-2);
+      const hasAllowedArguments = tail.length === 2
+        && tail.every((argument, index) => ts.isIdentifier(argument) && argument.text === allowedNames[index]);
+      const args = hasAllowedArguments ? current.arguments.slice(0, -2) : current.arguments;
+      return [
+        ts.SyntaxKind[current.kind],
+        undefined,
+        shape(current.expression),
+        ...args.map(shape),
+      ];
+    }
+    const text = ts.isIdentifier(current) || ts.isLiteralExpression(current)
+      ? current.getText(source)
+      : undefined;
+    const children = [];
+    current.forEachChild((child) => {
+      const childShape = shape(child);
+      if (childShape !== null) children.push(childShape);
+    });
+    return [ts.SyntaxKind[current.kind], text, ...children];
+  };
+  return createHash('sha256').update(JSON.stringify(shape(node))).digest('hex');
+}
+
+/** A2 routes service-produced shape text through the same immutable Canvas
+ * route used by measurement. The text-box implementation remains hash frozen
+ * except for exact Canvas-route threading and the spec-required numbering
+ * marker snapshot -> shape -> retained-paint sequence below. */
+function normalizedRenderShapeTextHash(node, source) {
+  const omittedRouteParameters = new Set();
+  const findAllowedRouteParameters = (current) => {
+    if (ts.isVariableDeclaration(current)
+      && ts.isIdentifier(current.name)
+      && current.name.text === 'shapeLineMetrics'
+      && current.initializer
+      && ts.isArrowFunction(current.initializer)) {
+      const tail = current.initializer.parameters.slice(-2);
+      const exact = ['familyRoute?: CanvasFontRoute', 'familyEaRoute?: CanvasFontRoute'];
+      if (tail.length === 2 && tail.every((parameter, index) => (
+        parameter.getText(source).replace(/\s+/g, ' ').trim() === exact[index]
+      ))) {
+        tail.forEach((parameter) => omittedRouteParameters.add(parameter));
+      }
+    }
+    ts.forEachChild(current, findAllowedRouteParameters);
+  };
+  findAllowedRouteParameters(node);
+  const compactText = (current, currentSource) =>
+    current.getText(currentSource).replace(/\s+/g, '');
+  const exactMarkerInput =
+    'constmarkerShapeInput=numberingMarkerShapeInput(block.numbering,block.fontSizePt);';
+  const exactMarkerLayout =
+    'constmarkerTextLayout=shapeNumberingMarkerText(markerShapeInput,markerText,scale,effState.layoutServices?.text,);';
+  const exactMarkerWidth =
+    'constmarkerW=markerTextLayout?.shape.advancePt??ctx.measureText(markerText).width;';
+  const exactMarkerPaint = [
+    'if(markerTextLayout){',
+    'paintNumberingMarkerText(ctx,markerTextLayout,markerX,baseline,',
+    'eaVertUpright?(paintCtx,text,drawX,drawBaseline,fontSizePx)=>{',
+    'drawVerticalRun(paintCtx,text,drawX,drawBaseline,fontSizePx,0);',
+    '}:undefined,);',
+    '}elseif(eaVertUpright){',
+    'drawVerticalRun(ctx,markerText,markerX,baseline,block.fontSizePt*scale,0);',
+    '}else{ctx.fillText(markerText,markerX,baseline);}',
+  ].join('');
+  const markerMigrationCounts = [0, 0, 0, 0];
+  const countMarkerMigration = (current) => {
+    const compact = compactText(current, source);
+    if (ts.isVariableStatement(current) && compact === exactMarkerInput) markerMigrationCounts[0] += 1;
+    if (ts.isVariableStatement(current) && compact === exactMarkerLayout) markerMigrationCounts[1] += 1;
+    if (ts.isVariableStatement(current) && compact === exactMarkerWidth) markerMigrationCounts[2] += 1;
+    if (ts.isIfStatement(current) && compact === exactMarkerPaint) markerMigrationCounts[3] += 1;
+    ts.forEachChild(current, countMarkerMigration);
+  };
+  countMarkerMigration(node);
+  const exactMarkerMigration = markerMigrationCounts.every((count) => count === 1);
+  let shape;
+  const replacementShape = (text) => {
+    const replacementSource = ts.createSourceFile(
+      'render-shape-text-a2-replacement.ts',
+      text,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    return shape(replacementSource.statements[0], replacementSource);
+  };
+  shape = (current, currentSource = source) => {
+    if (ts.isVariableStatement(current)) {
+      const compact = compactText(current, currentSource);
+      if (exactMarkerMigration && (compact === exactMarkerInput || compact === exactMarkerLayout)) {
+        return null;
+      }
+      if (exactMarkerMigration && compact === exactMarkerWidth) {
+        return replacementShape('const markerW = ctx.measureText(markerText).width;');
+      }
+    }
+    if (exactMarkerMigration
+      && ts.isIfStatement(current)
+      && compactText(current, currentSource) === exactMarkerPaint) {
+      return replacementShape(
+        'if (eaVertUpright) { drawVerticalRun(ctx, markerText, markerX, baseline, block.fontSizePt * scale, 0); } else { ctx.fillText(markerText, markerX, baseline); }',
+      );
+    }
+    // A partial/duplicated marker migration is intentionally left in the AST
+    // hash. Only the complete four-node contract above can normalize away.
+    if (ts.isVariableStatement(current)
+      && current.declarationList.declarations.length === 1) {
+      const [declaration] = current.declarationList.declarations;
+      if (ts.isIdentifier(declaration.name)
+        && declaration.name.text === 'measureRoute'
+        && current.getText(currentSource).replace(/\s+/g, ' ').trim()
+          === 'const measureRoute = eaIntended > asciiIntended ? familyEaRoute : familyRoute;') {
+        return null;
+      }
+    }
+    if (omittedRouteParameters.has(current)) return null;
+    if (ts.isCallExpression(current)
+      && ts.isIdentifier(current.expression)
+      && current.expression.text === 'buildFont') {
+      const route = current.arguments.at(-1);
+      const hasAllowedRoute = current.arguments.length === 6
+        && route != null
+        && ((ts.isPropertyAccessExpression(route)
+          && ts.isIdentifier(route.expression)
+          && route.expression.text === 's'
+          && route.name.text === 'fontRoute')
+          || (ts.isIdentifier(route) && route.text === 'measureRoute'));
+      const args = hasAllowedRoute ? current.arguments.slice(0, -1) : current.arguments;
+      return [
+        ts.SyntaxKind[current.kind],
+        undefined,
+        shape(current.expression, currentSource),
+        ...args.map((argument) => shape(argument, currentSource)),
+      ];
+    }
+    if (ts.isCallExpression(current)
+      && ts.isIdentifier(current.expression)
+      && current.expression.text === 'shapeLineMetrics') {
+      const [fontRoute, eaFloorRoute] = current.arguments.slice(-2);
+      const fontRouteText = fontRoute?.getText(source);
+      const eaFloorRouteText = eaFloorRoute?.getText(source);
+      const hasAllowedRoutes = current.arguments.length >= 3
+        && (fontRouteText === 's.fontRoute' || fontRouteText === 'tallest?.fontRoute')
+        && (eaFloorRouteText === 's.eaFloorRoute' || eaFloorRouteText === 'tallest?.eaFloorRoute');
+      const args = hasAllowedRoutes ? current.arguments.slice(0, -2) : current.arguments;
+      return [
+        ts.SyntaxKind[current.kind],
+        undefined,
+        shape(current.expression, currentSource),
+        ...args.map((argument) => shape(argument, currentSource)),
+      ];
+    }
+    const text = ts.isIdentifier(current) || ts.isLiteralExpression(current)
+      ? current.getText(currentSource)
+      : undefined;
+    const children = [];
+    current.forEachChild((child) => {
+      const childShape = shape(child, currentSource);
+      if (childShape !== null) children.push(childShape);
+    });
+    return [ts.SyntaxKind[current.kind], text, ...children];
+  };
+  return createHash('sha256').update(JSON.stringify(shape(node))).digest('hex');
+}
+
 function declarationInventory(root) {
   const sourceRoot = resolve(root, DOCX_SOURCE);
   const nonLayoutDeclarationKeys = [];
@@ -387,9 +706,17 @@ function declarationInventory(root) {
     for (const statement of source.statements) {
       for (const name of declarationNames(statement)) {
         const key = `${file}#${declarationKind(statement)}#${name}`;
-        if (!migrationOwner) nonLayoutDeclarationKeys.push(key);
+        // The final renderer surface is fixed up front, so staged PRs may add
+        // those named adapters without opening a route for arbitrary helpers.
+        const plannedRendererAdapter = file === `${DOCX_SOURCE}/renderer.ts`
+          && FINAL_RENDERER_DECLARATIONS.has(name);
+        if (!migrationOwner && !plannedRendererAdapter) nonLayoutDeclarationKeys.push(key);
         if (LEGACY_SYMBOLS.includes(name)) {
-          legacyDeclarationHashes[key] = normalizedNodeHash(statement, source);
+          legacyDeclarationHashes[key] = name === 'computePages'
+            ? normalizedComputePagesHash(statement, source)
+            : name === 'renderShapeText'
+              ? normalizedRenderShapeTextHash(statement, source)
+            : normalizedNodeHash(statement, source);
         }
       }
     }
@@ -450,6 +777,26 @@ function mergeBaseBaseline(root, baseRef) {
   if (shown.status !== 0) return null;
   const value = JSON.parse(shown.stdout);
   if (value.version !== 2) fail('INVALID_BASELINE', `${mergeBase}:${BASELINE_PATH}`);
+  // The stored A1 hashes predate the A2-specific normalization. Recompute only
+  // the two mechanically constrained declarations from the immutable merge-base
+  // source; every other declaration continues to use the committed baseline.
+  const renderer = git(root, ['show', `${mergeBase}:${DOCX_SOURCE}/renderer.ts`], true);
+  if (renderer.status === 0) {
+    const source = ts.createSourceFile('renderer.ts', renderer.stdout, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    const declaration = (name) => source.statements.find((statement) => (
+      ts.isFunctionDeclaration(statement) && statement.name?.text === name
+    ));
+    const computePages = declaration('computePages');
+    if (computePages) {
+      value.legacyDeclarationHashes[`${DOCX_SOURCE}/renderer.ts#FunctionDeclaration#computePages`]
+        = normalizedComputePagesHash(computePages, source);
+    }
+    const renderShapeText = declaration('renderShapeText');
+    if (renderShapeText) {
+      value.legacyDeclarationHashes[`${DOCX_SOURCE}/renderer.ts#FunctionDeclaration#renderShapeText`]
+        = normalizedRenderShapeTextHash(renderShapeText, source);
+    }
+  }
   return value;
 }
 
@@ -662,6 +1009,7 @@ export function checkDocxLayoutBoundaries(options) {
   const baselineExists = existsSync(baselinePath);
   assertPaintBoundaries(root);
   assertCapabilityBoundaries(root);
+  assertLayoutParserModelBoundaries(root);
 
   if (options.write) {
     const baseBaseline = mergeBaseBaseline(root, options.baseRef);
@@ -687,7 +1035,25 @@ export function checkDocxLayoutBoundaries(options) {
 
   const baseBaseline = mergeBaseBaseline(root, options.baseRef);
   const headBaseline = readBaseline(baselinePath);
-  if (baseBaseline) assertNoExpansion(headBaseline, baseBaseline);
+  const normalizedDeclarationKeys = [
+    `${DOCX_SOURCE}/renderer.ts#FunctionDeclaration#computePages`,
+    `${DOCX_SOURCE}/renderer.ts#FunctionDeclaration#renderShapeText`,
+  ];
+  for (const key of normalizedDeclarationKeys) {
+    if (baseBaseline?.legacyDeclarationHashes[key]) {
+      // Treat the immutable merge-base declaration as the virtual baseline so
+      // A2 can constrain exact dependency/route threading without rewriting the
+      // committed A1 baseline.
+      headBaseline.legacyDeclarationHashes[key]
+        = baseBaseline.legacyDeclarationHashes[key];
+    }
+  }
+  if (baseBaseline) {
+    headBaseline.legacyDeclarationHashes = Object.fromEntries(
+      Object.entries(headBaseline.legacyDeclarationHashes).sort(([left], [right]) => left.localeCompare(right)),
+    );
+    assertNoExpansion(headBaseline, baseBaseline);
+  }
   const actual = currentAllowances(root);
   if (baseBaseline) assertNoExpansion(actual, baseBaseline);
   assertExactBaseline(headBaseline, actual);

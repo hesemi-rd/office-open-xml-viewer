@@ -8,6 +8,7 @@ import {
   type FontPreloadEntry,
 } from '@silurus/ooxml-core';
 import { DocxDocument } from './document';
+import { attachDocumentLayoutRuntime } from './layout/runtime-state.js';
 
 /**
  * `DocxDocument.destroy()` tears the parser worker down via
@@ -115,7 +116,13 @@ function installLocalMetricFontEnvironment(): { added: FakeFace[] } {
     getContext() {
       return {
         font: '',
-        measureText: () => ({ fontBoundingBoxAscent: 106, fontBoundingBoxDescent: 44 }),
+        measureText: () => ({
+          width: 50,
+          actualBoundingBoxAscent: 80,
+          actualBoundingBoxDescent: 20,
+          fontBoundingBoxAscent: 106,
+          fontBoundingBoxDescent: 44,
+        }),
       };
     }
   }
@@ -148,6 +155,7 @@ describe('DocxDocument.destroy() — rejects in-flight worker requests', () => {
       correlate: (r) => r.id,
     });
     const instance = Object.create(DocxDocument.prototype) as Record<string, unknown>;
+    attachDocumentLayoutRuntime(instance, 0);
     instance._bridge = bridge;
     // Fields destroy() clears after terminate(); undefined would throw.
     instance._imageCache = new Map();

@@ -8,6 +8,7 @@ import type {
   ShapeRun,
   ShapeText,
 } from './types.js';
+import { internalFieldRun, internalTextRun } from './parser-model.js';
 
 /** One rendered string and every authored font family that can supply it.
  * Empty text records are intentional: paragraph marks and drawing anchors can
@@ -15,11 +16,13 @@ import type {
 export interface DocxRenderedTextUsage {
   text: string;
   fontFamilies: readonly (string | null | undefined)[];
+  bold?: boolean;
+  italic?: boolean;
 }
 
 function* shapeTextUsages(shape: ShapeRun): Generator<DocxRenderedTextUsage> {
   if (shape.textPath) {
-    yield { text: shape.textPath.string, fontFamilies: [shape.textPath.fontFamily] };
+    yield { text: shape.textPath.string, fontFamilies: [shape.textPath.fontFamily], bold: shape.textPath.bold, italic: shape.textPath.italic };
   }
   for (const block of shape.textBlocks ?? []) {
     yield* shapeBlockUsages(block);
@@ -31,6 +34,8 @@ function* shapeBlockUsages(block: ShapeText): Generator<DocxRenderedTextUsage> {
     yield {
       text: block.numbering.text,
       fontFamilies: [block.numbering.fontFamily, block.numbering.fontFamilyEastAsia],
+      bold: false,
+      italic: false,
     };
   }
   if (block.runs?.length) {
@@ -43,27 +48,52 @@ function* shapeBlockUsages(block: ShapeText): Generator<DocxRenderedTextUsage> {
           run.fontFamilyEastAsia,
           block.fontFamily,
         ],
+        bold: run.bold ?? block.bold,
+        italic: run.italic ?? block.italic,
       };
     }
   } else {
-    yield { text: block.text, fontFamilies: [block.fontFamily] };
+    yield { text: block.text, fontFamilies: [block.fontFamily], bold: block.bold, italic: block.italic };
   }
 }
 
 function* runUsages(run: DocRun): Generator<DocxRenderedTextUsage> {
   if (run.type === 'text') {
+    const text = internalTextRun(run);
     yield {
       text: run.text,
-      fontFamilies: [run.fontFamily, run.fontFamilyEastAsia, run.fontFamilyCs],
+      fontFamilies: [run.fontFamily, text.fontFamilyHighAnsi, run.fontFamilyEastAsia],
+      bold: run.bold,
+      italic: run.italic,
+    };
+    yield {
+      text: run.text,
+      fontFamilies: [run.fontFamilyCs],
+      bold: run.boldCs ?? false,
+      italic: run.italicCs ?? false,
     };
   } else if (run.type === 'field') {
-    yield { text: run.fallbackText, fontFamilies: [run.fontFamily] };
+    const field = internalFieldRun(run);
+    yield {
+      text: field.fallbackText,
+      fontFamilies: [field.fontFamily, field.fontFamilyHighAnsi, field.fontFamilyEastAsia],
+      bold: field.bold,
+      italic: field.italic,
+    };
+    yield {
+      text: field.fallbackText,
+      fontFamilies: [field.fontFamilyCs],
+      bold: field.boldCs ?? false,
+      italic: field.italicCs ?? false,
+    };
   } else if (run.type === 'shape') {
     yield* shapeTextUsages(run);
   } else if (run.type === 'anchorHost') {
     yield {
       text: '',
       fontFamilies: [run.fontFamily, run.fontFamilyEastAsia],
+      bold: run.bold,
+      italic: run.italic,
     };
   }
 }

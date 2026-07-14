@@ -396,7 +396,7 @@ describe('find-highlight slices use the fitted advance (finding 3)', () => {
     // Drawn geometry with letterSpacingPx=10: glyph i starts at 12·i + 10·i.
     // Slice [1,3) ("BC"): left = 12 + 10 = 22; right = measure("ABC") + 2·10
     // = 36 + 20 = 56 → width = 34.
-    const runs = [runInfo({ text: 'ABCD', x: 100, y: 50, h: 16, letterSpacingPx: 10 })];
+    const runs = [runInfo({ text: 'ABCD', x: 100, y: 50, w: 78, h: 16, letterSpacingPx: 10 })];
     const matches: DocxHighlightMatch[] = [
       { slices: [{ runIndex: 0, start: 1, end: 3 }], active: false },
     ];
@@ -415,7 +415,7 @@ describe('find-highlight slices use the fitted advance (finding 3)', () => {
     const layer = makeEl('div');
     // Full slice [0,4): width = natural 48 + (4−1)·10 = 78 — the region-end
     // fitted advance (no pitch after the last glyph).
-    const runs = [runInfo({ text: 'ABCD', x: 100, y: 50, h: 16, letterSpacingPx: 10 })];
+    const runs = [runInfo({ text: 'ABCD', x: 100, y: 50, w: 78, h: 16, letterSpacingPx: 10 })];
     const matches: DocxHighlightMatch[] = [
       { slices: [{ runIndex: 0, start: 0, end: 4 }], active: false },
     ];

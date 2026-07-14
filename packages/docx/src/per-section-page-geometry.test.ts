@@ -5,6 +5,7 @@ import type {
   SectionGeom, PaginatedBodyElement, HeaderFooter,
   DocTable, DocTableRow, DocTableCell,
 } from './types';
+import { attachDocumentLayoutRuntime } from './layout/runtime-state.js';
 
 // ECMA-376 §17.6.13 `<w:pgSz>` + §17.6.11 `<w:pgMar>` — page geometry is
 // PER-SECTION. A mid-body SectionBreak carries its ending section's `geom`; the
@@ -400,6 +401,7 @@ describe('page-size fact (§17.6.13/§17.6.11) — paginateDocument sectionGeom'
     type Doc = Awaited<ReturnType<typeof DocxDocument.load>>;
     const make = (state: Record<string, unknown>) => {
       const d = Object.create(DocxDocument.prototype) as Doc;
+      attachDocumentLayoutRuntime(d, 0);
       Object.assign(d, { _meta: null, _document: null, _pages: null, _mode: 'main' }, state);
       return d;
     };

@@ -81,6 +81,7 @@ export {
 // spreads this into its own map; script-fallback Noto faces live in
 // SCRIPT_GOOGLE_FONTS below.
 export { GOOGLE_FONT_SUBSTITUTES } from './fonts/google-fonts';
+export { canvasFontString, createCanvasFontRoute, type CanvasFontRoute } from './fonts/canvas-route';
 export {
   classifyCjkFont,
   classifyFontGeneric,

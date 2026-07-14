@@ -181,8 +181,7 @@ describe('buildDocxHighlightLayer', () => {
   it('leaves a non-eastAsianVert run measured at natural width (unchanged)', () => {
     vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
     const layer = makeEl('div');
-    // Same text/w but NOT flagged 縦中横 ⇒ natural 14px extent (byte-identical to
-    // the pre-#836 behaviour). w is irrelevant to the highlight here.
+    // Same text/w but NOT flagged 縦中横 ⇒ natural 14px extent. w is irrelevant.
     const runs = [run({ text: '２９', x: 0, w: 7, fontSize: 7 })];
     const matches: DocxHighlightMatch[] = [
       { slices: [{ runIndex: 0, start: 0, end: 2 }], active: false },

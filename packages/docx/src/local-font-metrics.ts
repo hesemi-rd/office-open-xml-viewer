@@ -5,7 +5,7 @@ import {
   type LocalFontMetricRequest,
 } from '@silurus/ooxml-core';
 import type { DocxDocumentModel } from './types.js';
-import { docxRenderedFontFamilies } from './document-content.js';
+import { docxRenderedTextUsages } from './document-content.js';
 
 /** Word's Far-East single-line height for Meiryo is 1.3 × the selected face's
  * hhea design box. This is Office compatibility behavior, not an ECMA-376
@@ -14,34 +14,42 @@ import { docxRenderedFontFamilies } from './document-content.js';
  * (Meiryo 6.30 has a different hhea box from older builds) without encoding a
  * version-specific number. Meiryo UI is deliberately excluded: it is a distinct
  * family with different metrics and has no equivalent Word measurement here. */
-export function docxLocalMetricRequests(doc: DocxDocumentModel): LocalFontMetricRequest[] {
-  // ECMA-376 §17.8.3.3: an embedded regular face is the document's authored
-  // normal face for that family. Registering a terminal-local alias afterwards
-  // would replace it during normal-run layout, so embedded families never enter
-  // local probing. Bold/italic-only embeddings do not suppress a missing normal
-  // face because they cannot satisfy the normal style slot.
-  const embeddedRegularFamilies = new Set(
+export function docxLocalMetricRequests(
+  doc: DocxDocumentModel,
+): LocalFontMetricRequest[] {
+  // ECMA-376 §17.8.3.3: an embedded face is authoritative for its exact
+  // family/weight/style tuple. Other tuples remain unavailable unless they
+  // have their own positively identified exact face route.
+  const embeddedTuples = new Set(
     (doc.embeddedFonts ?? [])
-      .filter((font) => font.style === 'regular')
-      .map((font) => normalizeLocalFontMetricFamily(font.fontName)),
+      .map((font) => {
+        const weight = font.style === 'bold' || font.style === 'boldItalic' ? 700 : 400;
+        const style = font.style === 'italic' || font.style === 'boldItalic' ? 'italic' : 'normal';
+        return `${normalizeLocalFontMetricFamily(font.fontName)}:${weight}:${style}`;
+      }),
   );
-  const names = new Set<string>([
-    ...Object.keys(doc.fontFamilyClasses ?? {}),
-    ...(doc.majorFont ? [doc.majorFont] : []),
-    ...(doc.minorFont ? [doc.minorFont] : []),
-    ...docxRenderedFontFamilies(doc),
-  ]);
   const requests: LocalFontMetricRequest[] = [];
-  for (const family of names) {
+  const seen = new Set<string>();
+  const addCandidate = (familyValue: string | null | undefined): void => {
+    const family = familyValue?.trim();
+    if (!family) return;
     const normalized = normalizeLocalFontMetricFamily(family);
-    if (embeddedRegularFamilies.has(normalized)) continue;
-    const isMeiryo = normalized === 'meiryo' || family.trim() === 'メイリオ';
-    if (!isMeiryo) continue;
-    requests.push({
-      family,
-      localNames: ['Meiryo'],
-      lineHeightMultiplier: 1.3,
-    });
+    // This reviewed compatibility profile is the only mapping for which DOCX
+    // knows an exact local full-face name. Arbitrary w:rFonts family text is not
+    // a CSS local() identity and must use embedded/web/generic routing instead.
+    const isMeiryo = normalized === 'meiryo' || family === 'メイリオ';
+    if (!isMeiryo) return;
+    const key = `${normalized}:400:normal`;
+    if (embeddedTuples.has(key)) return;
+    if (seen.has(key)) return;
+    seen.add(key);
+    requests.push({ family, localNames: ['Meiryo'], lineHeightMultiplier: 1.3 });
+  };
+  for (const usage of docxRenderedTextUsages(doc)) {
+    if (usage.bold || usage.italic) continue;
+    for (const authoredFamily of usage.fontFamilies) {
+      addCandidate(authoredFamily);
+    }
   }
   return requests;
 }

@@ -43,7 +43,16 @@ pub struct RunFmt {
     /// inherited concrete color so e.g. PlaceholderText gray does not survive.
     pub color_auto: bool,
     pub font_family_ascii: Option<String>,
+    pub font_family_high_ansi: Option<String>,
     pub font_family_east_asia: Option<String>,
+    pub font_family_ascii_direct: Option<String>,
+    pub font_family_ascii_theme: Option<String>,
+    pub font_family_high_ansi_direct: Option<String>,
+    pub font_family_high_ansi_theme: Option<String>,
+    pub font_family_east_asia_direct: Option<String>,
+    pub font_family_east_asia_theme: Option<String>,
+    /// ECMA-376 §17.3.2.26 rFonts@hint, resolved through the run style chain.
+    pub font_hint: Option<String>,
     pub background: Option<String>, // hex 6
     /// "super" | "sub" — mapped from w:vertAlign val="superscript|subscript"
     pub vert_align: Option<String>,
@@ -93,6 +102,8 @@ pub struct RunFmt {
     /// to `font_family_ascii` / `font_family_east_asia`; carries the same
     /// "@theme:<ref>" marker convention for @cstheme references.
     pub font_family_cs: Option<String>,
+    pub font_family_cs_direct: Option<String>,
+    pub font_family_cs_theme: Option<String>,
     /// ECMA-376 §17.3.2.39 w:szCs/@w:val — complex-script font size in pt
     /// (converted from half-points, same units as `font_size`).
     pub font_size_cs: Option<f64>,
@@ -112,6 +123,8 @@ pub struct RunFmt {
     /// ECMA-376 §17.3.2.20 w:lang/@w:bidi — complex-script (RTL) language tag,
     /// lower-cased (e.g. "ar-sa", "ae-ar"). Drives Word's AN digit ordering.
     pub lang_bidi: Option<String>,
+    /// ECMA-376 §17.3.2.20 w:lang/@w:eastAsia, lower-cased.
+    pub lang_east_asia: Option<String>,
     /// ECMA-376 §17.3.2.35 `<w:spacing w:val>` — character-spacing adjustment,
     /// the pitch added AFTER each character before the next is rendered
     /// ("equivalent to the additional character pitch added by a document
@@ -926,8 +939,26 @@ pub(crate) fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     if src.font_family_ascii.is_some() {
         dst.font_family_ascii = src.font_family_ascii.clone();
     }
+    if src.font_family_ascii_direct.is_some() || src.font_family_ascii_theme.is_some() {
+        dst.font_family_ascii_direct = src.font_family_ascii_direct.clone();
+        dst.font_family_ascii_theme = src.font_family_ascii_theme.clone();
+    }
+    if src.font_family_high_ansi.is_some() {
+        dst.font_family_high_ansi = src.font_family_high_ansi.clone();
+    }
+    if src.font_family_high_ansi_direct.is_some() || src.font_family_high_ansi_theme.is_some() {
+        dst.font_family_high_ansi_direct = src.font_family_high_ansi_direct.clone();
+        dst.font_family_high_ansi_theme = src.font_family_high_ansi_theme.clone();
+    }
     if src.font_family_east_asia.is_some() {
         dst.font_family_east_asia = src.font_family_east_asia.clone();
+    }
+    if src.font_family_east_asia_direct.is_some() || src.font_family_east_asia_theme.is_some() {
+        dst.font_family_east_asia_direct = src.font_family_east_asia_direct.clone();
+        dst.font_family_east_asia_theme = src.font_family_east_asia_theme.clone();
+    }
+    if src.font_hint.is_some() {
+        dst.font_hint = src.font_hint.clone();
     }
     if src.background.is_some() {
         dst.background = src.background.clone();
@@ -975,6 +1006,10 @@ pub(crate) fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     if src.font_family_cs.is_some() {
         dst.font_family_cs = src.font_family_cs.clone();
     }
+    if src.font_family_cs_direct.is_some() || src.font_family_cs_theme.is_some() {
+        dst.font_family_cs_direct = src.font_family_cs_direct.clone();
+        dst.font_family_cs_theme = src.font_family_cs_theme.clone();
+    }
     if src.bold_cs.is_some() {
         dst.bold_cs = src.bold_cs;
     }
@@ -983,6 +1018,9 @@ pub(crate) fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     }
     if src.lang_bidi.is_some() {
         dst.lang_bidi = src.lang_bidi.clone();
+    }
+    if src.lang_east_asia.is_some() {
+        dst.lang_east_asia = src.lang_east_asia.clone();
     }
     // Run character-metric axes (§17.3.2.14 fitText / §17.3.2.35 spacing /
     // §17.3.2.43 w / §17.3.2.24 position / §17.3.2.19 kern). Each carries the
@@ -1380,6 +1418,11 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
                 fmt.lang_bidi = Some(bidi.to_lowercase());
             }
         }
+        if let Some(east_asia) = attr_w(lang, "eastAsia") {
+            if !east_asia.is_empty() {
+                fmt.lang_east_asia = Some(east_asia.to_lowercase());
+            }
+        }
     }
 
     // Color. An explicit `<w:color w:val="auto"/>` (ECMA-376 §17.3.2.6) does NOT
@@ -1406,22 +1449,38 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
     // attributes (ascii/hAnsi/eastAsia/cs) and theme references (asciiTheme,
     // hAnsiTheme, eastAsiaTheme, cstheme). Theme refs are resolved post-parse
     // in parse_document once a Theme is available; here we just record the
-    // reference string under the corresponding axis. Direct attributes take
-    // precedence over theme refs per spec.
+    // reference string under the corresponding axis. ECMA-376 §17.3.2.26 says
+    // the theme attribute supersedes the matching direct typeface attribute.
     if let Some(rf) = child_w(rpr, "rFonts") {
-        let direct_ascii = attr_w(rf, "ascii").or_else(|| attr_w(rf, "hAnsi"));
-        let theme_ascii = attr_w(rf, "asciiTheme").or_else(|| attr_w(rf, "hAnsiTheme"));
-        fmt.font_family_ascii = direct_ascii.or_else(|| theme_ascii.map(|t| format!("@theme:{t}")));
+        fmt.font_hint = attr_w(rf, "hint");
+        fmt.font_family_ascii_direct = attr_w(rf, "ascii");
+        fmt.font_family_ascii_theme = attr_w(rf, "asciiTheme").map(|t| format!("@theme:{t}"));
+        fmt.font_family_ascii = fmt
+            .font_family_ascii_theme
+            .clone()
+            .or_else(|| fmt.font_family_ascii_direct.clone());
+        fmt.font_family_high_ansi_direct = attr_w(rf, "hAnsi");
+        fmt.font_family_high_ansi_theme = attr_w(rf, "hAnsiTheme").map(|t| format!("@theme:{t}"));
+        fmt.font_family_high_ansi = fmt
+            .font_family_high_ansi_theme
+            .clone()
+            .or_else(|| fmt.font_family_high_ansi_direct.clone());
 
-        let direct_ea = attr_w(rf, "eastAsia");
-        let theme_ea = attr_w(rf, "eastAsiaTheme");
-        fmt.font_family_east_asia = direct_ea.or_else(|| theme_ea.map(|t| format!("@theme:{t}")));
+        fmt.font_family_east_asia_direct = attr_w(rf, "eastAsia");
+        fmt.font_family_east_asia_theme =
+            attr_w(rf, "eastAsiaTheme").map(|t| format!("@theme:{t}"));
+        fmt.font_family_east_asia = fmt
+            .font_family_east_asia_theme
+            .clone()
+            .or_else(|| fmt.font_family_east_asia_direct.clone());
 
-        // Complex-script typeface (§17.3.2.26 @cs / @cstheme). Same direct-wins
-        // rule and "@theme:<ref>" marker convention as the other axes.
-        let direct_cs = attr_w(rf, "cs");
-        let theme_cs = attr_w(rf, "cstheme");
-        fmt.font_family_cs = direct_cs.or_else(|| theme_cs.map(|t| format!("@theme:{t}")));
+        // Complex-script typeface (§17.3.2.26 @cs / @cstheme).
+        fmt.font_family_cs_direct = attr_w(rf, "cs");
+        fmt.font_family_cs_theme = attr_w(rf, "cstheme").map(|t| format!("@theme:{t}"));
+        fmt.font_family_cs = fmt
+            .font_family_cs_theme
+            .clone()
+            .or_else(|| fmt.font_family_cs_direct.clone());
     }
 
     // Run shading (ECMA-376 §17.3.2.32 w:shd). We adopt `@w:fill` only; `@w:val`
@@ -1794,6 +1853,109 @@ mod tests {
         parse_run_fmt(doc.root_element())
     }
 
+    #[test]
+    fn rfonts_preserves_four_axes_and_theme_supersedes_direct_typeface() {
+        let fmt = run_fmt_from(
+            r#"<w:rFonts
+                w:ascii="Ascii Direct" w:asciiTheme="majorAscii"
+                w:hAnsi="HAnsi Direct" w:hAnsiTheme="minorHAnsi"
+                w:eastAsia="EA Direct" w:eastAsiaTheme="majorEastAsia"
+                w:cs="CS Direct" w:cstheme="minorBidi"/>"#,
+        );
+
+        assert_eq!(fmt.font_family_ascii.as_deref(), Some("@theme:majorAscii"));
+        assert_eq!(
+            fmt.font_family_high_ansi.as_deref(),
+            Some("@theme:minorHAnsi")
+        );
+        assert_eq!(
+            fmt.font_family_east_asia.as_deref(),
+            Some("@theme:majorEastAsia")
+        );
+        assert_eq!(fmt.font_family_cs.as_deref(), Some("@theme:minorBidi"));
+        assert_eq!(
+            fmt.font_family_ascii_direct.as_deref(),
+            Some("Ascii Direct")
+        );
+        assert_eq!(
+            fmt.font_family_ascii_theme.as_deref(),
+            Some("@theme:majorAscii")
+        );
+        assert_eq!(
+            fmt.font_family_high_ansi_direct.as_deref(),
+            Some("HAnsi Direct")
+        );
+        assert_eq!(
+            fmt.font_family_high_ansi_theme.as_deref(),
+            Some("@theme:minorHAnsi")
+        );
+    }
+
+    #[test]
+    fn newer_direct_axes_replace_inherited_theme_axes_as_whole_slots() {
+        let mut effective = run_fmt_from(
+            r#"<w:rFonts
+                w:asciiTheme="majorAscii" w:hAnsiTheme="majorHAnsi"
+                w:eastAsiaTheme="majorEastAsia" w:cstheme="majorBidi"/>"#,
+        );
+        let direct = run_fmt_from(
+            r#"<w:rFonts
+                w:ascii="Run ASCII" w:hAnsi="Run HANSI"
+                w:eastAsia="Run EA" w:cs="Run CS"/>"#,
+        );
+        apply_run(&mut effective, &direct);
+
+        assert_eq!(effective.font_family_ascii.as_deref(), Some("Run ASCII"));
+        assert_eq!(
+            effective.font_family_high_ansi.as_deref(),
+            Some("Run HANSI")
+        );
+        assert_eq!(effective.font_family_east_asia.as_deref(), Some("Run EA"));
+        assert_eq!(effective.font_family_cs.as_deref(), Some("Run CS"));
+
+        let themes = run_fmt_from(
+            r#"<w:rFonts
+                w:asciiTheme="minorAscii" w:hAnsiTheme="minorHAnsi"
+                w:eastAsiaTheme="minorEastAsia" w:cstheme="minorBidi"/>"#,
+        );
+        apply_run(&mut effective, &themes);
+        assert_eq!(
+            effective.font_family_ascii.as_deref(),
+            Some("@theme:minorAscii")
+        );
+        assert_eq!(
+            effective.font_family_high_ansi.as_deref(),
+            Some("@theme:minorHAnsi")
+        );
+        assert_eq!(
+            effective.font_family_east_asia.as_deref(),
+            Some("@theme:minorEastAsia")
+        );
+        assert_eq!(
+            effective.font_family_cs.as_deref(),
+            Some("@theme:minorBidi")
+        );
+
+        let ascii_only = run_fmt_from(r#"<w:rFonts w:asciiTheme="minorAscii"/>"#);
+        apply_run(&mut effective, &ascii_only);
+        assert_eq!(
+            effective.font_family_ascii.as_deref(),
+            Some("@theme:minorAscii")
+        );
+        assert_eq!(
+            effective.font_family_high_ansi.as_deref(),
+            Some("@theme:minorHAnsi")
+        );
+        assert_eq!(
+            effective.font_family_east_asia.as_deref(),
+            Some("@theme:minorEastAsia")
+        );
+        assert_eq!(
+            effective.font_family_cs.as_deref(),
+            Some("@theme:minorBidi")
+        );
+    }
+
     fn para_fmt_from(ppr_xml: &str) -> ParaFmt {
         let xml = format!(
             r#"<w:pPr xmlns:w="{ns}">{body}</w:pPr>"#,
@@ -1962,6 +2124,15 @@ mod tests {
         apply_run(&mut dst, &src);
         assert_eq!(dst.color, None);
         assert!(dst.color_auto);
+    }
+
+    #[test]
+    fn east_asia_font_hint_and_language_override_through_run_merge() {
+        let mut dst = run_fmt_from(r#"<w:rFonts w:hint="default"/><w:lang w:eastAsia="ja-JP"/>"#);
+        let src = run_fmt_from(r#"<w:rFonts w:hint="eastAsia"/><w:lang w:eastAsia="ZH-cn"/>"#);
+        apply_run(&mut dst, &src);
+        assert_eq!(dst.font_hint.as_deref(), Some("eastAsia"));
+        assert_eq!(dst.lang_east_asia.as_deref(), Some("zh-cn"));
     }
 
     #[test]

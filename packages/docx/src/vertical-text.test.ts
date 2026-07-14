@@ -322,11 +322,17 @@ describe('drawVerticalRun (§17.6.20 — upright CJK counter-rotated, Latin side
     expect(fill?.y).toBeCloseTo(215, 6);
   });
 
-  it('advances each glyph by measure + letterSpacing (measure == draw)', () => {
+  it('advances a shaped sideways piece by measure + per-glyph letterSpacing', () => {
     const { ctx, ops } = mockCtx();
-    drawVerticalRun(ctx, 'AB', 0, 0, 12, 4); // adv = 10 + 4 = 14 per glyph
+    drawVerticalRun(ctx, 'AB富', 0, 0, 12, 4);
     const fills = ops.filter((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
-    expect(fills.map((f) => f.x)).toEqual([0, 14]);
+    // AB is one 20px shaped piece plus two 4px pitches. The following 10px CJK
+    // cell therefore centres at x=28 + (10 + 4)/2 = 35.
+    expect(fills.map((f) => [f.text, f.x])).toEqual([['AB', 0], ['富', 0]]);
+    const translate = ops.find(
+      (op): op is Extract<Op, { op: 'translate' }> => op.op === 'translate',
+    );
+    expect(translate).toEqual({ op: 'translate', x: 35, y: 0 });
   });
 
   it('uses the plain page-frame rotation for an unreachable Tr long mark', () => {
@@ -477,6 +483,24 @@ describe('drawVerticalRun (§17.6.20 — upright CJK counter-rotated, Latin side
 });
 
 describe('reachable vert glyph cells (issue #1024 — feature-state measure == paint)', () => {
+  it('preserves contextual shaping across a consecutive sideways piece', () => {
+    const text = 'Word';
+    const { ctx } = mockCtx({ wholeWidths: { [text]: 35 } });
+
+    // A vo=R piece stays sideways in the rotated frame, so its vertical advance
+    // is the same contextually-shaped width as ordinary horizontal text. In
+    // particular, kerning must not be replaced by four independent glyph cells.
+    expect(verticalRunInkExtraPxWithCapability(ctx, text, () => false)).toBe(0);
+
+    const painted = mockCtx({ wholeWidths: { [text]: 35 } });
+    drawVerticalRunWithCapability(painted.ctx, text, 0, 0, 12, 0, 1, true, () => false);
+    const fills = painted.ops.filter(
+      (op): op is Extract<Op, { op: 'fillText' }> => op.op === 'fillText',
+    );
+    expect(fills).toHaveLength(1);
+    expect(fills[0]).toMatchObject({ text, x: 0, feature: 'normal' });
+  });
+
   it('keeps the featured origin at half-advance and allows designed leading ink to poke', () => {
     const { ctx, ops } = mockCtx({ vert: { 'ー': { asc: 8, desc: 5 } } });
     expect(verticalRunInkExtraPxWithCapability(ctx, 'ーA', () => true)).toBe(0);

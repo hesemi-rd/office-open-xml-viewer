@@ -294,6 +294,18 @@ describe('over-long word overflow-wrap (long URLs in a narrow column)', () => {
     expect(texts.map((t) => t.text).join('')).toBe(url);
   });
 
+  it('never tears an over-long same-slot Devanagari grapheme cluster', async () => {
+    const cluster = '\u0915\u093f';
+    const token = cluster.repeat(30);
+    const events = await render([textRun(token)]);
+    const texts = events.filter((e) => e.kind === 'fillText') as Array<{ text: string; x: number }>;
+
+    expect(texts.length).toBeGreaterThan(1);
+    expect(texts.map((event) => event.text).join('')).toBe(token);
+    expect(texts.every((event) => !event.text.startsWith('\u093f'))).toBe(true);
+    expect(texts.every((event) => !event.text.endsWith('\u0915'))).toBe(true);
+  });
+
   it('still wraps a normal sentence at spaces, not mid-word', async () => {
     // Guard: ordinary text must keep wrapping at spaces — the over-long path only
     // engages for a single token wider than the whole line.

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { renderDocumentToCanvas } from './renderer.js';
+import { createLayoutServices, renderDocumentToCanvas } from './renderer.js';
+import { testFontSnapshot } from './layout/test-font-snapshot.js';
 import type { BodyElement, DocNote, DocParagraph, DocxDocumentModel, HeaderFooter, SectionProps } from './types';
 
 // ECMA-376 §17.6.11 (pgMar/@bottom) — the main-document text bottom is placed at the
@@ -102,7 +103,12 @@ function docWithFooter(
 
 async function renderPage0(doc: DocxDocumentModel): Promise<Call[]> {
   const { canvas, calls } = makeRecordingCanvas();
-  await renderDocumentToCanvas(doc, canvas, 0, { dpr: 1, width: 400 });
+  await renderDocumentToCanvas(doc, canvas, 0, {
+    dpr: 1, width: 400,
+    layoutServices: createLayoutServices(doc, {
+      localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]), measureContext: canvas.getContext('2d'),
+    }),
+  });
   return calls;
 }
 
