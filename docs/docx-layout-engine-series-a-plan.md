@@ -184,7 +184,7 @@ pnpm lint:test
 pnpm test:docx-boundaries
 node scripts/check-docx-layout-boundaries.mjs --write-transitional-baseline
 node scripts/check-docx-layout-boundaries.mjs
-pnpm --filter @silurus/ooxml-docx build
+pnpm build
 node scripts/check-docx-public-api.mjs --write-baseline
 pnpm typecheck
 ```

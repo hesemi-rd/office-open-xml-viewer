@@ -149,6 +149,12 @@ jobs:
       - name: Build packages
         run: pnpm build:packages
 
+      - name: DOCX package build ownership
+        run: pnpm test:docx-package-build
+
+      - name: Build published package
+        run: pnpm build
+
       - name: DOCX public API compatibility
         run: node scripts/check-docx-public-api.mjs
 

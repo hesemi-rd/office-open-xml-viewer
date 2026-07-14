@@ -2,18 +2,436 @@
 // This file records every local declaration reachable from the DOCX public entry.
 // Do not edit by hand.
 
-// --- file: document.d.ts ---
-import { type LoadOptions as CoreLoadOptions, type MathRenderer } from '@silurus/ooxml-core';
-import type { DocxDocumentModel, RenderPageOptions, DocComment, DocNote } from './types';
-import { type DocxTextRunInfo } from './renderer';
-import type { WireRenderPageOptions } from './worker-protocol';
-export interface LoadOptions extends CoreLoadOptions {
-    math?: MathRenderer;
-    mode?: 'main' | 'worker';
+// --- file: docx.d.ts ---
+export declare interface AnchorHostMetrics {
+    fontSize: number;
+    fontFamily?: string | null;
+    fontFamilyEastAsia?: string | null;
+    bold?: boolean;
+    italic?: boolean;
 }
-export type RenderPageToBitmapOptions = WireRenderPageOptions & {
-    onTextRun?: (run: DocxTextRunInfo) => void;
+export declare function autoResize(render: (width: number, height: number) => void | Promise<void>, element: Element, opts?: AutoResizeOptions): () => void;
+export declare interface AutoResizeOptions {
+    pauseWhenHidden?: boolean;
+}
+export declare type BodyElement = ({
+    type: 'paragraph';
+} & DocParagraph) | ({
+    type: 'table';
+} & DocTable) | {
+    type: 'pageBreak';
+    parity?: 'odd' | 'even';
+} | {
+    type: 'columnBreak';
+} | {
+    type: 'sectionBreak';
+    kind: 'continuous' | 'nextPage' | 'oddPage' | 'evenPage' | string;
+    columns?: ColumnsSpec | null;
+    headers?: HeadersFooters;
+    footers?: HeadersFooters;
+    titlePage?: boolean;
+    geom?: SectionGeom;
+    pageNumType?: PageNumType | null;
+    textDirection?: string | null;
 };
+export declare interface BorderSpec {
+    width: number;
+    color: string | null;
+    style: string;
+}
+export declare function buildDocxHighlightLayer(layer: HTMLDivElement, runs: DocxTextRunInfo[], matches: DocxHighlightMatch[], cssWidth: number, cssHeight: number, measureForFont: (font: string) => (s: string) => number, colors?: DocxHighlightColors): void;
+export declare function buildDocxTextLayer(layer: HTMLDivElement, runs: DocxTextRunInfo[], cssWidth: number, cssHeight: number, onHyperlinkClick?: (target: HyperlinkTarget) => void, measureForFont?: (font: string) => (s: string) => number): void;
+export declare interface CellBorders {
+    top: BorderSpec | null;
+    bottom: BorderSpec | null;
+    left: BorderSpec | null;
+    right: BorderSpec | null;
+    insideH: BorderSpec | null;
+    insideV: BorderSpec | null;
+}
+export declare type CellElement = ({
+    type: 'paragraph';
+} & DocParagraph) | ({
+    type: 'table';
+} & DocTable);
+declare interface ChartDataLabelOverride {
+    idx: number;
+    text: string;
+    position?: string;
+    fontColor?: string;
+    fontSizeHpt?: number;
+    fontBold?: boolean;
+    labelBox?: ChartLabelBox;
+    showVal?: boolean;
+    showCatName?: boolean;
+    showSerName?: boolean;
+    showPercent?: boolean;
+    deleted?: boolean;
+}
+declare interface ChartDataPointOverride {
+    idx: number;
+    color?: string;
+    markerSymbol?: string;
+    markerSize?: number;
+    markerFill?: string;
+    markerLine?: string;
+    explosion?: number;
+}
+declare interface ChartErrBars {
+    dir: string;
+    barType: string;
+    plus: (number | null)[];
+    minus: (number | null)[];
+    noEndCap: boolean;
+    color?: string;
+    lineWidthEmu?: number;
+    dash?: string;
+}
+declare interface ChartexBoxSeries {
+    name: string;
+    color?: string | null;
+    valuesByCategory: number[][];
+    meanMarker: boolean;
+    meanLine: boolean;
+    showOutliers: boolean;
+    showNonoutliers: boolean;
+    quartileMethod: string;
+}
+declare interface ChartexBoxWhisker {
+    categories: string[];
+    series: ChartexBoxSeries[];
+}
+declare interface ChartexSunburst {
+    rows: ChartexSunburstRow[];
+}
+declare interface ChartexSunburstRow {
+    path: string[];
+    size: number;
+}
+declare interface ChartLabelBox {
+    fill?: string;
+    borderColor?: string;
+    borderWidthEmu?: number;
+}
+declare interface ChartManualLayout {
+    xMode: string;
+    yMode: string;
+    layoutTarget?: string;
+    x: number;
+    y: number;
+    w?: number;
+    h?: number;
+}
+declare interface ChartModel {
+    chartType: ChartType;
+    title: string | null;
+    categories: string[];
+    series: ChartSeries[];
+    varyColors?: boolean | null;
+    showDataLabels: boolean;
+    valMin: number | null;
+    valMax: number | null;
+    catAxisTitle: string | null;
+    valAxisTitle: string | null;
+    catAxisHidden: boolean;
+    valAxisHidden: boolean;
+    catAxisLineHidden: boolean;
+    valAxisLineHidden: boolean;
+    plotAreaBg: string | null;
+    chartBg: string | null;
+    showLegend: boolean;
+    legendPos: 'r' | 'l' | 't' | 'b' | 'tr' | null;
+    catAxisCrossBetween: 'between' | 'midCat' | string;
+    valAxisMajorTickMark: 'cross' | 'out' | 'in' | 'none' | string;
+    catAxisMajorTickMark: 'cross' | 'out' | 'in' | 'none' | string;
+    valAxisMinorTickMark?: 'cross' | 'out' | 'in' | 'none' | string | null;
+    catAxisMinorTickMark?: 'cross' | 'out' | 'in' | 'none' | string | null;
+    titleFontSizeHpt: number | null;
+    titleFontColor: string | null;
+    titleFontFace: string | null;
+    catAxisFontSizeHpt: number | null;
+    valAxisFontSizeHpt: number | null;
+    catAxisFontColor?: string | null;
+    valAxisFontColor?: string | null;
+    dataLabelFontSizeHpt: number | null;
+    subtotalIndices: number[];
+    legendManualLayout?: LegendManualLayout | null;
+    valAxisFormatCode?: string | null;
+    barGapWidth?: number | null;
+    barOverlap?: number | null;
+    dataLabelPosition?: string | null;
+    dataLabelFontColor?: string | null;
+    dataLabelFormatCode?: string | null;
+    titleFontBold?: boolean | null;
+    catAxisFontBold?: boolean | null;
+    valAxisFontBold?: boolean | null;
+    catAxisTitleFontSizeHpt?: number | null;
+    catAxisTitleFontBold?: boolean | null;
+    catAxisTitleFontColor?: string | null;
+    valAxisTitleFontSizeHpt?: number | null;
+    valAxisTitleFontBold?: boolean | null;
+    valAxisTitleFontColor?: string | null;
+    catAxisFontFace?: string | null;
+    valAxisFontFace?: string | null;
+    catAxisTitleFontFace?: string | null;
+    valAxisTitleFontFace?: string | null;
+    dataLabelFontFace?: string | null;
+    legendFontFace?: string | null;
+    legendFontColor?: string | null;
+    legendFontSizeHpt?: number | null;
+    legendFontBold?: boolean | null;
+    themeMajorFontLatin?: string | null;
+    themeMinorFontLatin?: string | null;
+    chartBorderColor?: string | null;
+    chartBorderWidthEmu?: number | null;
+    catAxisCrosses?: string | null;
+    catAxisCrossesAt?: number | null;
+    valAxisCrosses?: string | null;
+    valAxisCrossesAt?: number | null;
+    catAxisLineColor?: string | null;
+    catAxisLineWidthEmu?: number | null;
+    valAxisLineColor?: string | null;
+    valAxisLineWidthEmu?: number | null;
+    catAxisFormatCode?: string | null;
+    catAxisMin?: number | null;
+    catAxisMax?: number | null;
+    titleManualLayout?: ChartManualLayout | null;
+    plotAreaManualLayout?: ChartManualLayout | null;
+    scatterStyle?: string | null;
+    radarStyle?: string | null;
+    secondaryValAxis?: SecondaryValueAxis | null;
+    date1904?: boolean;
+    holeSize?: number | null;
+    firstSliceAngle?: number | null;
+    dispBlanksAs?: string | null;
+    valAxisMajorGridlines?: boolean | null;
+    catAxisMajorGridlines?: boolean | null;
+    valAxisGridlineColor?: string | null;
+    valAxisGridlineWidthEmu?: number | null;
+    catAxisGridlineColor?: string | null;
+    catAxisGridlineWidthEmu?: number | null;
+    valAxisMinorGridlines?: boolean | null;
+    valAxisMajorUnit?: number | null;
+    valAxisMinorUnit?: number | null;
+    valAxisLogBase?: number | null;
+    valAxisOrientation?: 'minMax' | 'maxMin' | string | null;
+    catAxisOrientation?: 'minMax' | 'maxMin' | string | null;
+    catAxisTickLabelPos?: string | null;
+    valAxisTickLabelPos?: string | null;
+    catAxisLabelRotation?: number | null;
+    stockHiLowLines?: boolean | null;
+    stockHiLowLineColor?: string | null;
+    stockUpDownBars?: boolean | null;
+    chartexBox?: ChartexBoxWhisker | null;
+    chartexSunburst?: ChartexSunburst | null;
+    chartexAccents?: string[] | null;
+}
+export declare interface ChartRun {
+    chart: ChartModel;
+    widthPt: number;
+    heightPt: number;
+    anchor: boolean;
+    anchorXPt?: number;
+    anchorYPt?: number;
+    anchorXFromMargin?: boolean;
+    anchorYFromPara?: boolean;
+    wrapMode?: string;
+    distTop?: number;
+    distBottom?: number;
+    distLeft?: number;
+    distRight?: number;
+    wrapSide?: string;
+    allowOverlap?: boolean;
+    anchorXAlign?: string | null;
+    anchorYAlign?: string | null;
+    anchorXRelativeFrom?: string | null;
+    anchorYRelativeFrom?: string | null;
+}
+declare interface ChartSeries {
+    name: string;
+    color: string | null;
+    values: (number | null)[];
+    dataPointColors?: (string | null)[] | null;
+    dataLabelColors?: (string | null)[] | null;
+    labelColor?: string | null;
+    seriesType?: string | null;
+    useSecondaryAxis?: boolean | null;
+    categories?: string[] | null;
+    showMarker?: boolean | null;
+    valFormatCode?: string | null;
+    markerSymbol?: string | null;
+    markerSize?: number | null;
+    markerFill?: string | null;
+    markerLine?: string | null;
+    dataPointOverrides?: ChartDataPointOverride[] | null;
+    dataLabelOverrides?: ChartDataLabelOverride[] | null;
+    seriesDataLabels?: ChartSeriesDataLabels | null;
+    errBars?: ChartErrBars[] | null;
+    bubbleSizes?: (number | null)[] | null;
+    smooth?: boolean | null;
+    trendLines?: ChartTrendline[] | null;
+    lineHidden?: boolean | null;
+}
+declare interface ChartSeriesDataLabels {
+    showVal: boolean;
+    showCatName: boolean;
+    showSerName: boolean;
+    showPercent: boolean;
+    position?: string;
+    fontColor?: string;
+    formatCode?: string;
+    fontBold?: boolean;
+    fontSizeHpt?: number;
+    labelBox?: ChartLabelBox;
+    showLeaderLines?: boolean;
+    leaderLineColor?: string;
+    leaderLineWidthEmu?: number;
+}
+declare interface ChartTrendline {
+    trendlineType: string;
+    order?: number | null;
+    period?: number | null;
+    forward?: number | null;
+    backward?: number | null;
+    intercept?: number | null;
+    dispRSqr?: boolean | null;
+    dispEq?: boolean | null;
+    lineColor?: string | null;
+    lineWidthEmu?: number | null;
+}
+declare type ChartType = 'line' | 'stackedLine' | 'stackedLinePct' | 'clusteredBar' | 'clusteredBarH' | 'stackedBar' | 'stackedBarH' | 'stackedBarPct' | 'stackedBarHPct' | 'area' | 'stackedArea' | 'stackedAreaPct' | 'pie' | 'doughnut' | 'scatter' | 'bubble' | 'radar' | 'waterfall' | 'stock' | 'boxWhisker' | 'sunburst' | string;
+export declare interface ColSpec {
+    widthPt: number;
+    spacePt: number;
+}
+export declare interface ColumnsSpec {
+    count: number;
+    spacePt: number;
+    equalWidth: boolean;
+    sep: boolean;
+    cols: ColSpec[];
+}
+export declare interface DocComment {
+    id: string;
+    author?: string;
+    initials?: string;
+    date?: string;
+    text: string;
+}
+export declare interface DocNote {
+    id: string;
+    content: BodyElement[];
+}
+export declare interface DocParagraph {
+    alignment: 'left' | 'start' | 'center' | 'right' | 'end' | 'justify' | 'both' | 'distribute' | 'lowKashida' | 'mediumKashida' | 'highKashida' | 'thaiDistribute' | string;
+    indentLeft: number;
+    indentRight: number;
+    indentFirst: number;
+    spaceBefore: number;
+    spaceAfter: number;
+    lineSpacing: LineSpacing | null;
+    numbering: NumberingInfo | null;
+    tabStops: TabStop[];
+    runs: DocRun[];
+    bookmarks?: string[];
+    shading?: string | null;
+    pageBreakBefore?: boolean;
+    contextualSpacing?: boolean;
+    keepNext?: boolean;
+    keepLines?: boolean;
+    markVanish?: boolean;
+    widowControl?: boolean;
+    borders?: ParagraphBorders | null;
+    styleId?: string | null;
+    defaultFontSize?: number;
+    defaultFontFamily?: string | null;
+    defaultFontFamilyEastAsia?: string | null;
+    paragraphMarkColor?: string | null;
+    bidi?: boolean;
+    snapToGrid?: boolean;
+    framePr?: FramePr;
+}
+export declare interface DocRevision {
+    kind: 'insertion' | 'deletion' | string;
+    author?: string;
+    date?: string;
+    text: string;
+}
+export declare type DocRun = ({
+    type: 'text';
+} & DocxTextRun) | ({
+    type: 'anchorHost';
+} & AnchorHostMetrics) | ({
+    type: 'image';
+} & ImageRun) | ({
+    type: 'chart';
+} & ChartRun) | {
+    type: 'break';
+    breakType: 'line' | 'page' | 'column';
+} | ({
+    type: 'field';
+} & FieldRun) | ({
+    type: 'shape';
+} & ShapeRun) | {
+    type: 'math';
+    nodes: MathNode[];
+    display: boolean;
+    fontSize: number;
+    jc?: string;
+} | ({
+    type: 'ptab';
+} & PTabRun);
+export declare interface DocSettings {
+    kinsoku?: boolean;
+    noLineBreaksBefore?: string;
+    noLineBreaksAfter?: string;
+    mathDefJc?: string;
+    defaultTabStop?: number;
+    characterSpacingControl?: string;
+    useFeLayout?: boolean;
+    balanceSingleByteDoubleByteWidth?: boolean;
+    adjustLineHeightInTable?: boolean;
+}
+export declare interface DocTable {
+    colWidths: number[];
+    rows: DocTableRow[];
+    borders: TableBorders;
+    cellMarginTop: number;
+    cellMarginBottom: number;
+    cellMarginLeft: number;
+    cellMarginRight: number;
+    jc: string;
+    tblInd?: number;
+    layout?: string;
+    widthPt?: number;
+    widthPct?: number;
+    bidiVisual?: boolean;
+    tblpPr?: TblpPr;
+    overlap?: string;
+}
+export declare interface DocTableCell {
+    content: CellElement[];
+    colSpan: number;
+    vMerge: boolean | null;
+    borders: CellBorders;
+    background: string | null;
+    vAlign: 'top' | 'center' | 'bottom';
+    widthPt: number | null;
+    widthPct?: number;
+    marginTop?: number | null;
+    marginBottom?: number | null;
+    marginLeft?: number | null;
+    marginRight?: number | null;
+}
+export declare interface DocTableRow {
+    cells: DocTableCell[];
+    gridBefore?: number;
+    gridAfter?: number;
+    rowHeight: number | null;
+    rowHeightRule: 'auto' | 'atLeast' | 'exact' | string;
+    isHeader: boolean;
+    cantSplit?: boolean;
+}
 export declare class DocxDocument {
     private _document;
     private _meta;
@@ -51,865 +469,39 @@ export declare class DocxDocument {
     renderPageToBitmap(pageIndex: number, opts?: RenderPageToBitmapOptions): Promise<ImageBitmap>;
     collectPageRuns(pageIndex: number, opts?: WireRenderPageOptions): Promise<DocxTextRunInfo[]>;
 }
-
-// --- file: find-highlight-layer.d.ts ---
-import { type MatchRunSlice } from '@silurus/ooxml-core';
-import type { DocxTextRunInfo } from './renderer';
-export interface DocxHighlightMatch {
-    slices: MatchRunSlice[];
-    active: boolean;
+export declare interface DocxDocumentModel {
+    section: SectionProps;
+    body: BodyElement[];
+    headers: HeadersFooters;
+    footers: HeadersFooters;
+    majorFont?: string;
+    minorFont?: string;
+    fontFamilyClasses?: Record<string, string>;
+    fontFamilyPitches?: Record<string, string>;
+    embeddedFonts?: EmbeddedFontRef[];
+    revisions?: DocRevision[];
+    comments?: DocComment[];
+    footnotes?: DocNote[];
+    endnotes?: DocNote[];
+    settings?: DocSettings;
+    parseError?: string;
 }
-export declare const DEFAULT_FIND_HIGHLIGHT = 'rgba(255, 214, 0, 0.42)';
-export declare const DEFAULT_FIND_ACTIVE_HIGHLIGHT = 'rgba(255, 140, 0, 0.55)';
-export interface DocxHighlightColors {
+export declare interface DocxHighlightColors {
     match?: string;
     active?: string;
 }
-export declare function buildDocxHighlightLayer(layer: HTMLDivElement, runs: DocxTextRunInfo[], matches: DocxHighlightMatch[], cssWidth: number, cssHeight: number, measureForFont: (font: string) => (s: string) => number, colors?: DocxHighlightColors): void;
-
-// --- file: find.d.ts ---
-import { type FindMatch, type FindMatchesOptions, type TextMatch } from '@silurus/ooxml-core';
-import type { DocxTextRunInfo } from './renderer';
-export interface DocxMatchLocation {
+export declare interface DocxHighlightMatch {
+    slices: MatchRunSlice[];
+    active: boolean;
+}
+export declare interface DocxMatchLocation {
     page: number;
 }
-export declare class DocxFindController {
-    private readonly _pageCount;
-    private readonly _collectPageRuns;
-    private _pageRuns;
-    private _matches;
-    private _active;
-    constructor(_pageCount: () => number, _collectPageRuns: (page: number) => Promise<DocxTextRunInfo[]>);
-    invalidate(): void;
-    pageRuns(page: number): DocxTextRunInfo[] | undefined;
-    setPageRuns(page: number, runs: DocxTextRunInfo[]): void;
-    private _matchAt;
-    pageHighlights(page: number): {
-        slices: TextMatch['slices'];
-        active: boolean;
-    }[];
-    activePage(): number | null;
-    matches(): FindMatch<DocxMatchLocation>[];
-    find(query: string, opts?: FindMatchesOptions): Promise<FindMatch<DocxMatchLocation>[]>;
-    next(): FindMatch<DocxMatchLocation> | null;
-    prev(): FindMatch<DocxMatchLocation> | null;
-    private _activePublic;
-    private _ensurePageRuns;
-}
-
-// --- file: float-layout.d.ts ---
-export interface FloatRect {
-    kind: 'table' | 'shape' | 'frame';
-    mode: 'square' | 'topAndBottom';
-    imageKey: string;
-    imageX: number;
-    imageY: number;
-    imageW: number;
-    imageH: number;
-    xLeft: number;
-    xRight: number;
-    yTop: number;
-    yBottom: number;
-    side: string;
-    distLeft: number;
-    distRight: number;
-    distTop: number;
-    distBottom: number;
-    paraId: number;
-    drawn: boolean;
-}
-export interface Gap {
-    l: number;
-    r: number;
-}
-export declare const FLOAT_OVERLAP_EPS = 0.01;
-export declare const FLOAT_PAGE_RIGHT_SLACK = 0.5;
-export declare const WORD_MIN_LINE_START_PT = 72;
-export declare const LINE_START_GAP_EPS_PT = 0.05;
-export declare function wordMinLineStartPx(scale: number): number;
-export declare const MIN_LINE_GAP = 1;
-export declare function isWrapFloat(mode?: string | null): boolean;
-export declare function floatOverlapsColumnX(f: FloatRect, paraXLeft: number, paraXRight: number): boolean;
-export declare function rectsOverlap(aL: number, aR: number, aT: number, aB: number, bL: number, bR: number, bT: number, bB: number): boolean;
-export declare function widestFreeGap(blocked: Gap[], left: number, right: number): Gap | null;
-export declare function resolveLineFloatWindow(topY: number, requiredWidth: number, probeH: number, paraX: number, maxWidth: number, floats: FloatRect[], columnXLeftPt?: number, columnXRightPt?: number): {
-    topY: number;
-    xOffset: number;
-    maxWidth: number;
-};
-export declare function resolveFloatOverlap(x: number, y: number, w: number, h: number, dl: number, dr: number, dt: number, db: number, paraId: number, allowOverlap: boolean, kind: FloatRect['kind'], pageRight: number, floats: FloatRect[]): {
-    x: number;
-    y: number;
-};
-export declare function skipPastTopAndBottom(y: number, floats: FloatRect[], paraXLeft: number, paraXRight: number): number;
-
-// --- file: index.d.ts ---
-export { DocxDocument, type LoadOptions, type RenderPageToBitmapOptions } from './document';
-export type { WireRenderPageOptions } from './worker-protocol';
-export { DocxViewer, type DocxViewerOptions } from './viewer';
-export { DocxScrollViewer, type DocxScrollViewerOptions } from './scroll-viewer';
-export { buildDocxTextLayer } from './text-layer';
-export { buildDocxHighlightLayer, type DocxHighlightMatch, type DocxHighlightColors, } from './find-highlight-layer';
-export type { DocxMatchLocation } from './find';
-export type { FindMatch, FindMatchesOptions } from '@silurus/ooxml-core';
-export { autoResize, type AutoResizeOptions } from '@silurus/ooxml-core';
-export { type HyperlinkTarget, openExternalHyperlink } from '@silurus/ooxml-core';
-export { OoxmlError, type OoxmlErrorCode } from '@silurus/ooxml-core';
-export { noteText } from './types';
-export type { DocxDocumentModel, DocSettings, EmbeddedFontRef, SectionProps, SectionGeom, PageNumType, PageBorders, PageBorderEdge, LineNumbering, ColumnsSpec, ColSpec, HeadersFooters, HeaderFooter, NumberingInfo, BodyElement, DocParagraph, DocRun, PTabRun, DocxTextRun, FieldRun, ImageRun, ChartRun, AnchorHostMetrics, ShapeRun, TextPath, ShapeText, ShapeTextRun, RubyAnnotation, RenderPageOptions, RunRevision, DocRevision, DocComment, DocNote, NoteRef, LineSpacing, FramePr, TabStop, ParagraphBorders, ParaBorderEdge, DocxRunBorder, DocTable, TblpPr, DocTableRow, DocTableCell, CellElement, TableBorders, CellBorders, BorderSpec, PathCmd, GradientStop, LineEnd, } from './types';
-export type { DocxTextRunInfo } from './renderer';
-
-// --- file: layout-context.d.ts ---
-import { type KinsokuRules } from '@silurus/ooxml-core';
-import { type DocGridCtx } from './line-layout.js';
-import type { BodyElement, ColumnGeom, DocParagraph, DocxDocumentModel, DocxTextRun, LineNumbering, LineSpacing, SectionGeom, SectionProps, TabStop } from './types.js';
-export interface DocumentLayoutSettings {
-    readonly kinsoku: KinsokuRules;
-    readonly defaultTabPt: number;
-    readonly characterSpacingControl?: string;
-    readonly mathDefJc?: string;
-    readonly documentHasEastAsianText: boolean;
-    readonly compat: {
-        readonly adjustLineHeightInTable: boolean;
-        readonly useFeLayout: boolean;
-        readonly balanceSingleByteDoubleByteWidth: boolean;
-    };
-}
-export interface SectionGridContext {
-    readonly kind: 'none' | 'lines' | 'linesAndChars' | 'snapToChars';
-    readonly linePitchPt: number | null;
-    readonly charSpacePt: number | null;
-}
-export interface SectionLayoutContext {
-    readonly geometry: SectionGeom;
-    readonly columns: readonly ColumnGeom[];
-    readonly grid: SectionGridContext;
-    readonly textDirection: string;
-    readonly verticalAlignment: string;
-    readonly lineNumbering?: LineNumbering;
-}
-export type StoryKind = 'body' | 'header' | 'footer' | 'footnote' | 'endnote' | 'textbox';
-export type ContainerFrame = {
-    readonly kind: 'tableCell';
-};
-export interface StoryContext {
-    readonly story: StoryKind;
-    readonly containers: readonly ContainerFrame[];
-    readonly lineNumberingEligible: boolean;
-}
-export declare function enterTableCellStoryContext(parent: StoryContext): StoryContext;
-export interface LineGridPolicy {
-    readonly active: boolean;
-    readonly pitchPt: number | null;
-}
-export interface CharacterGridPolicy {
-    readonly active: boolean;
-    readonly deltaPt: number;
-}
-export interface ParagraphLayoutContext {
-    readonly lineGrid: LineGridPolicy;
-    readonly characterGrid: CharacterGridPolicy;
-    readonly physicalIndentLeftPt: number;
-    readonly physicalIndentRightPt: number;
-    readonly firstIndentPt: number;
-    readonly lineSpacing: LineSpacing | null;
-    readonly spaceBeforePt: number;
-    readonly spaceAfterPt: number;
-    readonly baseRtl: boolean;
-    readonly isJustified: boolean;
-    readonly stretchLastLine: boolean;
-    readonly tabStops: readonly TabStop[];
-    readonly hasRuby: boolean;
-    readonly hasEastAsianText: boolean;
-    readonly kinsoku: KinsokuRules;
-    readonly defaultTabPt: number;
-}
-export interface RunLayoutContext {
-    readonly characterGrid: CharacterGridPolicy;
-}
-export declare function documentHasEastAsianText(body: readonly BodyElement[]): boolean;
-export declare function resolveDocumentLayoutSettings(document: DocxDocumentModel): DocumentLayoutSettings;
-export declare function computeSectionColumns(section: SectionProps): ColumnGeom[];
-export declare function isSectionLineGrid(kind: SectionGridContext['kind']): boolean;
-export declare function isSectionCharacterGrid(kind: SectionGridContext['kind']): boolean;
-export declare function resolveSectionLayoutContext(_settings: DocumentLayoutSettings, section: SectionProps): SectionLayoutContext;
-export declare function toLegacyDocGridContext(section: SectionLayoutContext): DocGridCtx;
-export declare function resolveParagraphLayoutContext(settings: DocumentLayoutSettings, section: SectionLayoutContext, story: StoryContext, paragraph: DocParagraph): ParagraphLayoutContext;
-export declare function resolveRunLayoutContext(paragraph: ParagraphLayoutContext, run: DocxTextRun): RunLayoutContext;
-
-// --- file: layout-fragments.d.ts ---
-import type { DocParagraph, DocTable, DocTableRow, DocTableCell, SectionGeom } from './types';
-import type { MeasuredParagraph } from './paragraph-measure.js';
-import type { SectionLayoutContext } from './layout-context.js';
-export interface ParagraphFragment {
-    readonly kind: 'paragraph';
-    readonly source: DocParagraph;
-    readonly measured: MeasuredParagraph;
-    readonly lineStart: number;
-    readonly lineEnd: number;
-    readonly leadingSpacePt: number;
-    readonly trailingSpacePt: number;
-}
-export interface CellFragment {
-    readonly source: DocTableCell;
-    readonly blocks: readonly FlowFragment[];
-    readonly verticalMerge: 'none' | 'restart' | 'continue';
-    readonly boxHeightPt?: number;
-}
-export interface RowFragment {
-    readonly source: DocTableRow;
-    readonly sourceRowIndex: number;
-    readonly heightPt: number;
-    readonly cells: readonly CellFragment[];
-    readonly repeatedHeader: boolean;
-}
-export interface TableFragment {
-    readonly kind: 'table';
-    readonly source: DocTable;
-    readonly columnWidthsPt: readonly number[];
-    readonly rows: readonly RowFragment[];
-    readonly continuesFromPreviousPage: boolean;
-    readonly continuesOnNextPage: boolean;
-}
-export type FlowFragment = ParagraphFragment | TableFragment;
-export interface PlacedFragment {
-    readonly fragment: FlowFragment;
-    readonly columnIndex: number;
-    readonly xPt: number;
-    readonly yPt: number;
-    readonly widthPt: number;
-    readonly heightPt: number;
-}
-export interface LayoutPage {
-    readonly pageIndex: number;
-    readonly section: SectionLayoutContext;
-    readonly geometry: SectionGeom;
-    readonly fragments: readonly PlacedFragment[];
-}
-export interface DocumentLayout {
-    readonly pages: readonly LayoutPage[];
-}
-export declare function fragmentLineAdvancesPt(fragment: ParagraphFragment): number;
-export declare function paragraphFragmentAdvancePt(fragment: ParagraphFragment): number;
-export declare function tableFragmentHeightPt(fragment: TableFragment): number;
-export declare function cellFragmentContentHeightPt(fragment: CellFragment): number;
-export declare function flowFragmentAdvancePt(fragment: FlowFragment): number;
-
-// --- file: line-layout.d.ts ---
-import type { DocParagraph, DocRun, ShapeTextRun, FieldRun, LineSpacing, TabStop, DocxRunBorder, DocSettings, EmphasisMark } from './types';
-import type { MathNode, KinsokuRules, ChartModel, HyperlinkTarget, NumberFormat, Duotone, ResolvedLocalFontMetric } from '@silurus/ooxml-core';
-import type { RenderState, DecodedImage } from './renderer.js';
-import { classifyCjkFont } from '@silurus/ooxml-core';
-import { type FloatRect } from './float-layout.js';
-export interface LineBoundary {
-    segIndex: number;
-    charOffset: number;
-}
-interface LayoutSegSource {
-    src?: LineBoundary;
-}
-export interface LayoutTextSeg extends LayoutSegSource {
-    text: string;
-    metricOnly?: true;
-    metricEastAsian?: true;
-    bold: boolean;
-    italic: boolean;
-    underline: boolean;
-    underlineStyle?: string;
-    underlineColor?: string;
-    strikethrough: boolean;
-    fontSize: number;
-    color: string | null;
-    fontFamily: string | null;
-    resolvedLineHeightRatio?: number;
-    vertAlign: 'super' | 'sub' | null;
-    measuredWidth: number;
-    smallCaps?: boolean;
-    joinPrev?: boolean;
-    doubleStrikethrough?: boolean;
-    highlight?: string | null;
-    emphasisMark?: EmphasisMark;
-    background?: string | null;
-    colorAuto?: boolean;
-    border?: DocxRunBorder | null;
-    ruby?: {
-        text: string;
-        fontSizePt: number;
-        hpsRaisePt?: number;
-    };
-    revision?: {
-        kind: 'insertion' | 'deletion' | string;
-        author?: string;
-    };
-    rtl?: boolean;
-    digitsAsAN?: boolean;
-    eaFloorFamily?: string | null;
-    resolvedEaFloorLineHeightRatio?: number;
-    hyperlink?: HyperlinkTarget;
-    snapToCharacterGrid?: boolean;
-    charSpacing?: number;
-    charScale?: number;
-    fitTextVal?: number;
-    fitTextId?: number | string;
-    fitTextRegionIndex?: number;
-    fitTextRunIndex?: number;
-    fitTextPerGapPx?: number;
-    fitTextTrailingPadPx?: number;
-    fitTextRegionStart?: boolean;
-    fitTextRegionEnd?: boolean;
-    position?: number;
-    kerning?: number;
-    tateChuYoko?: boolean;
-    tateChuYokoCompress?: boolean;
-    verticalRun?: boolean;
-    seaBreaks?: readonly number[];
-}
-export declare function rubyAscentReservePx(rubySizePt: number, hpsRaisePt: number | undefined, scale: number): number;
-export interface LayoutTabSeg extends LayoutSegSource {
-    isTab: true;
-    fontSize: number;
-    measuredWidth: number;
-    leader?: TabStop['leader'];
-    bold?: boolean;
-    italic?: boolean;
-    ptab?: {
-        alignment: 'left' | 'center' | 'right';
-        relativeTo: 'margin' | 'indent';
-    };
-}
-export interface LayoutImageSeg extends LayoutSegSource {
-    imagePath: string;
-    mimeType: string;
-    widthPt: number;
-    heightPt: number;
-    rotation?: number;
-    flipH?: boolean;
-    flipV?: boolean;
-    anchor: boolean;
-    anchorXPt: number;
-    anchorYPt: number;
-    anchorXFromMargin: boolean;
-    anchorYFromPara: boolean;
-    colorReplaceFrom?: string;
-    duotone?: Duotone;
-    alpha?: number;
-    srcRect?: {
-        l: number;
-        t: number;
-        r: number;
-        b: number;
-    };
-    chart?: ChartModel;
-    measuredWidth: number;
-}
-export interface LayoutMathSeg extends LayoutSegSource {
-    mathNodes: import('@silurus/ooxml-core').MathNode[];
-    display: boolean;
-    fontSize: number;
-    color: string | null;
-    fallbackText: string;
-    measuredWidth: number;
-    mathAscent: number;
-    mathDescent: number;
-    jc?: string;
-}
-export interface LayoutLineBreak extends LayoutSegSource {
-    lineBreak: true;
-    fontSize: number;
-    measuredWidth: 0;
-}
-export type LayoutSeg = LayoutTextSeg | LayoutImageSeg | LayoutMathSeg | LayoutLineBreak | LayoutTabSeg;
-export interface LayoutLine {
-    segments: (LayoutTextSeg | LayoutImageSeg | LayoutMathSeg | LayoutTabSeg)[];
-    height: number;
-    ascent: number;
-    descent: number;
-    visibleAscent?: number;
-    visibleDescent?: number;
-    visibleIntendedSingle?: number;
-    intendedSingle: number;
-    gridCountSingle: number;
-    xOffset: number;
-    availWidth: number;
-    topY?: number;
-    hasRuby?: boolean;
-    eastAsian?: boolean;
-    endsWithBreak?: boolean;
-    consumedEnd?: LineBoundary;
-}
-export interface WrapLayoutCtx {
-    startPageY: number;
-    paraX: number;
-    columnXPt: number;
-    columnWidthPt: number;
-    floats: FloatRect[];
-    paragraphMarkLineStartWidth?: number;
-    lineWindow?: (input: {
-        topYPt: number;
-        minimumStartWidthPt: number;
-        probeHeightPt: number;
-        paragraphXPt: number;
-        maximumWidthPt: number;
-        columnXPt: number;
-        columnWidthPt: number;
-    }) => {
-        topYPt: number;
-        xOffsetPt: number;
-        maximumWidthPt: number;
-    };
-    lineBoxH: (ascentPx: number, descentPx: number, hasRuby?: boolean, intendedSinglePx?: number, eastAsian?: boolean, gridCountSinglePx?: number) => number;
-    pageH: number;
-}
-export interface DocGridCtx {
-    type: string | null | undefined;
-    linePitchPt: number | null | undefined;
-    charSpacePt?: number | null;
-}
-export interface LineLayoutEnvironment {
-    readonly pageIndex: number;
-    readonly totalPages: number;
-    readonly displayPageNumber?: number;
-    readonly pageNumberFormat?: NumberFormat;
-    readonly currentDateMs?: number;
-    readonly noteNumbers?: ReadonlyMap<string, number>;
-    readonly currentNoteNumber?: number;
-    readonly verticalCJK?: boolean;
-    readonly resolvedLocalFonts?: Readonly<Record<string, ResolvedLocalFontMetric>>;
-}
-export interface MathRender {
-    img: CanvasImageSource;
-    widthEm: number;
-    ascentEm: number;
-    descentEm: number;
-}
-export declare const mathRenders: WeakMap<MathNode[], MathRender>;
-export declare const ARABIC_SUBSTITUTE_FONTS: Set<string>;
-export declare const NASKH_SERIF_ARABIC_FONTS: Set<string>;
-export declare function isArabicSubstituteFont(family: string): boolean;
-export declare function quoteAll(names: readonly string[]): string;
-export declare const ARABIC_TAIL_SANS: readonly [
-    'Noto Naskh Arabic',
-    'Noto Sans Arabic'
-];
-export declare function sansTail(cjk: ReturnType<typeof classifyCjkFont>): string;
-export declare function serifTail(cjk: ReturnType<typeof classifyCjkFont>): string;
-export declare const fontFamilyNormalizeCache: WeakMap<Record<string, string>, Map<string, string>>;
-export declare const fontFamilyPitchesByClasses: WeakMap<Record<string, string>, Record<string, string>>;
-export declare function fontClassesWithPitches(classes: Record<string, string> | undefined, pitches: Record<string, string> | undefined): Record<string, string>;
-export declare function normalizeFontFamily(family: string | null, fontFamilyClasses?: Record<string, string>): string;
-export declare function normalizeFontFamilyUncached(family: string | null, fontFamilyClasses: Record<string, string>, fontFamilyPitches?: Record<string, string>): string;
-export declare function buildFont(bold: boolean, italic: boolean, sizePx: number, family: string | null, fontFamilyClasses?: Record<string, string>): string;
-export declare function calcEffectiveFontPx(s: LayoutTextSeg, scale: number): number;
-export declare function segmentIntendedSingleLinePx(segment: LayoutTextSeg, emPx: number, eastAsian?: boolean): number;
-export declare function segmentEastAsiaFloorSingleLinePx(segment: LayoutTextSeg, emPx: number, eastAsian?: boolean): number;
-export declare function getDefaultFontSize(para: DocParagraph): number;
-export declare function getDefaultFontFamily(para: DocParagraph, eastAsian?: boolean): string | null;
-export declare function emptyIntendedSinglePx(para: DocParagraph, scale: number): number;
-export declare const EAST_ASIAN_RE: RegExp;
-export declare function gridCharDeltaPx(grid: DocGridCtx | undefined, scale: number): number;
-export declare function eaGlyphCount(text: string): number;
-export declare function gridSegDeltaPx(text: string, deltaPx: number): number;
-export declare function segmentCharacterGridDeltaPx(seg: LayoutTextSeg, gridDeltaPx: number): number;
-export declare function charSpacingDeltaPx(seg: LayoutTextSeg, scale: number): number;
-export declare function charScaleFactor(seg: LayoutTextSeg): number;
-export declare function segLetterSpacingPx(seg: LayoutTextSeg, gridDeltaPx: number, scale: number): number;
-export declare function segAdvanceWidth(seg: LayoutTextSeg, naturalWidthPx: number, gridDeltaPx: number, scale: number): number;
-export declare function isGridLineRule(ctx: DocGridCtx | undefined): boolean;
-export declare function docGridLineCells(naturalPx: number, pitchPx: number): number;
-export declare function eastAsianGridCountSinglePx(intendedSinglePx: number, emPx: number): number;
-export declare function lineBoxHeight(ls: LineSpacing | null, ascentPx: number, descentPx: number, scale: number, grid?: DocGridCtx, hasRuby?: boolean, intendedSinglePx?: number, eastAsian?: boolean, gridCountSinglePx?: number, untabledEastAsianEmPx?: number): number;
-export declare function emptyLineNaturalPx(fontSizePt: number, scale: number): {
-    asc: number;
-    desc: number;
-};
-export declare function correctedLineMetrics(m: TextMetrics, family: string | null | undefined, fallbackEmPx: number, correctionEmPx: number, eastAsian?: boolean): {
-    ascent: number;
-    descent: number;
-};
-export interface MarkLineMetrics {
-    readonly advancePx: number;
-    readonly ascentPx: number;
-    readonly descentPx: number;
-}
-export declare function paragraphMarkLineMetrics(para: DocParagraph, scale: number, grid: DocGridCtx | undefined, paraHasRuby: boolean, eastAsian?: boolean, ctx?: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, fontFamilyClasses?: Record<string, string>, effectiveLineSpacing?: LineSpacing | null, resolvedLocalFonts?: Readonly<Record<string, ResolvedLocalFontMetric>>): MarkLineMetrics;
-export declare function paragraphMarkLineHeight(para: DocParagraph, scale: number, grid: DocGridCtx | undefined, paraHasRuby: boolean, eastAsian?: boolean, ctx?: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, fontFamilyClasses?: Record<string, string>, effectiveLineSpacing?: LineSpacing | null, resolvedLocalFonts?: Readonly<Record<string, ResolvedLocalFontMetric>>): number;
-export declare function lineBelowBaselinePx(advancePx: number, ascentPx: number, descentPx: number): number;
-export declare function paragraphMarkBelowBaselinePt(para: DocParagraph, grid: DocGridCtx | undefined, paraHasRuby: boolean, eastAsian: boolean, ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | undefined, fontFamilyClasses: Record<string, string>, effectiveLineSpacing: LineSpacing | null, resolvedLocalFonts?: Readonly<Record<string, ResolvedLocalFontMetric>>): number;
-export declare function splitSmallCapsCase(text: string): {
-    text: string;
-    reduced: boolean;
-}[];
-export declare function findNearbyFontSize(runs: DocRun[], idx: number): number;
-export declare function resolveFieldText(f: FieldRun, environment: LineLayoutEnvironment): string;
-export declare function mathPlainText(nodes: MathNode[]): string;
-export declare function hasCJKBreakOpportunity(text: string): boolean;
-export declare function fitCJKPrefix(ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, text: string, maxWidth: number, gridDeltaPx?: number, charScale?: number, charSpacingPx?: number, verticalRun?: boolean): string;
-export declare const RTL_PRIMARY_SUBTAGS: Set<string>;
-export declare function isRtlBidiLang(langBidi: string | undefined, runIsRtl: boolean): boolean;
-export declare function splitByComplexScript(text: string): {
-    text: string;
-    cs: boolean;
-}[];
-export declare function splitByEastAsia(text: string): {
-    text: string;
-    ea: boolean;
-}[];
-export declare function splitDigitGroups(text: string): string[];
-export declare function splitTextForLayout(text: string): string[];
-export declare const DEFAULT_TAB_PT = 36;
-export declare const SPACE_SHRINK_RATIO = 0.25;
-export declare function resolveDefaultTabPt(settings: DocSettings | undefined): number;
-export declare function nextTabStop(curMarginPx: number, customStopsPx: {
-    pos: number;
-    alignment: TabStop['alignment'];
-    leader?: TabStop['leader'];
-}[], intervalPx: number): {
-    pos: number;
-    alignment: TabStop['alignment'];
-    leader?: TabStop['leader'];
-} | null;
-export declare function nextTabStopRtl(curMarginPx: number, customStopsPx: {
-    pos: number;
-    alignment: TabStop['alignment'];
-    leader?: TabStop['leader'];
-}[], intervalPx: number): {
-    pos: number;
-    alignment: TabStop['alignment'];
-    leader?: TabStop['leader'];
-} | null;
-export interface BidiTabItem {
-    isTab: boolean;
+export declare interface DocxRunBorder {
+    style: string;
+    color?: string | null;
     width: number;
-}
-export interface BidiTabResult {
-    width: number;
-    leader?: TabStop['leader'];
-}
-export declare function layoutBidiTabStops(items: BidiTabItem[], customStopsPx: {
-    pos: number;
-    alignment: TabStop['alignment'];
-    leader?: TabStop['leader'];
-}[], startPenPx: number, leftLimitPx: number, intervalPx: number): BidiTabResult[];
-export declare function kinsokuRulesEquivalent(a: KinsokuRules, b: KinsokuRules): boolean;
-export declare function paragraphSegsStateSensitive(para: DocParagraph): boolean;
-export declare function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment): LayoutSeg[];
-export declare function layoutLines(ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, segs: LayoutSeg[], maxWidth: number, firstIndent: number, scale: number, tabStops?: TabStop[], wrapCtx?: WrapLayoutCtx, fontFamilyClasses?: Record<string, string>, tabOriginPx?: number, kinsoku?: KinsokuRules, gridDeltaPx?: number, defaultTabPt?: number, marginRightPx?: number, baseRtl?: boolean, isJustified?: boolean, stretchLastLine?: boolean, startBoundary?: LineBoundary): LayoutLine[];
-export declare function rescaleLayoutLines(lines: LayoutLine[], scale: number, ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, fontFamilyClasses: Record<string, string>, gridDeltaPx: number, canonicalGeometry?: boolean): LayoutLine[];
-export declare function shapeRunToDocRun(run: ShapeTextRun): DocRun;
-export declare function shapeRenderState(ctx: CanvasRenderingContext2D, scale: number, fontFamilyClasses: Record<string, string>, images: Map<string, DecodedImage>): RenderState;
-export {};
-
-// --- file: paragraph-measure.d.ts ---
-import type { ParagraphLayoutContext } from './layout-context.js';
-import { type FloatRect } from './float-layout.js';
-import { type LineBoundary, type LayoutLine, type LineLayoutEnvironment } from './line-layout.js';
-import type { DocParagraph } from './types.js';
-export type { LineLayoutEnvironment } from './line-layout.js';
-export interface ParagraphMeasurementEnvironment extends LineLayoutEnvironment {
-    readonly documentHasEastAsianText: boolean;
-}
-export interface WrapOracle {
-    lineWindow(input: {
-        readonly topYPt: number;
-        readonly minimumStartWidthPt: number;
-        readonly probeHeightPt: number;
-        readonly paragraphXPt: number;
-        readonly maximumWidthPt: number;
-        readonly columnXPt: number;
-        readonly columnWidthPt: number;
-    }): {
-        readonly topYPt: number;
-        readonly xOffsetPt: number;
-        readonly maximumWidthPt: number;
-    };
-    skipTopAndBottomBands(input: {
-        readonly yPt: number;
-        readonly columnXPt: number;
-        readonly columnWidthPt: number;
-    }): number;
-}
-export declare function createFloatWrapOracle(floats: readonly FloatRect[]): WrapOracle;
-export interface TextMeasurer {
-    readonly context: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
-    readonly fontFamilyClasses: Readonly<Record<string, string>>;
-}
-export interface ParagraphPlacement {
-    readonly startYPt: number;
-    readonly paragraphXPt: number;
-    readonly availableWidthPt: number;
-    readonly maximumYPt: number;
-    readonly suppressSpaceBefore: boolean;
-    readonly wrap?: WrapOracle;
-}
-export interface MeasuredLine {
-    readonly layout: LayoutLine;
-    readonly topYPt: number;
-    readonly advancePt: number;
-}
-export interface MeasuredParagraph {
-    readonly lines: readonly MeasuredLine[];
-    readonly markOnly: boolean;
-    readonly requestedSpaceBeforePt: number;
-    readonly requestedSpaceAfterPt: number;
-    readonly uniformRubyAdvancePt: number;
-    readonly contentStartYPt: number;
-    readonly contentEndYPt: number;
-    readonly lastLineBelowBaselinePt: number;
-    readonly placement: Readonly<ParagraphPlacement>;
-}
-export declare function measureParagraph(paragraph: DocParagraph, context: ParagraphLayoutContext, placement: ParagraphPlacement, measurer: TextMeasurer, environment: ParagraphMeasurementEnvironment, continuation?: {
-    readonly boundary: LineBoundary;
-    readonly uniformRubyAdvancePt?: number;
-}): MeasuredParagraph;
-
-// --- file: renderer.d.ts ---
-import type { DocxDocumentModel, BodyElement, PaginatedBodyElement, DocParagraph, DocTable, DocTableRow, CellElement, ImageRun, ShapeRun, TextPath, ParagraphBorders, ParaBorderEdge, SectionProps, SectionGeom, PageNumType, DocNote, ColumnGeom, TblpPr, DocSettings } from './types';
-import type { MathRenderer, KinsokuRules, HyperlinkTarget, NumberFormat, Duotone, ResolvedLocalFontMetric } from '@silurus/ooxml-core';
-import { type FloatRect } from './float-layout.js';
-import { computeSectionColumns as computeColumns, type DocumentLayoutSettings, type ParagraphLayoutContext, type SectionLayoutContext, type StoryContext } from './layout-context.js';
-export { computeColumns };
-import type { DocGridCtx, LayoutImageSeg, LayoutLine } from './line-layout.js';
-import { type DocumentLayout, type PlacedFragment, type TableFragment } from './layout-fragments.js';
-export declare function documentHasMath(body: BodyElement[]): boolean;
-export declare function prepareMathRuns(body: BodyElement[], math: MathRenderer): Promise<void>;
-export interface RenderState {
-    ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
-    scale: number;
-    dpr: number;
-    contentX: number;
-    contentW: number;
-    y: number;
-    pageH: number;
-    defaultColor: string;
-    pageIndex: number;
-    totalPages: number;
-    displayPageNumber?: number;
-    pageNumberFormat?: NumberFormat;
-    images: Map<string, DecodedImage>;
-    dryRun: boolean;
-    marginLeft: number;
-    marginRight: number;
-    marginTop: number;
-    marginBottom: number;
-    pageWidth: number;
-    floats: FloatRect[];
-    floatParaSeq: number;
-    docGrid: DocGridCtx;
-    layoutSettings: DocumentLayoutSettings;
-    sectionLayout: SectionLayoutContext;
-    storyContext: StoryContext;
-    docEastAsian: boolean;
-    fontFamilyClasses: Record<string, string>;
-    resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>>;
-    kinsoku: KinsokuRules;
-    defaultTabPt: number;
-    characterSpacingControl?: string;
-    useFeLayout?: boolean;
-    balanceSingleByteDoubleByteWidth?: boolean;
-    mathDefJc?: string;
-    onTextRun?: (run: DocxTextRunInfo) => void;
-    showTrackChanges: boolean;
-    currentDateMs?: number;
-    noteNumbers?: Map<string, number>;
-    currentNoteNumber?: number;
-    pageAnchorPrescanned?: Set<DocParagraph>;
-    deferFront?: Array<() => void> | null;
-    lineNumbering?: {
-        countBy: number;
-        start: number;
-        distancePt: number;
-        fontSizePt: number;
-    };
-    lineNumberCounter?: number;
-    verticalCJK?: boolean;
-    verticalAllRotated?: boolean;
-    verticalPhys?: {
-        pageWidth: number;
-        pageHeight: number;
-        marginLeft: number;
-        marginRight: number;
-        marginTop: number;
-        marginBottom: number;
-        cssWidthPx: number;
-    };
-    containerShading?: string | null;
-}
-export declare function resolveBodyParagraphLayoutContext(state: Pick<RenderState, 'layoutSettings' | 'sectionLayout'>, paragraph: DocParagraph): ParagraphLayoutContext;
-export interface DocxTextRunInfo {
-    text: string;
-    x: number;
-    y: number;
-    w: number;
-    h: number;
-    fontSize: number;
-    font: string;
-    letterSpacingPx?: number;
-    transform?: string;
-    hyperlink?: HyperlinkTarget;
-    eastAsianVert?: boolean;
-}
-export interface RenderDocumentOptions {
-    width?: number;
-    dpr?: number;
-    defaultTextColor?: string;
-    totalPages?: number;
-    prebuiltPages?: PaginatedBodyElement[][];
-    fetchImage?: (path: string, mimeType: string) => Promise<Blob>;
-    onTextRun?: (run: DocxTextRunInfo) => void;
-    showTrackChanges?: boolean;
-    currentDate?: Date | number;
-}
-export type DecodedImage = ImageBitmap | HTMLImageElement;
-type DocxFetchImage = (path: string, mime: string) => Promise<Blob>;
-export declare function dropColorReplacedCache(fetchImage: DocxFetchImage): void;
-export declare function decodeRaster(imagePath: string, mimeType: string, colorReplaceFrom: string | undefined, fetchImage: (path: string, mime: string) => Promise<Blob>, widthPt?: number, heightPt?: number, duotone?: Duotone): Promise<ImageBitmap | null>;
-export declare function preloadImages(doc: DocxDocumentModel, fetchImage: ((path: string, mime: string) => Promise<Blob>) | undefined): Promise<Map<string, DecodedImage>>;
-export declare function setResolvedLocalFonts(doc: DocxDocumentModel, metrics: Readonly<Record<string, ResolvedLocalFontMetric>>): void;
-export declare function clearResolvedLocalFonts(doc: DocxDocumentModel): void;
-export declare function physicalPageSizeForPage(pages: PaginatedBodyElement[][], pageIndex: number, section: SectionProps): {
-    widthPt: number;
-    heightPt: number;
-};
-export declare function renderDocumentToCanvas(doc: DocxDocumentModel, canvas: HTMLCanvasElement | OffscreenCanvas, pageIndex: number, opts?: RenderDocumentOptions): Promise<void>;
-export type { ColumnGeom } from './types';
-interface PageReserve {
-    top: number;
-    bottom: number;
-}
-export declare function computePages(body: BodyElement[], section: SectionProps, ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, fontFamilyClasses?: Record<string, string>, kinsoku?: KinsokuRules, footnotes?: DocNote[], pageReserves?: PageReserve[], defaultTabPt?: number, settings?: DocSettings, resolvedLayoutSettings?: DocumentLayoutSettings, resolvedLocalFonts?: Readonly<Record<string, ResolvedLocalFontMetric>>): PaginatedBodyElement[][];
-export declare function paginateDocument(doc: DocxDocumentModel): PaginatedBodyElement[][];
-export declare function layoutDocument(doc: DocxDocumentModel): DocumentLayout;
-export declare function bodyFragmentFor(el: PaginatedBodyElement): PlacedFragment | undefined;
-export declare const __test_setBodyFragment: (el: PaginatedBodyElement, placed: PlacedFragment) => void;
-export declare function resolveColumnWidths(table: DocTable, contentWPt: number, state: RenderState): number[];
-export declare function splitTableAcrossPages(table: DocTable, rowHs: number[], startY: number, contentH: number, pages: PaginatedBodyElement[][], newPage: (filledColBottom: number) => void, tagColIndex?: () => number, colGeom?: ColumnGeom[], columnTop?: () => number, marginTopPt?: number, tagSectionHF?: () => PaginatedBodyElement['sectionHF'], tagSectionGeom?: () => SectionGeom, tagSectionPageNumType?: () => PageNumType | null, tableStamp?: {
-    colWidthsPt: number[];
-    contentWPt: number;
-    rowHeightsAreContent?: boolean;
-}, rowSplit?: {
-    colWidthsPt: number[];
-    state: RenderState;
-}, sourceRowIndexByRow?: number[], emitTableFragment?: (sliceEl: PaginatedBodyElement, meta: {
-    heightsPt: number[];
-    continuesFromPreviousPage: boolean;
-    continuesOnNextPage: boolean;
-    repeatedHeaderRowCount: number;
-    sourceRowIndexOf: (fragmentRowIndex: number) => number;
-}) => void, tagSectionTextDirection?: () => string | null): number;
-export declare function splitFloatTableAcrossPages(table: DocTable, tp: TblpPr, colWidthsPt: number[], rowContentHs: number[], slice1TopOffset: number, contentWPt: number, curY: () => number, regionTopY: () => number, contentH: () => number, advancePage: () => void, emitSlice?: (sliceEl: PaginatedBodyElement) => void): number;
-export declare function shapeParagraphGapBefore(blocks: ReadonlyArray<{
-    contextualSpacing?: boolean;
-    styleId?: string | null;
-}>, i: number, spBefore: readonly number[], spAfter: readonly number[]): number;
-export declare function sumCellContentHeight(content: CellElement[], perElementHeight: (el: CellElement) => number, spaceScale: number): number;
-export declare function renderBodyParagraphLines(source: DocParagraph, state: RenderState, scale1Lines: readonly LayoutLine[], suppressSpaceBefore: boolean, lineSlice: {
-    start: number;
-    end: number;
-    continues?: boolean;
-} | undefined, borderMerge: ParaBorderMerge | undefined): void;
-export declare function drawWatermarkTextPath(ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, textPath: TextPath, x: number, y: number, w: number, h: number, rotationDeg: number, color: string | null, opacity: number, fontFamilyClasses?: Record<string, string>): void;
-export declare function measureShapeTextAutoFitHeight(shape: ShapeRun, w: number, ctx: CanvasRenderingContext2D, scale: number, fontFamilyClasses?: Record<string, string>, images?: Map<string, DecodedImage>, state?: RenderState): number;
-export declare function resolveShapeAutofitBox(shape: ShapeRun, box: {
-    x: number;
-    y: number;
-    w: number;
-    h: number;
-}, ctx: CanvasRenderingContext2D, scale: number, fontFamilyClasses?: Record<string, string>, images?: Map<string, DecodedImage>, state?: RenderState): {
-    x: number;
-    y: number;
-    w: number;
-    h: number;
-};
-export declare function renderShapeText(shape: ShapeRun, x: number, y: number, w: number, h: number, ctx: CanvasRenderingContext2D, scale: number, fontFamilyClasses?: Record<string, string>, images?: Map<string, DecodedImage>, state?: RenderState): void;
-export declare const __test_resolveAnchorBox: (img: ImageRun, state: RenderState, paraBaseY: number) => {
-    x: number;
-    y: number;
-    w: number;
-    h: number;
-    dl: number;
-    dr: number;
-    dt: number;
-    db: number;
-};
-export declare const __test_resolveShapeBox: (shape: ShapeRun, state: RenderState, paragraphTopPx: number) => {
-    x: number;
-    y: number;
-    w: number;
-    h: number;
-};
-export declare const __test_physicalLayoutSection: (logical: SectionProps) => SectionProps;
-export declare const __test_verticalLayoutSection: (phys: SectionProps) => SectionProps;
-export declare const __test_preRegisterPageFloats: (body: readonly (BodyElement | PaginatedBodyElement)[], startIdx: number, state: RenderState) => void;
-export declare const __test_isPageLevelAnchorY: (rf: string | null | undefined, fromPara: boolean) => boolean;
-export declare const __test_setLineReuseEnabled: (v: boolean) => boolean;
-export declare const __test_setFragmentPaintEnabled: (v: boolean) => boolean;
-export declare const __test_tableRequiresLegacyPaint: (table: DocTable) => boolean;
-export declare const __test_setFitMeasureReuseEnabled: (v: boolean) => boolean;
-export declare const __test_setTableReuseEnabled: (v: boolean) => boolean;
-export declare const __test_computeTableLayout: (table: DocTable, contentWPx: number, state: RenderState) => {
-    colWidths: number[];
-    tableW: number;
-    rowHeights: number[];
-};
-export declare const __test_renderInlineImage: (ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, seg: LayoutImageSeg, x: number, baseline: number, scale: number, images: Map<string, DecodedImage>, vertical?: boolean) => void;
-export declare function calculateRowHeight(row: DocTableRow, table: DocTable, colWidths: number[], scale: number, state: RenderState): number;
-export declare function renderTableFragment(fragment: TableFragment, state: RenderState): void;
-export declare function borderDashPattern(style: string, lw: number): number[];
-export interface ParaBorderMerge {
-    suppressTop?: boolean;
-    suppressBottom?: boolean;
-}
-export declare function paintedParagraphHeight<L extends {
-    topY?: number;
-}>(lines: readonly L[], sliceStart: number, paintEnd: number, textAreaTopY: number, lineHForLine: (line: L) => number): number;
-export declare function paraShadingRect(x: number, y: number, w: number, h: number, borders: ParagraphBorders | null | undefined, merge: ParaBorderMerge | undefined, scale: number): {
-    x: number;
-    y: number;
-    w: number;
-    h: number;
-};
-export interface ParaBorderSegment {
-    side: 'top' | 'bottom' | 'left' | 'right';
-    edge: ParaBorderEdge;
-    x1: number;
-    y1: number;
-    x2: number;
-    y2: number;
-}
-export declare function paragraphBorderContentBox(contentX: number, contentW: number, physicalIndentLeft: number, physicalIndentRight: number, firstIndent: number, baseRtl: boolean, markerBounds?: {
-    left: number;
-    right: number;
-}): {
-    x: number;
-    w: number;
-};
-export declare function paraBorderSegments(x: number, y: number, w: number, h: number, borders: ParagraphBorders, merge?: ParaBorderMerge, scale?: number): ParaBorderSegment[];
-
-// --- file: scroll-viewer.d.ts ---
-import type { HyperlinkTarget, ZoomableViewer } from '@silurus/ooxml-core';
-import { DocxDocument } from './document';
-import type { LoadOptions } from './document';
-import type { RenderPageOptions } from './types';
-export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onTextRun'>, LoadOptions {
-    width?: number;
-    gap?: number;
-    paddingTop?: number;
-    paddingBottom?: number;
-    paddingLeft?: number;
-    paddingRight?: number;
-    overscan?: number;
-    enableTextSelection?: boolean;
-    zoomMin?: number;
-    zoomMax?: number;
-    enableZoom?: boolean;
-    background?: string;
-    pageShadow?: string | false;
-    document?: DocxDocument;
-    onVisiblePageChange?: (topIndex: number, total: number) => void;
-    onScaleChange?: (scale: number) => void;
-    onHyperlinkClick?: (target: HyperlinkTarget) => void;
-    enableHyperlinks?: boolean;
-    onError?: (err: Error) => void;
+    space: number;
 }
 export declare class DocxScrollViewer implements ZoomableViewer {
     private _doc;
@@ -988,514 +580,30 @@ export declare class DocxScrollViewer implements ZoomableViewer {
     }): void;
     private _onResize;
     get topVisiblePage(): number;
-    mountedPageIndicesForTest(): number[];
-    scaleForTest(): number;
-    baseScaleForTest(): number;
-    renderEpochForTest(): number;
-    resizeForTest(): void;
-    contentAtViewportYForTest(y: number): {
-        page: number;
-        frac: number;
-    };
-    viewportYOfForTest(page: number, frac: number): number;
     destroy(): void;
 }
-
-// --- file: text-layer.d.ts ---
-import type { DocxTextRunInfo } from './renderer';
-import { type HyperlinkTarget } from '@silurus/ooxml-core';
-export declare function buildDocxTextLayer(layer: HTMLDivElement, runs: DocxTextRunInfo[], cssWidth: number, cssHeight: number, onHyperlinkClick?: (target: HyperlinkTarget) => void, measureForFont?: (font: string) => (s: string) => number): void;
-
-// --- file: types.d.ts ---
-import type { MathNode, ChartModel, Duotone } from '@silurus/ooxml-core';
-export interface DocxDocumentModel {
-    section: SectionProps;
-    body: BodyElement[];
-    headers: HeadersFooters;
-    footers: HeadersFooters;
-    majorFont?: string;
-    minorFont?: string;
-    fontFamilyClasses?: Record<string, string>;
-    fontFamilyPitches?: Record<string, string>;
-    embeddedFonts?: EmbeddedFontRef[];
-    revisions?: DocRevision[];
-    comments?: DocComment[];
-    footnotes?: DocNote[];
-    endnotes?: DocNote[];
-    settings?: DocSettings;
-    parseError?: string;
+export declare interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onTextRun'>, LoadOptions {
+    width?: number;
+    gap?: number;
+    paddingTop?: number;
+    paddingBottom?: number;
+    paddingLeft?: number;
+    paddingRight?: number;
+    overscan?: number;
+    enableTextSelection?: boolean;
+    zoomMin?: number;
+    zoomMax?: number;
+    enableZoom?: boolean;
+    background?: string;
+    pageShadow?: string | false;
+    document?: DocxDocument;
+    onVisiblePageChange?: (topIndex: number, total: number) => void;
+    onScaleChange?: (scale: number) => void;
+    onHyperlinkClick?: (target: HyperlinkTarget) => void;
+    enableHyperlinks?: boolean;
+    onError?: (err: Error) => void;
 }
-export interface EmbeddedFontRef {
-    fontName: string;
-    style: 'regular' | 'bold' | 'italic' | 'boldItalic';
-    partPath: string;
-    fontKey: string;
-}
-export interface DocSettings {
-    kinsoku?: boolean;
-    noLineBreaksBefore?: string;
-    noLineBreaksAfter?: string;
-    mathDefJc?: string;
-    defaultTabStop?: number;
-    characterSpacingControl?: string;
-    useFeLayout?: boolean;
-    balanceSingleByteDoubleByteWidth?: boolean;
-    adjustLineHeightInTable?: boolean;
-}
-export interface DocRevision {
-    kind: 'insertion' | 'deletion' | string;
-    author?: string;
-    date?: string;
-    text: string;
-}
-export interface DocComment {
-    id: string;
-    author?: string;
-    initials?: string;
-    date?: string;
-    text: string;
-}
-export interface DocNote {
-    id: string;
-    content: BodyElement[];
-}
-export declare function noteText(note: DocNote): string;
-export interface HeadersFooters {
-    default: HeaderFooter | null;
-    first: HeaderFooter | null;
-    even: HeaderFooter | null;
-}
-export interface HeaderFooter {
-    body: BodyElement[];
-}
-export interface PageNumType {
-    start?: number;
-    fmt?: string;
-}
-export interface PageBorders {
-    offsetFrom: string;
-    display: string;
-    zOrder: string;
-    top?: PageBorderEdge;
-    bottom?: PageBorderEdge;
-    left?: PageBorderEdge;
-    right?: PageBorderEdge;
-}
-export interface PageBorderEdge {
-    style: string;
-    color?: string;
-    width: number;
-    space: number;
-}
-export interface LineNumbering {
-    countBy: number;
-    start: number;
-    distance?: number;
-    restart: string;
-}
-export interface SectionGeom {
-    pageWidth: number;
-    pageHeight: number;
-    marginTop: number;
-    marginRight: number;
-    marginBottom: number;
-    marginLeft: number;
-    headerDistance: number;
-    footerDistance: number;
-}
-export interface SectionProps {
-    pageWidth: number;
-    pageHeight: number;
-    marginTop: number;
-    marginRight: number;
-    marginBottom: number;
-    marginLeft: number;
-    headerDistance: number;
-    footerDistance: number;
-    titlePage: boolean;
-    evenAndOddHeaders: boolean;
-    sectionStart?: string | null;
-    textDirection?: string | null;
-    docGridType?: string | null;
-    docGridLinePitch?: number | null;
-    docGridCharSpace?: number | null;
-    columns?: ColumnsSpec | null;
-    pageNumType?: PageNumType | null;
-    pageBorders?: PageBorders | null;
-    lineNumbering?: LineNumbering | null;
-    vAlign?: string | null;
-}
-export interface ColumnsSpec {
-    count: number;
-    spacePt: number;
-    equalWidth: boolean;
-    sep: boolean;
-    cols: ColSpec[];
-}
-export interface ColSpec {
-    widthPt: number;
-    spacePt: number;
-}
-export interface ColumnGeom {
-    xPt: number;
-    wPt: number;
-}
-export type BodyElement = ({
-    type: 'paragraph';
-} & DocParagraph) | ({
-    type: 'table';
-} & DocTable) | {
-    type: 'pageBreak';
-    parity?: 'odd' | 'even';
-} | {
-    type: 'columnBreak';
-} | {
-    type: 'sectionBreak';
-    kind: 'continuous' | 'nextPage' | 'oddPage' | 'evenPage' | string;
-    columns?: ColumnsSpec | null;
-    headers?: HeadersFooters;
-    footers?: HeadersFooters;
-    titlePage?: boolean;
-    geom?: SectionGeom;
-    pageNumType?: PageNumType | null;
-    textDirection?: string | null;
-};
-export type PaginatedBodyElement = BodyElement & {
-    lineSlice?: {
-        start: number;
-        end: number;
-        continues?: boolean;
-    };
-    sectionBreakSpacer?: boolean;
-    collapsedSpacer?: boolean;
-    leadsCollapsedRun?: boolean;
-    hiddenCollapsed?: boolean;
-    colIndex?: number;
-    colGeom?: ColumnGeom[];
-    colTopPt?: number;
-    sectionHF?: {
-        headers: HeadersFooters;
-        footers: HeadersFooters;
-        titlePage: boolean;
-    };
-    sectionGeom?: SectionGeom;
-    sectionPageNumType?: PageNumType | null;
-    sectionTextDirection?: string | null;
-    tableColWidthsPt?: number[];
-    tableRowHeightsPt?: number[];
-    tableLayoutInputs?: {
-        scale: number;
-        contentWPt: number;
-    };
-};
-export interface DocParagraph {
-    alignment: 'left' | 'start' | 'center' | 'right' | 'end' | 'justify' | 'both' | 'distribute' | 'lowKashida' | 'mediumKashida' | 'highKashida' | 'thaiDistribute' | string;
-    indentLeft: number;
-    indentRight: number;
-    indentFirst: number;
-    spaceBefore: number;
-    spaceAfter: number;
-    lineSpacing: LineSpacing | null;
-    numbering: NumberingInfo | null;
-    tabStops: TabStop[];
-    runs: DocRun[];
-    bookmarks?: string[];
-    shading?: string | null;
-    pageBreakBefore?: boolean;
-    contextualSpacing?: boolean;
-    keepNext?: boolean;
-    keepLines?: boolean;
-    markVanish?: boolean;
-    widowControl?: boolean;
-    borders?: ParagraphBorders | null;
-    styleId?: string | null;
-    defaultFontSize?: number;
-    defaultFontFamily?: string | null;
-    defaultFontFamilyEastAsia?: string | null;
-    paragraphMarkColor?: string | null;
-    bidi?: boolean;
-    snapToGrid?: boolean;
-    framePr?: FramePr;
-}
-export interface FramePr {
-    dropCap: 'none' | 'drop' | 'margin' | string;
-    lines: number;
-    wrap: 'around' | 'auto' | 'none' | 'notBeside' | 'through' | 'tight' | string;
-    hAnchor: 'text' | 'margin' | 'page' | string;
-    vAnchor: 'text' | 'margin' | 'page' | string;
-    hRule: 'auto' | 'atLeast' | 'exact' | string;
-    hSpace: number;
-    vSpace: number;
-    w?: number;
-    h?: number;
-    x?: number;
-    y?: number;
-    xAlign?: 'left' | 'center' | 'right' | 'inside' | 'outside' | string;
-    yAlign?: 'inline' | 'top' | 'center' | 'bottom' | 'inside' | 'outside' | string;
-}
-export interface ParagraphBorders {
-    top: ParaBorderEdge | null;
-    bottom: ParaBorderEdge | null;
-    left: ParaBorderEdge | null;
-    right: ParaBorderEdge | null;
-    between: ParaBorderEdge | null;
-}
-export interface ParaBorderEdge {
-    style: string;
-    color: string | null;
-    width: number;
-    space: number;
-}
-export interface DocxRunBorder {
-    style: string;
-    color?: string | null;
-    width: number;
-    space: number;
-}
-export interface TabStop {
-    pos: number;
-    alignment: 'left' | 'center' | 'right' | 'decimal' | 'bar' | 'clear';
-    leader: 'none' | 'dot' | 'hyphen' | 'underscore' | 'heavy' | 'middleDot';
-}
-export interface LineSpacing {
-    value: number;
-    rule: 'auto' | 'exact' | 'atLeast';
-    explicit?: boolean;
-}
-export interface NumberingInfo {
-    numId: number;
-    level: number;
-    format: string;
-    text: string;
-    indentLeft: number;
-    tab: number;
-    suff: string;
-    jc?: string;
-    fontFamily?: string | null;
-    fontFamilyEastAsia?: string | null;
-    color?: string | null;
-    colorAuto?: boolean;
-    picBulletImagePath?: string;
-    picBulletMimeType?: string;
-    picBulletWidthPt?: number;
-    picBulletHeightPt?: number;
-}
-export type DocRun = ({
-    type: 'text';
-} & DocxTextRun) | ({
-    type: 'anchorHost';
-} & AnchorHostMetrics) | ({
-    type: 'image';
-} & ImageRun) | ({
-    type: 'chart';
-} & ChartRun) | {
-    type: 'break';
-    breakType: 'line' | 'page' | 'column';
-} | ({
-    type: 'field';
-} & FieldRun) | ({
-    type: 'shape';
-} & ShapeRun) | {
-    type: 'math';
-    nodes: MathNode[];
-    display: boolean;
-    fontSize: number;
-    jc?: string;
-} | ({
-    type: 'ptab';
-} & PTabRun);
-export interface ChartRun {
-    chart: ChartModel;
-    widthPt: number;
-    heightPt: number;
-    anchor: boolean;
-    anchorXPt?: number;
-    anchorYPt?: number;
-    anchorXFromMargin?: boolean;
-    anchorYFromPara?: boolean;
-    wrapMode?: string;
-    distTop?: number;
-    distBottom?: number;
-    distLeft?: number;
-    distRight?: number;
-    wrapSide?: string;
-    allowOverlap?: boolean;
-    anchorXAlign?: string | null;
-    anchorYAlign?: string | null;
-    anchorXRelativeFrom?: string | null;
-    anchorYRelativeFrom?: string | null;
-}
-export interface PTabRun {
-    alignment: 'left' | 'center' | 'right';
-    relativeTo: 'margin' | 'indent';
-    leader: 'none' | 'dot' | 'hyphen' | 'underscore' | 'middleDot';
-    fontSize: number;
-}
-export type PathCmd = {
-    cmd: 'moveTo';
-    x: number;
-    y: number;
-} | {
-    cmd: 'lineTo';
-    x: number;
-    y: number;
-} | {
-    cmd: 'cubicBezTo';
-    x1: number;
-    y1: number;
-    x2: number;
-    y2: number;
-    x: number;
-    y: number;
-} | {
-    cmd: 'arcTo';
-    wr: number;
-    hr: number;
-    stAng: number;
-    swAng: number;
-} | {
-    cmd: 'close';
-};
-export interface AnchorHostMetrics {
-    fontSize: number;
-    fontFamily?: string | null;
-    fontFamilyEastAsia?: string | null;
-    bold?: boolean;
-    italic?: boolean;
-}
-export interface ShapeRun {
-    widthPt: number;
-    heightPt: number;
-    anchorXPt: number;
-    anchorYPt: number;
-    anchorXFromMargin: boolean;
-    anchorYFromPara: boolean;
-    anchorXAlign?: string | null;
-    anchorYAlign?: string | null;
-    pctPosH?: number | null;
-    pctPosV?: number | null;
-    anchorXRelativeFrom?: string | null;
-    anchorYRelativeFrom?: string | null;
-    widthPct?: number | null;
-    heightPct?: number | null;
-    widthRelativeFrom?: string | null;
-    heightRelativeFrom?: string | null;
-    groupWidthPt?: number | null;
-    groupHeightPt?: number | null;
-    behindDoc?: boolean;
-    zOrder: number;
-    subpaths: PathCmd[][];
-    presetGeometry?: string | null;
-    adjValues?: Array<number | null>;
-    fill: ShapeFill | null;
-    stroke: string | null;
-    strokeWidth?: number;
-    strokeDash?: string | null;
-    strokeCap?: CanvasLineCap | null;
-    headEnd?: LineEnd | null;
-    tailEnd?: LineEnd | null;
-    rotation?: number;
-    flipH?: boolean;
-    flipV?: boolean;
-    wrapMode?: string | null;
-    distTop?: number;
-    distBottom?: number;
-    distLeft?: number;
-    distRight?: number;
-    wrapSide?: string | null;
-    textBlocks?: ShapeText[];
-    defaultTextColor?: string | null;
-    textAnchor?: string | null;
-    textAutofit?: string | null;
-    textInsetL?: number;
-    textInsetT?: number;
-    textInsetR?: number;
-    textInsetB?: number;
-    textVert?: string | null;
-    textPath?: TextPath | null;
-    fillOpacity?: number | null;
-}
-export interface TextPath {
-    string: string;
-    fontFamily?: string | null;
-    bold?: boolean;
-    italic?: boolean;
-}
-export interface LineEnd {
-    type: string;
-    w: string;
-    len: string;
-}
-export interface ShapeTextRun {
-    text: string;
-    fontSizePt: number;
-    color?: string | null;
-    fontFamily?: string | null;
-    fontFamilyEastAsia?: string | null;
-    bold?: boolean;
-    italic?: boolean;
-    ruby?: RubyAnnotation | null;
-}
-export interface ShapeText {
-    text: string;
-    fontSizePt: number;
-    color?: string | null;
-    fontFamily?: string | null;
-    bold?: boolean;
-    italic?: boolean;
-    runs?: ShapeTextRun[];
-    numbering?: NumberingInfo | null;
-    alignment: string;
-    spaceBefore?: number;
-    spaceAfter?: number;
-    lineSpacingVal?: number;
-    lineSpacingRule?: string;
-    indentLeft?: number;
-    indentRight?: number;
-    indentFirst?: number;
-    tabStops?: TabStop[];
-    bidi?: boolean;
-    contextualSpacing?: boolean;
-    styleId?: string | null;
-    imagePath?: string;
-    mimeType?: string;
-    svgImagePath?: string;
-    imageWidthPt?: number;
-    imageHeightPt?: number;
-}
-export type ShapeFill = {
-    fillType: 'solid';
-    color: string;
-} | {
-    fillType: 'gradient';
-    stops: GradientStop[];
-    angle: number;
-    gradType: string;
-};
-export interface GradientStop {
-    position: number;
-    color: string;
-}
-export interface FieldRun {
-    fieldType: string;
-    instruction: string;
-    fallbackText: string;
-    bold: boolean;
-    italic: boolean;
-    underline: boolean;
-    strikethrough: boolean;
-    fontSize: number;
-    color: string | null;
-    fontFamily: string | null;
-    background: string | null;
-    vertAlign: 'super' | 'sub' | null;
-    allCaps?: boolean;
-    smallCaps?: boolean;
-    doubleStrikethrough?: boolean;
-    highlight?: string | null;
-    emphasisMark?: EmphasisMark;
-}
-export interface DocxTextRun {
+export declare interface DocxTextRun {
     text: string;
     bold: boolean;
     italic: boolean;
@@ -1541,201 +649,18 @@ export interface DocxTextRun {
     eastAsianCombineBrackets?: string;
     noteRef?: NoteRef;
 }
-export interface NoteRef {
-    kind: 'footnote' | 'endnote' | string;
-    id: string;
-}
-export interface RunRevision {
-    kind: 'insertion' | 'deletion' | string;
-    author?: string;
-    date?: string;
-}
-export interface RubyAnnotation {
+export declare interface DocxTextRunInfo {
     text: string;
-    fontSizePt: number;
-    hpsRaisePt?: number;
-}
-export type EmphasisMark = 'dot' | 'comma' | 'circle' | 'underDot';
-export interface ImageRun {
-    imagePath: string;
-    mimeType: string;
-    svgImagePath?: string;
-    srcRect?: {
-        l: number;
-        t: number;
-        r: number;
-        b: number;
-    } | null;
-    widthPt: number;
-    heightPt: number;
-    rotation?: number;
-    flipH?: boolean;
-    flipV?: boolean;
-    anchor?: boolean;
-    anchorXPt?: number;
-    anchorYPt?: number;
-    anchorXFromMargin?: boolean;
-    anchorYFromPara?: boolean;
-    colorReplaceFrom?: string;
-    duotone?: Duotone;
-    alpha?: number;
-    wrapMode?: string;
-    distTop?: number;
-    distBottom?: number;
-    distLeft?: number;
-    distRight?: number;
-    wrapSide?: string;
-    allowOverlap?: boolean;
-    anchorXAlign?: string | null;
-    anchorYAlign?: string | null;
-    anchorXRelativeFrom?: string | null;
-    anchorYRelativeFrom?: string | null;
-}
-export interface TblpPr {
-    leftFromText: number;
-    rightFromText: number;
-    topFromText: number;
-    bottomFromText: number;
-    horzAnchor: 'text' | 'margin' | 'page' | string;
-    horzSpecified: boolean;
-    vertAnchor: 'text' | 'margin' | 'page' | string;
-    tblpX: number;
-    tblpY: number;
-    tblpXSpec?: 'left' | 'center' | 'right' | 'inside' | 'outside' | string;
-    tblpYSpec?: 'inline' | 'top' | 'center' | 'bottom' | 'inside' | 'outside' | string;
-}
-export interface DocTable {
-    colWidths: number[];
-    rows: DocTableRow[];
-    borders: TableBorders;
-    cellMarginTop: number;
-    cellMarginBottom: number;
-    cellMarginLeft: number;
-    cellMarginRight: number;
-    jc: string;
-    tblInd?: number;
-    layout?: string;
-    widthPt?: number;
-    widthPct?: number;
-    bidiVisual?: boolean;
-    tblpPr?: TblpPr;
-    overlap?: string;
-}
-export interface TableBorders {
-    top: BorderSpec | null;
-    bottom: BorderSpec | null;
-    left: BorderSpec | null;
-    right: BorderSpec | null;
-    insideH: BorderSpec | null;
-    insideV: BorderSpec | null;
-}
-export interface BorderSpec {
-    width: number;
-    color: string | null;
-    style: string;
-}
-export interface DocTableRow {
-    cells: DocTableCell[];
-    gridBefore?: number;
-    gridAfter?: number;
-    rowHeight: number | null;
-    rowHeightRule: 'auto' | 'atLeast' | 'exact' | string;
-    isHeader: boolean;
-    cantSplit?: boolean;
-}
-export type CellElement = ({
-    type: 'paragraph';
-} & DocParagraph) | ({
-    type: 'table';
-} & DocTable);
-export interface DocTableCell {
-    content: CellElement[];
-    colSpan: number;
-    vMerge: boolean | null;
-    borders: CellBorders;
-    background: string | null;
-    vAlign: 'top' | 'center' | 'bottom';
-    widthPt: number | null;
-    widthPct?: number;
-    marginTop?: number | null;
-    marginBottom?: number | null;
-    marginLeft?: number | null;
-    marginRight?: number | null;
-}
-export interface CellBorders {
-    top: BorderSpec | null;
-    bottom: BorderSpec | null;
-    left: BorderSpec | null;
-    right: BorderSpec | null;
-    insideH: BorderSpec | null;
-    insideV: BorderSpec | null;
-}
-export type WorkerRequest = {
-    type: 'init';
-    wasmUrl: string;
-} | {
-    type: 'parse';
-    id: number;
-    data: ArrayBuffer;
-    maxZipEntryBytes?: number;
-} | {
-    type: 'extractImage';
-    id: number;
-    path: string;
-} | {
-    type: 'toMarkdown';
-    id: number;
-};
-export type WorkerResponse = {
-    type: 'parsed';
-    id: number;
-    documentJson: ArrayBuffer;
-} | {
-    type: 'imageExtracted';
-    id: number;
-    bytes: ArrayBuffer;
-} | {
-    type: 'markdownRendered';
-    id: number;
-    markdown: string;
-} | {
-    type: 'error';
-    id: number;
-    message: string;
-};
-export interface RenderPageOptions {
-    width?: number;
-    dpr?: number;
-    defaultTextColor?: string;
-    onTextRun?: (run: {
-        text: string;
-        x: number;
-        y: number;
-        w: number;
-        h: number;
-        fontSize: number;
-        font: string;
-        transform?: string;
-    }) => void;
-    showTrackChanges?: boolean;
-    currentDate?: Date | number;
-}
-
-// --- file: viewer.d.ts ---
-import type { LoadOptions } from './document';
-import type { RenderPageOptions } from './types';
-import { type DocxMatchLocation } from './find';
-import type { HyperlinkTarget, FindMatch, FindMatchesOptions, ZoomableViewer } from '@silurus/ooxml-core';
-export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
-    container?: HTMLElement;
-    enableTextSelection?: boolean;
-    onPageChange?: (index: number, total: number) => void;
-    zoomMin?: number;
-    zoomMax?: number;
-    onScaleChange?: (scale: number) => void;
-    onHyperlinkClick?: (target: HyperlinkTarget) => void;
-    enableHyperlinks?: boolean;
-    onError?: (err: Error) => void;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    fontSize: number;
+    font: string;
+    letterSpacingPx?: number;
+    transform?: string;
+    hyperlink?: HyperlinkTarget;
+    eastAsianVert?: boolean;
 }
 export declare class DocxViewer implements ZoomableViewer {
     private _doc;
@@ -1792,65 +717,589 @@ export declare class DocxViewer implements ZoomableViewer {
     private _buildTextLayer;
     private _hyperlinkHandler;
 }
-
-// --- file: worker-protocol.d.ts ---
-import type { DocComment, DocNote, RenderPageOptions, WorkerResponse } from './types';
-import type { DocxTextRunInfo } from './renderer';
-export interface DocumentMeta {
-    pageCount: number;
-    comments: DocComment[];
-    footnotes: DocNote[];
-    endnotes: DocNote[];
-    pageSizes: {
-        widthPt: number;
-        heightPt: number;
-    }[];
-    bookmarkPages: [
-        string,
-        number
-    ][];
+export declare interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
+    container?: HTMLElement;
+    enableTextSelection?: boolean;
+    onPageChange?: (index: number, total: number) => void;
+    zoomMin?: number;
+    zoomMax?: number;
+    onScaleChange?: (scale: number) => void;
+    onHyperlinkClick?: (target: HyperlinkTarget) => void;
+    enableHyperlinks?: boolean;
+    onError?: (err: Error) => void;
 }
-export type WireRenderPageOptions = Omit<RenderPageOptions, 'onTextRun'>;
-export type RenderWorkerRequest = {
-    type: 'init';
-    wasmUrl: string;
+declare interface Duotone {
+    clr1: string;
+    clr2: string;
+}
+export declare interface EmbeddedFontRef {
+    fontName: string;
+    style: 'regular' | 'bold' | 'italic' | 'boldItalic';
+    partPath: string;
+    fontKey: string;
+}
+declare type EmphasisMark = 'dot' | 'comma' | 'circle' | 'underDot';
+export declare interface FieldRun {
+    fieldType: string;
+    instruction: string;
+    fallbackText: string;
+    bold: boolean;
+    italic: boolean;
+    underline: boolean;
+    strikethrough: boolean;
+    fontSize: number;
+    color: string | null;
+    fontFamily: string | null;
+    background: string | null;
+    vertAlign: 'super' | 'sub' | null;
+    allCaps?: boolean;
+    smallCaps?: boolean;
+    doubleStrikethrough?: boolean;
+    highlight?: string | null;
+    emphasisMark?: EmphasisMark;
+}
+export declare interface FindMatch<Loc = unknown> {
+    matchIndex: number;
+    text: string;
+    location: Loc;
+}
+export declare interface FindMatchesOptions {
+    caseSensitive?: boolean;
+}
+export declare interface FramePr {
+    dropCap: 'none' | 'drop' | 'margin' | string;
+    lines: number;
+    wrap: 'around' | 'auto' | 'none' | 'notBeside' | 'through' | 'tight' | string;
+    hAnchor: 'text' | 'margin' | 'page' | string;
+    vAnchor: 'text' | 'margin' | 'page' | string;
+    hRule: 'auto' | 'atLeast' | 'exact' | string;
+    hSpace: number;
+    vSpace: number;
+    w?: number;
+    h?: number;
+    x?: number;
+    y?: number;
+    xAlign?: 'left' | 'center' | 'right' | 'inside' | 'outside' | string;
+    yAlign?: 'inline' | 'top' | 'center' | 'bottom' | 'inside' | 'outside' | string;
+}
+export declare interface GradientStop {
+    position: number;
+    color: string;
+}
+export declare interface HeaderFooter {
+    body: BodyElement[];
+}
+export declare interface HeadersFooters {
+    default: HeaderFooter | null;
+    first: HeaderFooter | null;
+    even: HeaderFooter | null;
+}
+export declare type HyperlinkTarget = {
+    kind: 'external';
+    url: string;
 } | {
-    type: 'parse';
-    id: number;
-    data: ArrayBuffer;
-    maxZipEntryBytes?: number;
+    kind: 'internal';
+    ref: string;
+    slideIndex?: number;
+};
+export declare interface ImageRun {
+    imagePath: string;
+    mimeType: string;
+    svgImagePath?: string;
+    srcRect?: {
+        l: number;
+        t: number;
+        r: number;
+        b: number;
+    } | null;
+    widthPt: number;
+    heightPt: number;
+    rotation?: number;
+    flipH?: boolean;
+    flipV?: boolean;
+    anchor?: boolean;
+    anchorXPt?: number;
+    anchorYPt?: number;
+    anchorXFromMargin?: boolean;
+    anchorYFromPara?: boolean;
+    colorReplaceFrom?: string;
+    duotone?: Duotone;
+    alpha?: number;
+    wrapMode?: string;
+    distTop?: number;
+    distBottom?: number;
+    distLeft?: number;
+    distRight?: number;
+    wrapSide?: string;
+    allowOverlap?: boolean;
+    anchorXAlign?: string | null;
+    anchorYAlign?: string | null;
+    anchorXRelativeFrom?: string | null;
+    anchorYRelativeFrom?: string | null;
+}
+declare interface LegendManualLayout {
+    xMode: string;
+    yMode: string;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+}
+export declare interface LineEnd {
+    type: string;
+    w: string;
+    len: string;
+}
+export declare interface LineNumbering {
+    countBy: number;
+    start: number;
+    distance?: number;
+    restart: string;
+}
+export declare interface LineSpacing {
+    value: number;
+    rule: 'auto' | 'exact' | 'atLeast';
+    explicit?: boolean;
+}
+export declare interface LoadOptions extends LoadOptions_2 {
+    math?: MathRenderer;
+    mode?: 'main' | 'worker';
+}
+declare interface LoadOptions_2 {
     useGoogleFonts?: boolean;
+    password?: string;
+    wasmUrl?: string | URL;
+    maxZipEntryBytes?: number;
+    workerTimeoutMs?: number;
+    math?: MathRenderer;
+}
+declare interface MatchRunSlice {
+    runIndex: number;
+    start: number;
+    end: number;
+}
+declare interface MathAccent {
+    kind: 'accent';
+    char: string;
+    base: MathNode[];
+}
+declare interface MathArray {
+    kind: 'array';
+    rows: MathNode[][][];
+    align: 'eq' | 'center' | 'left';
+}
+declare interface MathBar {
+    kind: 'bar';
+    pos: 'top' | 'bot';
+    base: MathNode[];
+}
+declare interface MathBorderBox {
+    kind: 'borderBox';
+    hideTop?: boolean;
+    hideBot?: boolean;
+    hideLeft?: boolean;
+    hideRight?: boolean;
+    strikeH?: boolean;
+    strikeV?: boolean;
+    strikeBltr?: boolean;
+    strikeTlbr?: boolean;
+    base: MathNode[];
+}
+declare interface MathBox {
+    kind: 'box';
+    base: MathNode[];
+}
+declare interface MathDelimiter {
+    kind: 'delimiter';
+    begChar: string;
+    endChar: string;
+    items: MathNode[][];
+}
+declare interface MathFraction {
+    kind: 'fraction';
+    num: MathNode[];
+    den: MathNode[];
+    bar?: boolean;
+}
+declare interface MathFunc {
+    kind: 'func';
+    name: MathNode[];
+    arg: MathNode[];
+}
+declare interface MathGroup {
+    kind: 'group';
+    items: MathNode[];
+}
+declare interface MathGroupChr {
+    kind: 'groupChr';
+    char: string;
+    pos: 'top' | 'bot';
+    base: MathNode[];
+}
+declare interface MathLimit {
+    kind: 'limit';
+    base: MathNode[];
+    lower?: MathNode[];
+    upper?: MathNode[];
+}
+declare interface MathNary {
+    kind: 'nary';
+    op: string;
+    limLoc?: string;
+    sub?: MathNode[];
+    sup?: MathNode[];
+    body: MathNode[];
+}
+declare type MathNode = MathRun | MathFraction | MathScript | MathNary | MathDelimiter | MathRadical | MathLimit | MathArray | MathGroupChr | MathBar | MathAccent | MathFunc | MathGroup | MathPhant | MathSPre | MathBox | MathBorderBox;
+declare interface MathPhant {
+    kind: 'phant';
+    show: boolean;
+    zeroWid?: boolean;
+    zeroAsc?: boolean;
+    zeroDesc?: boolean;
+    base: MathNode[];
+}
+declare interface MathRadical {
+    kind: 'radical';
+    index?: MathNode[];
+    radicand: MathNode[];
+}
+declare interface MathRenderer {
+    loadMathJax(): Promise<void>;
+    mathMLToSvg(mathml: string): Promise<MathSvg>;
+}
+declare interface MathRun {
+    kind: 'run';
+    text: string;
+    style: MathStyle;
+}
+declare interface MathScript {
+    kind: 'sup' | 'sub' | 'subSup';
+    base: MathNode[];
+    sup?: MathNode[];
+    sub?: MathNode[];
+}
+declare interface MathSPre {
+    kind: 'sPre';
+    sub: MathNode[];
+    sup: MathNode[];
+    base: MathNode[];
+}
+declare type MathStyle = 'roman' | 'italic' | 'bold' | 'boldItalic';
+declare interface MathSvg {
+    svg: string;
+    widthEm: number;
+    ascentEm: number;
+    descentEm: number;
+}
+export declare interface NoteRef {
+    kind: 'footnote' | 'endnote' | string;
+    id: string;
+}
+export declare function noteText(note: DocNote): string;
+export declare interface NumberingInfo {
+    numId: number;
+    level: number;
+    format: string;
+    text: string;
+    indentLeft: number;
+    tab: number;
+    suff: string;
+    jc?: string;
+    fontFamily?: string | null;
+    fontFamilyEastAsia?: string | null;
+    color?: string | null;
+    colorAuto?: boolean;
+    picBulletImagePath?: string;
+    picBulletMimeType?: string;
+    picBulletWidthPt?: number;
+    picBulletHeightPt?: number;
+}
+export declare class OoxmlError extends Error {
+    readonly code: OoxmlErrorCode;
+    constructor(code: OoxmlErrorCode, message: string);
+}
+export declare type OoxmlErrorCode = 'encrypted' | 'invalid-password' | 'unsupported-encryption' | 'legacy-binary-format' | 'not-ooxml';
+export declare function openExternalHyperlink(url: string, allowed?: readonly string[], win?: Pick<Window, 'open'> | undefined): boolean;
+export declare interface PageBorderEdge {
+    style: string;
+    color?: string;
+    width: number;
+    space: number;
+}
+export declare interface PageBorders {
+    offsetFrom: string;
+    display: string;
+    zOrder: string;
+    top?: PageBorderEdge;
+    bottom?: PageBorderEdge;
+    left?: PageBorderEdge;
+    right?: PageBorderEdge;
+}
+export declare interface PageNumType {
+    start?: number;
+    fmt?: string;
+}
+export declare interface ParaBorderEdge {
+    style: string;
+    color: string | null;
+    width: number;
+    space: number;
+}
+export declare interface ParagraphBorders {
+    top: ParaBorderEdge | null;
+    bottom: ParaBorderEdge | null;
+    left: ParaBorderEdge | null;
+    right: ParaBorderEdge | null;
+    between: ParaBorderEdge | null;
+}
+export declare type PathCmd = {
+    cmd: 'moveTo';
+    x: number;
+    y: number;
 } | {
-    type: 'renderPage';
-    id: number;
-    pageIndex: number;
-    opts: WireRenderPageOptions;
+    cmd: 'lineTo';
+    x: number;
+    y: number;
 } | {
-    type: 'collectRuns';
-    id: number;
-    pageIndex: number;
-    opts: WireRenderPageOptions;
+    cmd: 'cubicBezTo';
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+    x: number;
+    y: number;
 } | {
-    type: 'extractImage';
-    id: number;
-    path: string;
+    cmd: 'arcTo';
+    wr: number;
+    hr: number;
+    stAng: number;
+    swAng: number;
 } | {
-    type: 'toMarkdown';
-    id: number;
+    cmd: 'close';
 };
-export type RenderWorkerResponse = Exclude<WorkerResponse, {
-    type: 'parsed';
-}> | {
-    type: 'parsedMeta';
-    id: number;
-    meta: DocumentMeta;
-} | {
-    type: 'pageRendered';
-    id: number;
-    bitmap: ImageBitmap;
-    runs: DocxTextRunInfo[];
-} | {
-    type: 'runsCollected';
-    id: number;
-    runs: DocxTextRunInfo[];
+export declare interface PTabRun {
+    alignment: 'left' | 'center' | 'right';
+    relativeTo: 'margin' | 'indent';
+    leader: 'none' | 'dot' | 'hyphen' | 'underscore' | 'middleDot';
+    fontSize: number;
+}
+export declare interface RenderPageOptions {
+    width?: number;
+    dpr?: number;
+    defaultTextColor?: string;
+    onTextRun?: (run: {
+        text: string;
+        x: number;
+        y: number;
+        w: number;
+        h: number;
+        fontSize: number;
+        font: string;
+        transform?: string;
+    }) => void;
+    showTrackChanges?: boolean;
+    currentDate?: Date | number;
+}
+export declare type RenderPageToBitmapOptions = WireRenderPageOptions & {
+    onTextRun?: (run: DocxTextRunInfo) => void;
 };
+export declare interface RubyAnnotation {
+    text: string;
+    fontSizePt: number;
+    hpsRaisePt?: number;
+}
+export declare interface RunRevision {
+    kind: 'insertion' | 'deletion' | string;
+    author?: string;
+    date?: string;
+}
+declare interface SecondaryValueAxis {
+    min: number | null;
+    max: number | null;
+    title: string | null;
+    hidden: boolean;
+    formatCode?: string | null;
+    fontColor?: string | null;
+    fontSizeHpt?: number | null;
+    lineColor?: string | null;
+    lineWidthEmu?: number | null;
+    lineHidden: boolean;
+    majorTickMark: string;
+    majorUnit?: number | null;
+    titleFontSizeHpt?: number | null;
+    titleFontBold?: boolean | null;
+    titleFontColor?: string | null;
+}
+export declare interface SectionGeom {
+    pageWidth: number;
+    pageHeight: number;
+    marginTop: number;
+    marginRight: number;
+    marginBottom: number;
+    marginLeft: number;
+    headerDistance: number;
+    footerDistance: number;
+}
+export declare interface SectionProps {
+    pageWidth: number;
+    pageHeight: number;
+    marginTop: number;
+    marginRight: number;
+    marginBottom: number;
+    marginLeft: number;
+    headerDistance: number;
+    footerDistance: number;
+    titlePage: boolean;
+    evenAndOddHeaders: boolean;
+    sectionStart?: string | null;
+    textDirection?: string | null;
+    docGridType?: string | null;
+    docGridLinePitch?: number | null;
+    docGridCharSpace?: number | null;
+    columns?: ColumnsSpec | null;
+    pageNumType?: PageNumType | null;
+    pageBorders?: PageBorders | null;
+    lineNumbering?: LineNumbering | null;
+    vAlign?: string | null;
+}
+declare type ShapeFill = {
+    fillType: 'solid';
+    color: string;
+} | {
+    fillType: 'gradient';
+    stops: GradientStop[];
+    angle: number;
+    gradType: string;
+};
+export declare interface ShapeRun {
+    widthPt: number;
+    heightPt: number;
+    anchorXPt: number;
+    anchorYPt: number;
+    anchorXFromMargin: boolean;
+    anchorYFromPara: boolean;
+    anchorXAlign?: string | null;
+    anchorYAlign?: string | null;
+    pctPosH?: number | null;
+    pctPosV?: number | null;
+    anchorXRelativeFrom?: string | null;
+    anchorYRelativeFrom?: string | null;
+    widthPct?: number | null;
+    heightPct?: number | null;
+    widthRelativeFrom?: string | null;
+    heightRelativeFrom?: string | null;
+    groupWidthPt?: number | null;
+    groupHeightPt?: number | null;
+    behindDoc?: boolean;
+    zOrder: number;
+    subpaths: PathCmd[][];
+    presetGeometry?: string | null;
+    adjValues?: Array<number | null>;
+    fill: ShapeFill | null;
+    stroke: string | null;
+    strokeWidth?: number;
+    strokeDash?: string | null;
+    strokeCap?: CanvasLineCap | null;
+    headEnd?: LineEnd | null;
+    tailEnd?: LineEnd | null;
+    rotation?: number;
+    flipH?: boolean;
+    flipV?: boolean;
+    wrapMode?: string | null;
+    distTop?: number;
+    distBottom?: number;
+    distLeft?: number;
+    distRight?: number;
+    wrapSide?: string | null;
+    textBlocks?: ShapeText[];
+    defaultTextColor?: string | null;
+    textAnchor?: string | null;
+    textAutofit?: string | null;
+    textInsetL?: number;
+    textInsetT?: number;
+    textInsetR?: number;
+    textInsetB?: number;
+    textVert?: string | null;
+    textPath?: TextPath | null;
+    fillOpacity?: number | null;
+}
+export declare interface ShapeText {
+    text: string;
+    fontSizePt: number;
+    color?: string | null;
+    fontFamily?: string | null;
+    bold?: boolean;
+    italic?: boolean;
+    runs?: ShapeTextRun[];
+    numbering?: NumberingInfo | null;
+    alignment: string;
+    spaceBefore?: number;
+    spaceAfter?: number;
+    lineSpacingVal?: number;
+    lineSpacingRule?: string;
+    indentLeft?: number;
+    indentRight?: number;
+    indentFirst?: number;
+    tabStops?: TabStop[];
+    bidi?: boolean;
+    contextualSpacing?: boolean;
+    styleId?: string | null;
+    imagePath?: string;
+    mimeType?: string;
+    svgImagePath?: string;
+    imageWidthPt?: number;
+    imageHeightPt?: number;
+}
+export declare interface ShapeTextRun {
+    text: string;
+    fontSizePt: number;
+    color?: string | null;
+    fontFamily?: string | null;
+    fontFamilyEastAsia?: string | null;
+    bold?: boolean;
+    italic?: boolean;
+    ruby?: RubyAnnotation | null;
+}
+export declare interface TableBorders {
+    top: BorderSpec | null;
+    bottom: BorderSpec | null;
+    left: BorderSpec | null;
+    right: BorderSpec | null;
+    insideH: BorderSpec | null;
+    insideV: BorderSpec | null;
+}
+export declare interface TabStop {
+    pos: number;
+    alignment: 'left' | 'center' | 'right' | 'decimal' | 'bar' | 'clear';
+    leader: 'none' | 'dot' | 'hyphen' | 'underscore' | 'heavy' | 'middleDot';
+}
+export declare interface TblpPr {
+    leftFromText: number;
+    rightFromText: number;
+    topFromText: number;
+    bottomFromText: number;
+    horzAnchor: 'text' | 'margin' | 'page' | string;
+    horzSpecified: boolean;
+    vertAnchor: 'text' | 'margin' | 'page' | string;
+    tblpX: number;
+    tblpY: number;
+    tblpXSpec?: 'left' | 'center' | 'right' | 'inside' | 'outside' | string;
+    tblpYSpec?: 'inline' | 'top' | 'center' | 'bottom' | 'inside' | 'outside' | string;
+}
+export declare interface TextPath {
+    string: string;
+    fontFamily?: string | null;
+    bold?: boolean;
+    italic?: boolean;
+}
+export declare type WireRenderPageOptions = Omit<RenderPageOptions, 'onTextRun'>;
+declare interface ZoomableViewer {
+    getScale(): number;
+    setScale(scale: number): void | Promise<void>;
+    zoomIn(): void | Promise<void>;
+    zoomOut(): void | Promise<void>;
+    fitWidth(): void | Promise<void>;
+    fitPage(): void | Promise<void>;
+}
+export {};

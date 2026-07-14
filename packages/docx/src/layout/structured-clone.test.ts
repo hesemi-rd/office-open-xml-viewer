@@ -16,7 +16,27 @@ describe('DocumentLayout data boundary', () => {
           contentTopPt: 72,
           contentBottomPt: 720,
         },
-        section: {} as SectionLayoutContext,
+        flowDomains: [{
+          id: 'body',
+          kind: 'body',
+          bounds: { xPt: 10, yPt: 10, widthPt: 80, heightPt: 180 },
+        }],
+        section: {
+          geometry: {
+            pageWidth: 100,
+            pageHeight: 200,
+            marginTop: 10,
+            marginRight: 10,
+            marginBottom: 10,
+            marginLeft: 10,
+            headerDistance: 5,
+            footerDistance: 5,
+          },
+          columns: [{ xPt: 10, wPt: 80 }],
+          grid: { kind: 'none', linePitchPt: null, charSpacePt: null },
+          textDirection: 'lrTb',
+          verticalAlignment: 'top',
+        } satisfies SectionLayoutContext,
         layers: {
           paintOrder: [{ layer: 'front', nodeId: 'drawing-1' }],
           background: [],
@@ -33,6 +53,7 @@ describe('DocumentLayout data boundary', () => {
             clipBounds: { xPt: 10, yPt: 20, widthPt: 30, heightPt: 40 },
             advancePt: 0,
             ordinaryFlow: false,
+            flowDomainId: 'body',
             transform: { a: 1, b: 0, c: 0, d: 1, e: 10, f: 20 },
             clip: {
               kind: 'polygon',
@@ -67,5 +88,39 @@ describe('DocumentLayout data boundary', () => {
     expect(Object.getPrototypeOf(clonedNode.transform)).toBe(Object.prototype);
     expect(layoutFingerprint(cloned)).toBe(layoutFingerprint(frozen));
     expect(() => (frozen as unknown as { pages: unknown[] }).pages.push({})).toThrow();
+  });
+
+  it.each([
+    ['Date', new Date(0)],
+    ['Map', new Map()],
+    ['WeakMap', new WeakMap()],
+    ['function', () => undefined],
+    ['symbol', Symbol('layout')],
+  ])('rejects non-plain %s values before freeze or fingerprint', (_name, invalid) => {
+    const layout = {
+      pages: [],
+      diagnostics: [],
+      invalid,
+    } as unknown as DocumentLayout;
+
+    expect(() => deepFreezeDocumentLayout(layout)).toThrow(/INVALID_GEOMETRY/);
+    expect(() => layoutFingerprint(layout)).toThrow(/INVALID_GEOMETRY/);
+  });
+
+  it('rejects cyclic records', () => {
+    const layout = { pages: [], diagnostics: [] } as DocumentLayout & { self?: unknown };
+    layout.self = layout;
+
+    expect(() => deepFreezeDocumentLayout(layout)).toThrow(/INVALID_GEOMETRY/);
+    expect(() => layoutFingerprint(layout)).toThrow(/INVALID_GEOMETRY/);
+  });
+
+  it('rejects array properties that JSON fingerprints would omit', () => {
+    const pages: unknown[] & { hidden?: string } = [];
+    pages.hidden = 'not retained by JSON';
+    const layout = { pages, diagnostics: [] } as unknown as DocumentLayout;
+
+    expect(() => deepFreezeDocumentLayout(layout)).toThrow(/INVALID_GEOMETRY/);
+    expect(() => layoutFingerprint(layout)).toThrow(/INVALID_GEOMETRY/);
   });
 });

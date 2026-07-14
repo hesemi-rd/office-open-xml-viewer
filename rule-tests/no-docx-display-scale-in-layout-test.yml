@@ -6,7 +6,11 @@ valid:
 invalid:
   - "const px = widthPt * options.scale;"
   - "const ratio = options.dpr;"
+  - "const ratio = options['dpr'];"
+  - "const { dpr } = options;"
+  - "const { dpr: ratio } = options;"
   - "const display = request.displayScale;"
+  - "const { displayScale } = request;"
   - "const context: CanvasRenderingContext2D = canvas.getContext('2d')!;"
   - "function paint(options: PaintPageOptions) { return options; }"
   - "function draw(context: CanvasPaintContext) { return context; }"

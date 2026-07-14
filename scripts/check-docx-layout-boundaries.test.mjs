@@ -66,8 +66,74 @@ test('rejects a transitive paint edge to a measurement module', () => {
   const result = runChecker(root, '--final');
 
   assert.notEqual(result.status, 0);
-  assert.match(result.output, /TRANSITIVE_FORBIDDEN_EDGE/);
+  assert.match(result.output, /FORBIDDEN_PAINT_EDGE/);
   assert.match(result.output, /canvas-page\.ts.*helper\.ts.*line-layout\.ts/s);
+});
+
+test('rejects any paint runtime dependency outside the paint owner directory', () => {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-arbitrary-edge-'));
+  write(root, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
+  write(root, 'packages/docx/src/paint/canvas-page.ts', "import { helper } from '../text-wrap.js';\nexport { helper };\n");
+  write(root, 'packages/docx/src/text-wrap.ts', 'export const helper = true;\n');
+
+  const result = runChecker(root, '--final');
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.output, /FORBIDDEN_PAINT_EDGE/);
+  assert.match(result.output, /canvas-page\.ts.*text-wrap\.ts/s);
+});
+
+test('allows only the layout contract as a type-only paint dependency', () => {
+  const allowed = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-type-edge-'));
+  write(allowed, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
+  write(allowed, 'packages/docx/src/layout/types.ts', 'export interface Layout { pages: number; }\n');
+  write(allowed, 'packages/docx/src/paint/canvas-page.ts', "import type { Layout } from '../layout/types.js';\nexport type Page = Layout;\n");
+  assert.equal(runChecker(allowed, '--final').status, 0);
+
+  write(allowed, 'packages/docx/src/layout/flow.ts', 'export interface Flow { y: number; }\n');
+  write(allowed, 'packages/docx/src/paint/canvas-page.ts', "import type { Flow } from '../layout/flow.js';\nexport type Page = Flow;\n");
+  const forbidden = runChecker(allowed, '--final');
+  assert.notEqual(forbidden.status, 0);
+  assert.match(forbidden.output, /FORBIDDEN_PAINT_EDGE/);
+});
+
+test('allows only named shared atomic painters from core', () => {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-shared-paint-'));
+  write(root, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
+  write(root, 'packages/docx/src/paint/canvas-page.ts', "import { renderChart } from '@silurus/ooxml-core';\nexport { renderChart };\n");
+  assert.equal(runChecker(root, '--final').status, 0);
+
+  write(root, 'packages/docx/src/paint/canvas-page.ts', "import { measureTextWidth as renderChart } from '@silurus/ooxml-core';\nexport { renderChart };\n");
+  const result = runChecker(root, '--final');
+  assert.notEqual(result.status, 0);
+  assert.match(result.output, /FORBIDDEN_PAINT_EDGE/);
+});
+
+test('rejects non-literal dynamic paint imports', () => {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-dynamic-edge-'));
+  write(root, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
+  write(root, 'packages/docx/src/paint/canvas-page.ts', 'export const load = (name: string) => import(`../${name}.js`);\n');
+
+  const result = runChecker(root, '--final');
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.output, /NON_LITERAL_MODULE_EDGE/);
+});
+
+test('rejects computed measurement access in paint and display inputs in layout TSX', () => {
+  const paintRoot = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-computed-'));
+  write(paintRoot, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
+  write(paintRoot, 'packages/docx/src/paint/canvas-page.ts', "export const width = (ctx: CanvasRenderingContext2D) => ctx['measureText']('x').width;\n");
+  const paintResult = runChecker(paintRoot, '--final');
+  assert.notEqual(paintResult.status, 0);
+  assert.match(paintResult.output, /PAINT_CAPABILITY/);
+
+  const layoutRoot = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-layout-display-'));
+  write(layoutRoot, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
+  write(layoutRoot, 'packages/docx/src/layout/page.tsx', 'export const Page = ({ dpr }: { dpr: number }) => dpr;\n');
+  const layoutResult = runChecker(layoutRoot, '--final');
+  assert.notEqual(layoutResult.status, 0);
+  assert.match(layoutResult.output, /LAYOUT_DISPLAY_CAPABILITY/);
 });
 
 test('rejects a CommonJS require edge that bypasses static ESM imports', () => {
@@ -80,7 +146,7 @@ test('rejects a CommonJS require edge that bypasses static ESM imports', () => {
   const result = runChecker(root, '--final');
 
   assert.notEqual(result.status, 0);
-  assert.match(result.output, /TRANSITIVE_FORBIDDEN_EDGE/);
+  assert.match(result.output, /FORBIDDEN_PAINT_EDGE/);
 });
 
 test('writes the A1 baseline only when the merge base has none', () => {
@@ -117,7 +183,37 @@ test('rejects moving a legacy symbol to another file without increasing its glob
   const result = runChecker(root, '--base-ref', 'main');
 
   assert.notEqual(result.status, 0);
-  assert.match(result.output, /BASELINE_MISMATCH/);
+  assert.match(result.output, /BASELINE_EXPANSION/);
+});
+
+test('rejects renaming a migration flag and changing a legacy declaration body', () => {
+  const renamed = initializeRepository();
+  establishA1Baseline(renamed);
+  write(renamed, 'packages/docx/src/new-switch.ts', 'export const useLegacyLayout = true;\n');
+  const renamedResult = runChecker(renamed, '--base-ref', 'main');
+  assert.notEqual(renamedResult.status, 0);
+  assert.match(renamedResult.output, /BASELINE_EXPANSION/);
+
+  const changed = initializeRepository();
+  establishA1Baseline(changed);
+  write(changed, 'packages/docx/src/renderer.ts', 'export function computePages() { return [1]; }\n');
+  const changedResult = runChecker(changed, '--base-ref', 'main');
+  assert.notEqual(changedResult.status, 0);
+  assert.match(changedResult.output, /LEGACY_DECLARATION_CHANGED/);
+});
+
+test('final mode enforces the renderer adapter export and import allowlists', () => {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-final-adapter-'));
+  write(root, 'packages/docx/src/layout/document.ts', 'export function layoutDocument() {}\n');
+  write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paintLayoutPage() {}\n');
+  write(root, 'packages/docx/src/renderer.ts', "import { layoutDocument } from './layout/document.js';\nimport { paintLayoutPage } from './paint/canvas-page.js';\nexport function paginateDocument() { return layoutDocument(); }\nexport function renderDocumentToCanvas() { return paintLayoutPage(); }\n");
+  assert.equal(runChecker(root, '--final').status, 0);
+
+  write(root, 'packages/docx/src/renderer.ts', "import { hidden } from './hidden-layout.js';\nexport function paginateDocument() { return hidden(); }\nexport function renderDocumentToCanvas() {}\nexport function accidentalAlgorithm() {}\n");
+  write(root, 'packages/docx/src/hidden-layout.ts', 'export function hidden() {}\n');
+  const result = runChecker(root, '--final');
+  assert.notEqual(result.status, 0);
+  assert.match(result.output, /FINAL_ADAPTER_/);
 });
 
 test('rejects rewriting a transitional baseline after A1', () => {

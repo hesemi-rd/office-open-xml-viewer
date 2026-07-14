@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "declarationDir": "./dist/types",
+    "emitDeclarationOnly": true,
+    "incremental": false,
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "paths": {
+      "@silurus/ooxml-core": ["../core/dist/types/index.d.ts"],
+      "@silurus/ooxml-core/*": ["../core/dist/types/*"]
+    }
+  },
+  "include": ["src"],
+  "exclude": ["src/**/*.stories.ts", "src/**/*.stories.tsx"]
+}

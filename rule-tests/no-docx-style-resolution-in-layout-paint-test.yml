@@ -8,3 +8,4 @@ invalid:
   - "function resolveRunStyle(run: Run) { return mergeStyle(run.style); }"
   - "const cascadeParagraphProperties = (style: Style) => style.parent;"
   - "function mergeRunProperties(base: Props, direct: Props) { return { ...base, ...direct }; }"
+  - "function combineRunPr(base: Props, direct: Props) { return { ...base, ...direct }; }"

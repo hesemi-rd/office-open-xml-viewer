@@ -239,6 +239,10 @@ Use the roadmap review gate.
 - Modify: `sgconfig.yml`
 - Modify: `.github/workflows/ci.yml`
 - Modify: `docs/docx-layout-engine-redesign.md`
+- Delete: `docs/docx-layout-engine-implementation-roadmap.md`
+- Delete: `docs/docx-layout-engine-series-a-plan.md`
+- Delete: `docs/docx-layout-engine-series-b-plan.md`
+- Delete: `docs/docx-layout-engine-series-c-plan.md`
 
 **Interfaces:**
 
@@ -267,7 +271,7 @@ dependencies are free of measurement, shaping, style merge, pagination, and
 parser-object access, and so every pagination/layout entry is on an explicit
 allowlist outside `renderer.ts`.
 
-Build `packages/docx/dist/types/index.d.ts`, normalize source-map paths/comments,
+Build the published root `dist/types/docx.d.ts`, normalize source-map paths/comments,
 and compare it with `packages/docx/api/public-api-baseline.d.ts`. The comparison
 must fail on any added, removed, or changed exported declaration; it replaces a
 manual four-file diff.
@@ -281,7 +285,7 @@ pnpm vitest run packages/docx/src/layout/architecture.test.ts packages/docx/src/
 pnpm lint
 pnpm lint:test
 node scripts/check-docx-layout-boundaries.mjs --final
-pnpm --filter @silurus/ooxml-docx build
+pnpm build
 node scripts/check-docx-public-api.mjs
 ```
 
@@ -321,7 +325,7 @@ pnpm typecheck
 pnpm build-storybook
 pnpm playwright test --config packages/docx/playwright.config.ts conformance.spec.ts
 cargo test -p docx-parser
-pnpm --filter @silurus/ooxml-docx build
+pnpm build
 node scripts/check-docx-public-api.mjs
 node scripts/check-docx-layout-boundaries.mjs --final
 git diff --check
@@ -343,4 +347,9 @@ flags/fallback, all stories in layout, main/worker parity, and compatible public
 
 Commit subject: `refactor(docx): complete immutable layout pipeline`.
 Repeat Steps 4–6 after material fixes, then merge with `gh pr merge <number> --merge`.
-Close Issue #1037 only after GitHub shows PR C3 merged. Do not create a release or tag.
+Before committing, delete the migration roadmap and Series A/B/C execution plans;
+their durable architectural decisions remain in `docx-layout-engine-redesign.md`,
+while Issue #1037 retains the implementation history. Remove transition-only
+checks and baselines, but retain the final architecture and public-API gates in
+CI. Close Issue #1037 only after GitHub shows PR C3 merged. Do not create a
+release or tag.

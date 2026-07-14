@@ -24,6 +24,21 @@ export interface LayoutRect extends PointPt {
   readonly heightPt: number;
 }
 
+export type FlowDomainKind =
+  | 'body'
+  | 'header'
+  | 'footer'
+  | 'footnote'
+  | 'endnote'
+  | 'textbox'
+  | 'tableCell';
+
+export interface FlowDomain {
+  readonly id: string;
+  readonly kind: FlowDomainKind;
+  readonly bounds: LayoutRect;
+}
+
 export interface PageGeometry extends LayoutRect {
   readonly contentTopPt: number;
   readonly contentBottomPt: number;
@@ -43,6 +58,7 @@ export type ClipPathData =
   | Readonly<{ kind: 'polygon'; points: readonly PointPt[] }>;
 
 export interface FlowOwnership {
+  readonly flowDomainId: string;
   readonly flowBounds: LayoutRect;
   readonly inkBounds: LayoutRect;
   readonly clipBounds?: LayoutRect;
@@ -114,6 +130,7 @@ export interface PageLayers {
 export interface LayoutPage {
   readonly pageIndex: number;
   readonly geometry: PageGeometry;
+  readonly flowDomains: readonly FlowDomain[];
   readonly section: DeepReadonly<SectionLayoutContext>;
   readonly layers: PageLayers;
   readonly readingOrder: readonly LayoutNodeId[];
@@ -122,6 +139,8 @@ export interface LayoutPage {
 export type LayoutDiagnosticCode =
   | 'FLOW_OVERLAP'
   | 'BOTTOM_MARGIN_INVASION'
+  | 'FLOW_DOMAIN_INVASION'
+  | 'INVALID_REFERENCE'
   | 'INVALID_GEOMETRY'
   | 'NON_CONVERGENCE'
   | 'UNSUPPORTED_FEATURE';
@@ -184,9 +203,7 @@ export interface TableLayoutInput {
 
 export type FlowBlockInput = ParagraphLayoutInput | TableLayoutInput;
 
-export interface FlowContainer {
-  readonly bounds: LayoutRect;
-}
+export interface FlowContainer extends FlowDomain {}
 
 export interface FlowLayoutInput {
   readonly blocks: readonly FlowBlockInput[];

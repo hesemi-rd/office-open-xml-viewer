@@ -9,20 +9,24 @@ note: |
 rule:
   any:
     - kind: import_specifier
-      regex: "^(resolve|merge|cascade|apply)[A-Za-z0-9]*(Style|Properties|Cascade)[A-Za-z0-9]*$"
+      regex: "^(resolve|merge|cascade|apply|combine)[A-Za-z0-9]*(Style|Properties|Cascade|Pr)[A-Za-z0-9]*$"
     - kind: function_declaration
       has:
         field: name
         kind: identifier
-        regex: "^(resolve|merge|cascade|apply)[A-Za-z0-9]*(Style|Properties|Cascade)[A-Za-z0-9]*$"
+        regex: "^(resolve|merge|cascade|apply|combine)[A-Za-z0-9]*(Style|Properties|Cascade|Pr)[A-Za-z0-9]*$"
     - kind: variable_declarator
       has:
         field: name
         kind: identifier
-        regex: "^(resolve|merge|cascade|apply)[A-Za-z0-9]*(Style|Properties|Cascade)[A-Za-z0-9]*$"
+        regex: "^(resolve|merge|cascade|apply|combine)[A-Za-z0-9]*(Style|Properties|Cascade|Pr)[A-Za-z0-9]*$"
 files:
   - "packages/docx/src/layout/**/*.ts"
+  - "packages/docx/src/layout/**/*.tsx"
   - "packages/docx/src/paint/**/*.ts"
+  - "packages/docx/src/paint/**/*.tsx"
 ignores:
   - "packages/docx/src/layout/**/*.test.ts"
+  - "packages/docx/src/layout/**/*.test.tsx"
   - "packages/docx/src/paint/**/*.test.ts"
+  - "packages/docx/src/paint/**/*.test.tsx"

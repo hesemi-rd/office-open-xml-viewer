@@ -10,10 +10,18 @@ rule:
   any:
     - pattern: $OBJ.scale
     - pattern: $OBJ.dpr
+    - pattern: $OBJ['dpr']
     - pattern: $OBJ.displayScale
+    - pattern: $OBJ['displayScale']
+    - pattern: "const { dpr: $DPR } = $OBJ"
+    - pattern: "const { dpr } = $OBJ"
+    - pattern: "const { displayScale: $DISPLAY } = $OBJ"
+    - pattern: "const { displayScale } = $OBJ"
     - kind: type_identifier
       regex: "^(CanvasRenderingContext2D|OffscreenCanvasRenderingContext2D|PaintPageOptions|CanvasPaintContext)$"
 files:
   - "packages/docx/src/layout/**/*.ts"
+  - "packages/docx/src/layout/**/*.tsx"
 ignores:
   - "packages/docx/src/layout/**/*.test.ts"
+  - "packages/docx/src/layout/**/*.test.tsx"

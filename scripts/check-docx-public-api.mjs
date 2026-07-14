@@ -13,7 +13,7 @@ const ts = toolRequire('typescript');
 function parseArgs(argv) {
   const result = {
     root: process.cwd(),
-    entry: 'index.d.ts',
+    entry: 'docx.d.ts',
     baseRef: undefined,
     writeBaseline: false,
   };
@@ -88,7 +88,7 @@ function resolveDeclaration(fromFile, specifier) {
 function collectDeclarations(typesRoot, entryName) {
   const entry = path.resolve(typesRoot, entryName);
   if (!existsSync(entry)) {
-    throw new Error(`Generated declaration entry is missing (${entryName}); build the DOCX package first.`);
+    throw new Error(`Generated declaration entry is missing (${entryName}); build the published package first.`);
   }
 
   const pending = [entry];
@@ -161,7 +161,7 @@ function readRefFile(root, ref, relativePath) {
 }
 
 export function checkPublicApi(options) {
-  const typesRoot = path.join(options.root, 'packages/docx/dist/types');
+  const typesRoot = path.join(options.root, 'dist/types');
   const baselinePath = path.join(options.root, 'packages/docx/api/public-api-baseline.d.ts');
   const baselineRelative = 'packages/docx/api/public-api-baseline.d.ts';
   const actual = renderBaseline(collectDeclarations(typesRoot, options.entry));

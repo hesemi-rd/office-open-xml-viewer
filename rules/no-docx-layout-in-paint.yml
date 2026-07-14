@@ -18,7 +18,10 @@ rule:
         - kind: import_statement
         - regex: "from\\s+['\"]\\.\\./(types|renderer|fragment-paint|layout-context|line-layout|paragraph-measure|table-geometry|table-fragments|layout-fragments)(\\.js)?['\"]"
     - pattern: $OBJ.measureText($$$ARGS)
+    - pattern: $OBJ['measureText']($$$ARGS)
     - pattern: measureText($$$ARGS)
+    - pattern: "const { measureText: $ALIAS } = $OBJ"
+    - pattern: "const { measureText } = $OBJ"
     - pattern: layoutLines($$$ARGS)
     - pattern: $OBJ.layoutLines($$$ARGS)
     - pattern: measureParagraph($$$ARGS)
@@ -29,5 +32,7 @@ rule:
     - pattern: $OBJ.paginateDocument($$$ARGS)
 files:
   - "packages/docx/src/paint/**/*.ts"
+  - "packages/docx/src/paint/**/*.tsx"
 ignores:
   - "packages/docx/src/paint/**/*.test.ts"
+  - "packages/docx/src/paint/**/*.test.tsx"

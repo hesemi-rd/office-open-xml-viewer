@@ -37,6 +37,11 @@ describe('paintLayoutPage', () => {
           contentTopPt: 10,
           contentBottomPt: 190,
         },
+        flowDomains: [{
+          id: 'body',
+          kind: 'body',
+          bounds: { xPt: 10, yPt: 10, widthPt: 80, heightPt: 180 },
+        }],
         section: {} as SectionLayoutContext,
         layers: {
           paintOrder: [{ layer: 'body', nodeId: 'drawing-1' }],
@@ -51,6 +56,7 @@ describe('paintLayoutPage', () => {
             inkBounds: { xPt: 10, yPt: 20, widthPt: 30, heightPt: 40 },
             advancePt: 40,
             ordinaryFlow: true,
+            flowDomainId: 'body',
             commands: [{
               kind: 'fill-rect',
               rect: { xPt: 10, yPt: 20, widthPt: 30, heightPt: 40 },
@@ -68,5 +74,46 @@ describe('paintLayoutPage', () => {
 
     await expect(paintLayoutPage(layout, 0, target, { scale: 1, dpr: 1 })).resolves.toBeUndefined();
     expect(fills).toEqual([{ fill: '#ff0000', args: [10, 20, 30, 40] }]);
+  });
+
+  it('rejects missing and duplicate paint references instead of dropping content', async () => {
+    const context = {
+      save() {}, restore() {}, setTransform() {}, clearRect() {}, fillRect() {},
+      fillStyle: '',
+    } as unknown as CanvasRenderingContext2D;
+    const target = { width: 0, height: 0, getContext: () => context } as unknown as HTMLCanvasElement;
+    const node = {
+      kind: 'drawing' as const,
+      id: 'drawing-1',
+      source: { story: 'body' as const, storyInstance: 'body', path: [0] },
+      flowBounds: { xPt: 10, yPt: 20, widthPt: 30, heightPt: 40 },
+      inkBounds: { xPt: 10, yPt: 20, widthPt: 30, heightPt: 40 },
+      advancePt: 40,
+      ordinaryFlow: true,
+      flowDomainId: 'body',
+      commands: [],
+    };
+    const page = {
+      pageIndex: 0,
+      geometry: { xPt: 0, yPt: 0, widthPt: 100, heightPt: 200, contentTopPt: 10, contentBottomPt: 190 },
+      flowDomains: [{ id: 'body', kind: 'body' as const, bounds: { xPt: 10, yPt: 10, widthPt: 80, heightPt: 180 } }],
+      section: {} as SectionLayoutContext,
+      layers: {
+        paintOrder: [{ layer: 'body' as const, nodeId: 'missing' }],
+        background: [], behindText: [], header: [], body: [node], notes: [], front: [], footer: [],
+      },
+      readingOrder: [node.id],
+    };
+    const missing: DocumentLayout = { pages: [page], diagnostics: [] };
+    await expect(paintLayoutPage(missing, 0, target, { scale: 1, dpr: 1 })).rejects.toThrow(/missing/i);
+
+    const duplicate: DocumentLayout = {
+      pages: [{ ...page, layers: { ...page.layers, body: [node, node], paintOrder: [
+        { layer: 'body', nodeId: node.id },
+        { layer: 'body', nodeId: node.id },
+      ] } }],
+      diagnostics: [],
+    };
+    await expect(paintLayoutPage(duplicate, 0, target, { scale: 1, dpr: 1 })).rejects.toThrow(/duplicate/i);
   });
 });

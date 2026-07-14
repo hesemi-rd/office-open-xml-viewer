@@ -5,6 +5,7 @@ import type {
   BlockLayoutAlgorithms,
   DocumentLayout,
   DrawingLayout,
+  FlowDomain,
   LayoutRect,
   LayoutServices,
   PaintNode,
@@ -28,7 +29,7 @@ const rect = (xPt: number, yPt: number, widthPt: number, heightPt: number): Layo
 function drawing(
   id: string,
   flowBounds: LayoutRect,
-  options: Partial<Pick<DrawingLayout, 'inkBounds' | 'clipBounds' | 'ordinaryFlow'>> = {},
+  options: Partial<Pick<DrawingLayout, 'inkBounds' | 'clipBounds' | 'ordinaryFlow' | 'flowDomainId'>> = {},
 ): DrawingLayout {
   return {
     kind: 'drawing',
@@ -36,12 +37,19 @@ function drawing(
     source: source(Number(id.replace(/\D/g, '')) || 0),
     flowBounds,
     inkBounds: options.inkBounds ?? flowBounds,
-    clipBounds: options.clipBounds,
+    ...(options.clipBounds ? { clipBounds: options.clipBounds } : {}),
     advancePt: flowBounds.heightPt,
     ordinaryFlow: options.ordinaryFlow ?? true,
+    flowDomainId: options.flowDomainId ?? 'body',
     commands: [],
   };
 }
+
+const bodyDomain: FlowDomain = {
+  id: 'body',
+  kind: 'body',
+  bounds: rect(72, 72, 468, 648),
+};
 
 function documentWith(
   nodes: readonly PaintNode[],
@@ -55,6 +63,7 @@ function documentWith(
         contentTopPt: 72,
         contentBottomPt: 720,
       },
+      flowDomains: [bodyDomain],
       section: {} as SectionLayoutContext,
       layers: {
         paintOrder: nodes.map((node) => ({ layer: 'body' as const, nodeId: node.id })),
@@ -101,6 +110,99 @@ describe('assertDocumentLayout', () => {
     });
 
     expect(() => assertDocumentLayout(documentWith([ordinary, floating, clipped]))).not.toThrow();
+  });
+
+  it('validates ordinary flow only against siblings in the same story container', () => {
+    const body = drawing('body-1', rect(72, 690, 200, 20));
+    const footer = {
+      ...drawing('footer-1', rect(72, 738, 200, 20), { flowDomainId: 'footer:default' }),
+      source: { story: 'footer' as const, storyInstance: 'default', path: [0] },
+    };
+    const base = documentWith([]);
+    const layout: DocumentLayout = {
+      ...base,
+      pages: [{
+        ...base.pages[0]!,
+        flowDomains: [
+          bodyDomain,
+          { id: 'footer:default', kind: 'footer', bounds: rect(72, 730, 468, 40) },
+        ],
+        layers: {
+          ...base.pages[0]!.layers,
+          paintOrder: [
+            { layer: 'body', nodeId: body.id },
+            { layer: 'footer', nodeId: footer.id },
+          ],
+          body: [body],
+          footer: [footer],
+        },
+        readingOrder: [body.id, footer.id],
+      }],
+    };
+
+    expect(() => assertDocumentLayout(layout)).not.toThrow();
+  });
+
+  it('rejects overlap within one domain but permits the same geometry in independent cells', () => {
+    const first = drawing('cell-1', rect(100, 100, 80, 20), { flowDomainId: 'cell:1' });
+    const second = drawing('cell-2', rect(100, 100, 80, 20), { flowDomainId: 'cell:2' });
+    const base = documentWith([first, second]);
+    const layout: DocumentLayout = {
+      ...base,
+      pages: [{
+        ...base.pages[0]!,
+        flowDomains: [
+          { id: 'cell:1', kind: 'tableCell', bounds: rect(90, 90, 100, 40) },
+          { id: 'cell:2', kind: 'tableCell', bounds: rect(90, 90, 100, 40) },
+        ],
+      }],
+    };
+
+    expect(() => assertDocumentLayout(layout)).not.toThrow();
+  });
+
+  it('rejects missing domains and invalid paint or reading-order references', () => {
+    const node = drawing('n1', rect(72, 100, 200, 30), { flowDomainId: 'missing' });
+    expect(() => assertDocumentLayout(documentWith([node]))).toThrow(/INVALID_REFERENCE/);
+
+    const base = documentWith([drawing('n1', rect(72, 100, 200, 30))]);
+    const badPaint: DocumentLayout = {
+      ...base,
+      pages: [{
+        ...base.pages[0]!,
+        layers: { ...base.pages[0]!.layers, paintOrder: [{ layer: 'body', nodeId: 'unknown' }] },
+      }],
+    };
+    expect(() => assertDocumentLayout(badPaint)).toThrow(/INVALID_REFERENCE/);
+
+    const badReading: DocumentLayout = {
+      ...base,
+      pages: [{ ...base.pages[0]!, readingOrder: ['unknown'] }],
+    };
+    expect(() => assertDocumentLayout(badReading)).toThrow(/INVALID_REFERENCE/);
+  });
+
+  it('rejects duplicate node IDs and duplicate paint entries', () => {
+    expect(() => assertDocumentLayout(documentWith([
+      drawing('n1', rect(72, 100, 200, 20)),
+      drawing('n1', rect(72, 130, 200, 20)),
+    ]))).toThrow(/INVALID_REFERENCE/);
+
+    const base = documentWith([drawing('n1', rect(72, 100, 200, 20))]);
+    const duplicatePaint: DocumentLayout = {
+      ...base,
+      pages: [{
+        ...base.pages[0]!,
+        layers: {
+          ...base.pages[0]!.layers,
+          paintOrder: [
+            { layer: 'body', nodeId: 'n1' },
+            { layer: 'body', nodeId: 'n1' },
+          ],
+        },
+      }],
+    };
+    expect(() => assertDocumentLayout(duplicatePaint)).toThrow(/INVALID_REFERENCE/);
   });
 
   it('rejects non-finite retained geometry', () => {
@@ -151,7 +253,7 @@ describe('layoutFlowBlocks', () => {
 
     const result = layoutFlowBlocks({
       source: source(0),
-      container: { bounds: rect(10, 20, 100, 200) },
+      container: { id: 'body', kind: 'body', bounds: rect(10, 20, 100, 200) },
       blocks: [
         { kind: 'paragraph', source: source(1) },
         { kind: 'table', source: source(2) },

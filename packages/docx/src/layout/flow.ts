@@ -34,6 +34,7 @@ export function layoutFlowBlocks(
     source: input.source,
     container: input.container,
     blocks,
+    flowDomainId: input.container.id,
     flowBounds: unionBounds(blocks.map((block) => block.flowBounds), input.container.bounds),
     inkBounds: unionBounds(blocks.map((block) => block.inkBounds), input.container.bounds),
     clipBounds: input.container.bounds,
