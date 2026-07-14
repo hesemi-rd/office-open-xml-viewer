@@ -15,11 +15,15 @@ import {
   type MathRenderer,
 } from '@silurus/ooxml-core';
 import type { PaginatedBodyElement, DocxDocumentModel, RenderPageOptions, WorkerRequest, WorkerResponse, DocComment, DocNote } from './types';
-import { renderDocumentToCanvas, documentHasMath, prepareMathRuns, paginateDocument, dropColorReplacedCache, physicalPageSizeForPage, setResolvedLocalFonts, clearResolvedLocalFonts, type DocxTextRunInfo } from './renderer';
+import { renderDocumentToCanvas, documentHasMath, prepareMathRuns, createLayoutServices, paginateDocument, dropColorReplacedCache, physicalPageSizeForPage, type DocxTextRunInfo } from './renderer';
 import { buildBookmarkPageMap } from './bookmark-nav';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
 import { loadDocxLocalFontMetrics } from './local-font-metrics';
+import {
+  attachDocumentLayoutRuntime,
+  documentLayoutRuntimeOf,
+} from './layout/runtime-state.js';
 import type {
   DocumentMeta,
   RenderWorkerRequest,
@@ -90,9 +94,15 @@ export class DocxDocument {
   private readonly _fetchImage = (path: string, mime: string): Promise<Blob> =>
     this.getImage(path, mime);
 
-  private constructor(worker: Worker, mode: 'main' | 'worker', wasmUrlOverride?: string | URL) {
+  private constructor(
+    worker: Worker,
+    mode: 'main' | 'worker',
+    defaultCurrentDateMs: number,
+    wasmUrlOverride?: string | URL,
+  ) {
     this._worker = worker;
     this._mode = mode;
+    attachDocumentLayoutRuntime(this, defaultCurrentDateMs);
     this._bridge = new WorkerBridge<WorkerResponse | RenderWorkerResponse>(this._worker, {
       correlate: (res) => res.id,
       toError: (res) => (res.type === 'error' ? res.message : undefined),
@@ -105,6 +115,7 @@ export class DocxDocument {
   }
 
   static async load(source: string | ArrayBuffer, opts: LoadOptions = {}): Promise<DocxDocument> {
+    const defaultCurrentDateMs = Date.now();
     const mode = opts.mode ?? 'main';
     if (mode === 'worker' && (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined')) {
       throw new Error("mode: 'worker' requires Worker and OffscreenCanvas support");
@@ -130,7 +141,7 @@ export class DocxDocument {
       mode === 'worker'
         ? (await import('./render-worker-host')).createRenderWorker()
         : new InlineWorker();
-    const doc = new DocxDocument(worker, mode, opts.wasmUrl);
+    const doc = new DocxDocument(worker, mode, defaultCurrentDateMs, opts.wasmUrl);
     if (opts.math && mode === 'worker') {
       console.warn(
         "[ooxml] the math engine is unavailable in mode: 'worker'; equations will be skipped. Use mode: 'main' for documents with equations.",
@@ -158,17 +169,26 @@ export class DocxDocument {
     if (mode === 'main' && doc._document?.embeddedFonts?.length) {
       doc._embeddedFontFaces = await loadEmbeddedFonts(doc._document, (p) => doc.getFontBytes(p));
     }
+    let localMetrics: Awaited<ReturnType<typeof loadDocxLocalFontMetrics>> | undefined;
     if (mode === 'main' && doc._document) {
-      const localMetrics = await loadDocxLocalFontMetrics(doc._document);
+      localMetrics = await loadDocxLocalFontMetrics(doc._document);
       doc._localMetricFontFaces = localMetrics.faces;
-      setResolvedLocalFonts(doc._document, localMetrics.metrics);
     }
     // Equations are converted + rasterized before pagination (which reads their
     // extents synchronously). Requires the opt-in `math` engine; without it,
     // equations are skipped (and the engine asset is never bundled). Math is
     // main-mode only (the engine needs a DOM, absent in workers).
+    let preparedMath;
     if (mode === 'main' && opts.math && doc._document && documentHasMath(doc._document.body)) {
-      await prepareMathRuns(doc._document.body, opts.math);
+      preparedMath = await prepareMathRuns(doc._document.body, opts.math);
+    }
+    if (mode === 'main' && doc._document) {
+      documentLayoutRuntimeOf(doc).services = createLayoutServices(doc._document, {
+        localMetrics: localMetrics?.metrics,
+        useGoogleFonts: !!opts.useGoogleFonts,
+        mathResources: preparedMath?.records,
+        mathDrawables: preparedMath?.drawables,
+      });
     }
     return doc;
   }
@@ -182,7 +202,7 @@ export class DocxDocument {
     const res = await this._bridge.request(
       (id) =>
         this._mode === 'worker'
-          ? ({ type: 'parse', id, data: buffer, maxZipEntryBytes, useGoogleFonts } satisfies RenderWorkerRequest)
+          ? ({ type: 'parse', id, data: buffer, maxZipEntryBytes, useGoogleFonts, defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs } satisfies RenderWorkerRequest)
           : ({ type: 'parse', id, data: buffer, maxZipEntryBytes } satisfies WorkerRequest),
       [buffer],
       { timeoutMs },
@@ -201,10 +221,10 @@ export class DocxDocument {
 
   destroy(): void {
     this._bridge.terminate();
-    if (this._document) clearResolvedLocalFonts(this._document);
     this._document = null;
     this._meta = null;
     this._pages = null;
+    documentLayoutRuntimeOf(this).services = null;
     this._bookmarkPages = null;
     this._imageCache.clear();
     // Release the embedded fonts this document added to the shared FontFaceSet
@@ -361,7 +381,11 @@ export class DocxDocument {
   private _getPages(): PaginatedBodyElement[][] {
     if (this._pages) return this._pages;
     if (!this._document) return [];
-    this._pages = paginateDocument(this._document);
+    this._pages = paginateDocument(
+      this._document,
+      documentLayoutRuntimeOf(this).services ?? undefined,
+      { currentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs },
+    );
     return this._pages;
   }
 
@@ -443,6 +467,8 @@ export class DocxDocument {
       // Lazy image bytes: the renderer fetches each embedded blip on demand by
       // zip path (decoded only when drawn) instead of reading inlined base64.
       fetchImage: this._fetchImage,
+      layoutServices: documentLayoutRuntimeOf(this).services ?? undefined,
+      defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs,
     });
   }
 

@@ -51,6 +51,23 @@ const bodyDomain: FlowDomain = {
   bounds: rect(72, 72, 468, 648),
 };
 
+function serviceStubs(): LayoutServices {
+  return {
+    text: {
+      fingerprint: 'text',
+      shape: () => ({ advancePt: 0, ascentPt: 0, descentPt: 0, spans: [], diagnostics: [] }),
+    },
+    images: {
+      fingerprint: 'images',
+      resolve: () => ({ widthPt: 0, heightPt: 0, mimeType: 'application/octet-stream' }),
+    },
+    math: {
+      fingerprint: 'math',
+      resolve: () => ({ resourceKey: 'math', widthEm: 0, ascentEm: 0, descentEm: 0, diagnostics: [] }),
+    },
+  };
+}
+
 function documentWith(
   nodes: readonly PaintNode[],
   diagnostics: DocumentLayout['diagnostics'] = [],
@@ -253,11 +270,7 @@ describe('layoutFlowBlocks', () => {
         return { layout, nextCursor: { xPt: 10, yPt: placement.cursor.yPt + 18 } };
       },
     };
-    const services: LayoutServices = {
-      text: { fingerprint: 'text' },
-      images: { fingerprint: 'images' },
-      math: { fingerprint: 'math' },
-    };
+    const services = serviceStubs();
 
     const result = layoutFlowBlocks({
       source: source(0),
@@ -289,11 +302,7 @@ describe('layoutFlowBlocks', () => {
         throw new Error('not used');
       },
     };
-    const services: LayoutServices = {
-      text: { fingerprint: 'text' },
-      images: { fingerprint: 'images' },
-      math: { fingerprint: 'math' },
-    };
+    const services = serviceStubs();
 
     expect(() => layoutFlowBlocks({
       source: source(0),
@@ -308,11 +317,7 @@ describe('layoutFlowBlocks', () => {
       layoutParagraph() { throw new Error('not used'); },
       layoutTable() { throw new Error('not used'); },
     };
-    const services: LayoutServices = {
-      text: { fingerprint: 'text' },
-      images: { fingerprint: 'images' },
-      math: { fingerprint: 'math' },
-    };
+    const services = serviceStubs();
     const base = {
       source: source(0),
       blocks: [],

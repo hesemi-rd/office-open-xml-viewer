@@ -40,6 +40,7 @@ function recordingCtx(): { ctx: CanvasRenderingContext2D; calls: DrawCall[] } {
     font: '',
     textAlign: 'start',
     textBaseline: 'alphabetic',
+    clearRect: rec('clearRect'),
     fillRect: rec('fillRect'),
     strokeRect: rec('strokeRect'),
     fillText: rec('fillText'),

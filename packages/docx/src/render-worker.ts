@@ -17,11 +17,12 @@ import {
   dropSvgImageCache,
 } from '@silurus/ooxml-core';
 import type { DocxDocumentModel, PaginatedBodyElement } from './types';
-import { paginateDocument, renderDocumentToCanvas, physicalPageSizeForPage, dropColorReplacedCache, setResolvedLocalFonts, clearResolvedLocalFonts, type DocxTextRunInfo } from './renderer';
+import { paginateDocument, renderDocumentToCanvas, createLayoutServices, physicalPageSizeForPage, dropColorReplacedCache, type DocxTextRunInfo } from './renderer';
 import { buildBookmarkPageMap } from './bookmark-nav';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
 import { loadDocxLocalFontMetrics } from './local-font-metrics';
+import type { LayoutServices } from './layout/types.js';
 import type { RenderWorkerRequest, RenderWorkerResponse, DocumentMeta } from './worker-protocol';
 
 // RB6: self-poison + auto-respawn. A trap during parse (or an in-worker image /
@@ -33,7 +34,11 @@ const host = new WasmParserHost<DocxArchive>(init, {
   // wasm-bindgen singleton). `reinit` forces fresh linear memory after a trap.
   reinit,
 });
-let doc: DocxDocumentModel | null = null;
+let doc: {
+  model: DocxDocumentModel;
+  layoutServices: LayoutServices;
+  defaultCurrentDateMs: number;
+} | null = null;
 let pages: PaginatedBodyElement[][] | null = null;
 let localMetricFontFaces: FontFace[] = [];
 const imageCache = new Map<string, Promise<Blob>>();
@@ -68,7 +73,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
   try {
     await host.ensureReady();
     if (req.type === 'parse') {
-      if (doc) clearResolvedLocalFonts(doc);
+      doc = null;
       if (localMetricFontFaces.length > 0) {
         unloadLocalFontMetrics(localMetricFontFaces);
         localMetricFontFaces = [];
@@ -98,7 +103,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       // converts a graceful failure into an error response. Render mode consumes
       // the model in-worker, so decode + parse it here (one decode, no
       // passthrough).
-      doc = host.run(() => {
+      const model = host.run(() => {
         const archive = new DocxArchive(bytes, max);
         host.setArchive(archive);
         return JSON.parse(new TextDecoder().decode(archive.parse())) as DocxDocumentModel;
@@ -107,24 +112,28 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         // Pagination measures text, so fonts must land BEFORE computePages —
         // same ordering the main-mode load() guarantees.
         await preloadGoogleFonts(
-          docxFontPreloadNames(doc),
+          docxFontPreloadNames(model),
           DOCX_GOOGLE_FONTS,
         );
       }
       // ECMA-376 §17.8.1 / §17.8.3 — register embedded fonts into the worker's
       // FontFaceSet (self.fonts) before pagination measures text. Bytes are read
       // straight from the retained archive (extract_image reads any zip entry).
-      if (doc.embeddedFonts?.length) {
-        await loadEmbeddedFonts(doc, async (p) => {
+      if (model.embeddedFonts?.length) {
+        await loadEmbeddedFonts(model, async (p) => {
           const loaded = host.archive;
           if (!loaded) throw new Error('No docx loaded');
           return new Uint8Array(host.run(() => loaded.extract_image(p))).slice();
         });
       }
-      const localMetrics = await loadDocxLocalFontMetrics(doc);
+      const localMetrics = await loadDocxLocalFontMetrics(model);
       localMetricFontFaces = localMetrics.faces;
-      setResolvedLocalFonts(doc, localMetrics.metrics);
-      pages = paginateDocument(doc);
+      const layoutServices = createLayoutServices(model, {
+        localMetrics: localMetrics.metrics,
+        useGoogleFonts: !!req.useGoogleFonts,
+      });
+      doc = { model, layoutServices, defaultCurrentDateMs: req.defaultCurrentDateMs };
+      pages = paginateDocument(model, layoutServices, { currentDateMs: req.defaultCurrentDateMs });
       // ECMA-376 §17.6.13 / §17.6.11 / §17.6.20 — per-page size from each page's
       // stamped frame (its page-meta for an empty parity page). A vertical
       // section paginates on the SWAPPED logical geometry, so
@@ -132,14 +141,13 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       // `DocxDocument.pageSize` — un-swaps the stamped dims by the PAGE's OWN
       // direction (per-section, issue #1000) back to the PHYSICAL page box the
       // meta reports (identity for horizontal pages).
-      const model = doc;
       const paginated = pages;
       const pageSizes = paginated.map((_els, i) => physicalPageSizeForPage(paginated, i, model.section));
       const meta: DocumentMeta = {
         pageCount: pages.length,
-        comments: doc.comments ?? [],
-        footnotes: doc.footnotes ?? [],
-        endnotes: doc.endnotes ?? [],
+        comments: model.comments ?? [],
+        footnotes: model.footnotes ?? [],
+        endnotes: model.endnotes ?? [],
         pageSizes,
         bookmarkPages: [...buildBookmarkPageMap(pages)],
       };
@@ -153,12 +161,14 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       // can build its selection / find overlay without a second render. The
       // callback runs worker-side; only the resulting plain array crosses back.
       const runs: DocxTextRunInfo[] = [];
-      await renderDocumentToCanvas(doc, canvas, req.pageIndex, {
+      await renderDocumentToCanvas(doc.model, canvas, req.pageIndex, {
         ...req.opts,
         totalPages: pages.length,
         prebuiltPages: pages,
         fetchImage: getImage,
         onTextRun: (r) => runs.push(r),
+        layoutServices: doc.layoutServices,
+        defaultCurrentDateMs: doc.defaultCurrentDateMs,
       });
       const bitmap = canvas.transferToImageBitmap();
       post({ type: 'pageRendered', id, bitmap, runs }, [bitmap]);
@@ -172,12 +182,14 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       if (!doc || !pages) throw new Error('Document not loaded');
       const canvas = new OffscreenCanvas(1, 1);
       const runs: DocxTextRunInfo[] = [];
-      await renderDocumentToCanvas(doc, canvas, req.pageIndex, {
+      await renderDocumentToCanvas(doc.model, canvas, req.pageIndex, {
         ...req.opts,
         totalPages: pages.length,
         prebuiltPages: pages,
         fetchImage: getImage,
         onTextRun: (r) => runs.push(r),
+        layoutServices: doc.layoutServices,
+        defaultCurrentDateMs: doc.defaultCurrentDateMs,
       });
       post({ type: 'runsCollected', id, runs });
       return;

@@ -1,4 +1,9 @@
 import type { SectionLayoutContext } from '../layout-context.js';
+import type { TextLayoutService } from './text.js';
+import type { ImageMetadataService, MathMetadataService } from './resources.js';
+
+export type { TextLayoutService } from './text.js';
+export type { ImageMetadataService, MathMetadataService } from './resources.js';
 
 export type LayoutNodeId = string;
 
@@ -71,11 +76,31 @@ interface LayoutNodeBase extends FlowOwnership {
   readonly source: SourceRef;
 }
 
-export type DrawingPaintCommand = Readonly<{
-  kind: 'fill-rect';
-  rect: LayoutRect;
-  fill: string;
-}>;
+export type DrawingPaintCommand =
+  | Readonly<{
+      kind: 'fill-rect';
+      rect: LayoutRect;
+      fill: string;
+    }>
+  | Readonly<{
+      kind: 'stroke-rect';
+      rect: LayoutRect;
+      stroke: string;
+      lineWidthPt: number;
+      dashPt: readonly number[];
+    }>
+  | Readonly<{
+      kind: 'text';
+      rect: LayoutRect;
+      text: string;
+      fill: string;
+      fontFamily: string;
+      fontSizePt: number;
+      fontWeight: number;
+      fontStyle: 'normal' | 'italic';
+      align: 'start' | 'center' | 'end';
+      baseline: 'top' | 'middle' | 'alphabetic' | 'bottom';
+    }>;
 
 export interface DrawingLayout extends LayoutNodeBase {
   readonly kind: 'drawing';
@@ -171,18 +196,6 @@ export interface CompatibilityRule {
   readonly id: string;
   readonly evidence: CompatibilityEvidence;
   readonly description: string;
-}
-
-export interface TextLayoutService {
-  readonly fingerprint: string;
-}
-
-export interface ImageMetadataService {
-  readonly fingerprint: string;
-}
-
-export interface MathMetadataService {
-  readonly fingerprint: string;
 }
 
 export interface LayoutServices {

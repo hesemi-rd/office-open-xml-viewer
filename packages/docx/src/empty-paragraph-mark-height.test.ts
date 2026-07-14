@@ -1,10 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import {
-  clearResolvedLocalFonts,
   paginateDocument,
   renderDocumentToCanvas,
-  setResolvedLocalFonts,
 } from './renderer.js';
+import { createLayoutServices } from './renderer.js';
 import { paragraphMarkBelowBaselinePt, paragraphMarkLineHeight } from './line-layout.js';
 import type {
   BodyElement,
@@ -306,13 +305,13 @@ describe('empty paragraph mark line height (§17.3.1.29 / §17.3.1.33)', () => {
     globalWithCanvas.OffscreenCanvas = class {
       getContext() { return makeResolvedMetricCanvas().canvas.getContext('2d'); }
     };
-    setResolvedLocalFonts(model, resolved);
+    const services = createLayoutServices(model, { localMetrics: resolved });
 
     try {
       // Three 15pt local-face line boxes do not fit in the 40pt content band.
       // Before the fix the empty mark used the authored fallback's 10pt box, so
       // all three paragraphs were incorrectly packed onto one page.
-      const pages = paginateDocument(model);
+      const pages = paginateDocument(model, services);
       expect(pages).toHaveLength(2);
       expect(pages[0]).toHaveLength(2);
       expect(pages[1]).toHaveLength(1);
@@ -325,6 +324,7 @@ describe('empty paragraph mark line height (§17.3.1.29 / §17.3.1.33)', () => {
           dpr: 1,
           width: 200,
           prebuiltPages: pages,
+          layoutServices: services,
         });
       }
 
@@ -333,7 +333,6 @@ describe('empty paragraph mark line height (§17.3.1.29 / §17.3.1.33)', () => {
       expect(painted[1].textCalls.map((call) => call.text)).toContain('B');
       expect(painted[0].rectCalls.some((call) => Math.abs(call.height - 15) < 1e-6)).toBe(true);
     } finally {
-      clearResolvedLocalFonts(model);
       if (previousOffscreenCanvas === undefined) delete globalWithCanvas.OffscreenCanvas;
       else globalWithCanvas.OffscreenCanvas = previousOffscreenCanvas;
     }

@@ -32,7 +32,7 @@ function runChecker(root, ...args) {
 
 function initializeRepository() {
   const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-'));
-  write(root, 'packages/docx/src/renderer.ts', 'export function computePages() { return []; }\n');
+  write(root, 'packages/docx/src/renderer.ts', 'export function computePages() { return []; }\nexport function computeTableLayout() { return []; }\n');
   write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
   write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
   git(root, 'init', '-b', 'main');
@@ -200,7 +200,7 @@ test('rejects moving a legacy symbol to another file without increasing its glob
   assert.match(result.output, /BASELINE_EXPANSION/);
 });
 
-test('rejects renaming a migration flag and changing a legacy declaration body', () => {
+test('rejects renaming a migration flag and changing a hash-frozen leaf declaration', () => {
   const renamed = initializeRepository();
   establishA1Baseline(renamed);
   write(renamed, 'packages/docx/src/new-switch.ts', 'export const useLegacyLayout = true;\n');
@@ -210,10 +210,20 @@ test('rejects renaming a migration flag and changing a legacy declaration body',
 
   const changed = initializeRepository();
   establishA1Baseline(changed);
-  write(changed, 'packages/docx/src/renderer.ts', 'export function computePages() { return [1]; }\n');
+  write(changed, 'packages/docx/src/renderer.ts', 'export function computePages() { return []; }\nexport function computeTableLayout() { return [1]; }\n');
   const changedResult = runChecker(changed, '--base-ref', 'main');
   assert.notEqual(changedResult.status, 0);
   assert.match(changedResult.output, /LEGACY_DECLARATION_CHANGED/);
+});
+
+test('allows a migration coordinator body and signature to change without count expansion', () => {
+  const root = initializeRepository();
+  establishA1Baseline(root);
+  write(root, 'packages/docx/src/renderer.ts', 'export function createLayoutServices() {}\nexport function computePages(services: unknown) { return [services]; }\nexport function computeTableLayout() { return []; }\n');
+
+  const result = runChecker(root, '--base-ref', 'main');
+
+  assert.equal(result.status, 0, result.output);
 });
 
 test('final mode enforces the renderer adapter export and import allowlists', () => {

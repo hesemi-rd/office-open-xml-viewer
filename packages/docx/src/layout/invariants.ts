@@ -115,7 +115,18 @@ function requireDrawingGeometry(node: DrawingLayout, path: string): void {
   if (node.clip?.kind === 'polygon') {
     node.clip.points.forEach((point, index) => requirePoint(point, `${path}.clip.points[${index}]`));
   }
-  node.commands.forEach((command, index) => requireRect(command.rect, `${path}.commands[${index}].rect`));
+  node.commands.forEach((command, index) => {
+    requireRect(command.rect, `${path}.commands[${index}].rect`);
+    if (command.kind === 'stroke-rect') {
+      requireFinite(command.lineWidthPt, `${path}.commands[${index}].lineWidthPt`);
+      command.dashPt.forEach((dash, dashIndex) =>
+        requireFinite(dash, `${path}.commands[${index}].dashPt[${dashIndex}]`));
+    }
+    if (command.kind === 'text') {
+      requireFinite(command.fontSizePt, `${path}.commands[${index}].fontSizePt`);
+      requireFinite(command.fontWeight, `${path}.commands[${index}].fontWeight`);
+    }
+  });
 }
 
 export function assertDocumentLayout(layout: DocumentLayout): void {

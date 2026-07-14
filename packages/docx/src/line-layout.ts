@@ -56,6 +56,9 @@ import {
   wordMinLineStartPx,
 } from './float-layout.js';
 import { verticalRunInkExtraPx } from './vertical-text.js';
+import type { LayoutServices } from './layout/types.js';
+import { mathAstResourceKey } from './layout/resources.js';
+import type { MathLayoutResource } from './layout/resources.js';
 
 export interface LineBoundary {
   segIndex: number;
@@ -298,6 +301,8 @@ export interface LayoutImageSeg extends LayoutSegSource {
 /** An inline OMML equation. Measured + drawn via the core math engine. */
 export interface LayoutMathSeg extends LayoutSegSource {
   mathNodes: import('@silurus/ooxml-core').MathNode[];
+  mathResourceKey: string;
+  mathMetadata?: MathLayoutResource;
   display: boolean;
   fontSize: number;  // pt
   color: string | null;
@@ -447,23 +452,13 @@ export interface LineLayoutEnvironment {
   readonly currentNoteNumber?: number;
   readonly verticalCJK?: boolean;
   readonly resolvedLocalFonts?: Readonly<Record<string, ResolvedLocalFontMetric>>;
+  readonly layoutServices?: LayoutServices;
 }
 
 // ── Math (OMML) rendering via MathJax ───────────────────────────────────────
 // Each equation is converted OMML AST -> MathML -> MathJax SVG, then rasterized to
 // an <img> once (async, before pagination). Layout reads cached em-extents
 // synchronously; drawing blits the image. Skipped entirely for math-free documents.
-export interface MathRender {
-  img: CanvasImageSource;
-  /** baseline-relative extents in em (1em = the equation's font size). */
-  widthEm: number;
-  ascentEm: number;
-  descentEm: number;
-}
-
-// Keyed by the run's MathNode[] reference, which is stable from parse through render.
-export const mathRenders = new WeakMap<MathNode[], MathRender>();
-
 /** Arabic-script faces that hosts rarely ship; we substitute them with Noto
  *  Naskh/Sans Arabic web fonts (see DOCX_GOOGLE_FONTS in document.ts — this
  *  list MUST mirror the Arabic entries there). A run whose font is one of these
@@ -582,7 +577,7 @@ export function serifTail(cjk: ReturnType<typeof classifyCjkFont>): string {
  * that object identity gives per-doc caching with zero call-site churn (both
  * callers already pass `fontFamilyClasses`) and no leak: the inner
  * family→result Map is collected with the document's classes object. Same idiom
- * as `sheetAxisCache` / `mathRenders`. Chosen over threading an explicit cache
+ * as `sheetAxisCache`. Chosen over threading an explicit cache
  * param through buildFont because both call sites already carry the classes
  * object, so identity-keying needs no signature changes anywhere.
  */
@@ -2549,8 +2544,17 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
       // The parser resolves the paragraph font size; fall back to a nearby run only
       // if it is somehow absent.
       const fontSize = run.fontSize || findNearbyFontSize(runs, runs.indexOf(run));
+      const resourceKey = mathAstResourceKey(run.nodes);
+      let mathMetadata: MathLayoutResource | undefined;
+      try {
+        mathMetadata = environment.layoutServices?.math.resolve(resourceKey);
+      } catch {
+        mathMetadata = undefined;
+      }
       segs.push({
         mathNodes: run.nodes,
+        mathResourceKey: resourceKey,
+        mathMetadata,
         display: run.display,
         fontSize,
         color: null,
@@ -3413,8 +3417,8 @@ export function layoutLines(
 
     // ── Math segment ─────────────────────────────────────
     if ('mathNodes' in seg) {
-      const render = mathRenders.get(seg.mathNodes);
-      if (!render) {
+      const render = seg.mathMetadata;
+      if (!render || render.available === false) {
         const emPx = seg.fontSize * scale;
         setMeasureFont(buildFont(false, false, emPx, null, fontFamilyClasses));
         const m = ctx.measureText(seg.fallbackText);

@@ -72,6 +72,14 @@ const LEGACY_SYMBOLS = [
   'tableLayoutInputs',
 ];
 
+// Migration coordinators must accept each staged service/option as it moves
+// behind the retained-layout boundary. Their legacy occurrence counts and the
+// final adapter gate still require deletion; only leaf algorithms stay body-hash
+// frozen while the series is in progress.
+const MUTABLE_MIGRATION_COORDINATORS = new Set([
+  'computePages',
+]);
+
 const LEGACY_RENDERER_IMPORTS = new Set([
   'fragment-paint.ts',
   'layout-context.ts',
@@ -387,8 +395,12 @@ function declarationInventory(root) {
     for (const statement of source.statements) {
       for (const name of declarationNames(statement)) {
         const key = `${file}#${declarationKind(statement)}#${name}`;
-        if (!migrationOwner) nonLayoutDeclarationKeys.push(key);
-        if (LEGACY_SYMBOLS.includes(name)) {
+        // The final renderer surface is fixed up front, so staged PRs may add
+        // those named adapters without opening a route for arbitrary helpers.
+        const plannedRendererAdapter = file === `${DOCX_SOURCE}/renderer.ts`
+          && FINAL_RENDERER_DECLARATIONS.has(name);
+        if (!migrationOwner && !plannedRendererAdapter) nonLayoutDeclarationKeys.push(key);
+        if (LEGACY_SYMBOLS.includes(name) && !MUTABLE_MIGRATION_COORDINATORS.has(name)) {
           legacyDeclarationHashes[key] = normalizedNodeHash(statement, source);
         }
       }

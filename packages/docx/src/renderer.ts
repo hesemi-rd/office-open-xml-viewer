@@ -129,6 +129,25 @@ import {
   type StoryContext,
 } from './layout-context.js';
 import { justifiedPiecePositions } from '@silurus/ooxml-core';
+import type { LayoutServices } from './layout/types.js';
+import { normalizeLayoutOptions } from './layout/options.js';
+import type { LayoutOptions } from './layout/options.js';
+import { layoutParseErrorPage } from './layout/error-page.js';
+import { paintLayoutPage as paintRetainedLayoutPage } from './paint/canvas-page.js';
+import {
+  mathAstResourceKey,
+  createImageMetadataService,
+  createMathMetadataService,
+  documentImageMetadataRecords,
+  type MathLayoutResource,
+} from './layout/resources.js';
+import { createFontResolver, type FontInventoryFace } from './layout/font-service.js';
+import {
+  createTextLayoutService,
+  type GlyphMeasureRequest,
+  type TextLayoutService,
+} from './layout/text.js';
+import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts.js';
 
 export { computeColumns };
 
@@ -152,7 +171,6 @@ import {
   kinsokuRulesEquivalent,
   layoutLines,
   lineBoxHeight,
-  mathRenders,
   nextTabStop,
   paragraphMarkLineHeight,
   paragraphSegsStateSensitive,
@@ -309,6 +327,90 @@ function collectMathRuns(body: BodyElement[]): { nodes: MathNode[]; display: boo
   return found;
 }
 
+/** Build the one immutable resource snapshot shared by pagination and paint.
+ * Browser handles remain on this runtime adapter and never enter layout data. */
+export function createLayoutServices(
+  doc: DocxDocumentModel,
+  options: {
+    readonly localMetrics?: Readonly<Record<string, ResolvedLocalFontMetric>>;
+    readonly useGoogleFonts?: boolean;
+    readonly mathResources?: readonly MathLayoutResource[];
+    readonly mathDrawables?: ReadonlyMap<string, CanvasImageSource>;
+    readonly measureContext?: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
+  } = {},
+): LayoutServices {
+  const localMetrics = Object.freeze({ ...(options.localMetrics ?? {}) });
+  const inventory: FontInventoryFace[] = (doc.embeddedFonts ?? []).map((font) => ({
+    requestedFamily: font.fontName,
+    resolvedFamily: font.fontName,
+    source: 'embedded',
+    weights: [font.style === 'bold' || font.style === 'boldItalic' ? 700 : 400],
+    styles: [font.style === 'italic' || font.style === 'boldItalic' ? 'italic' : 'normal'],
+  }));
+  for (const [requestedFamily, metric] of Object.entries(localMetrics)) {
+    inventory.push({ requestedFamily, resolvedFamily: metric.family, source: 'local' });
+  }
+  if (options.useGoogleFonts) {
+    const seen = new Set<string>();
+    for (const name of docxFontPreloadNames(doc)) {
+      if (!name) continue;
+      const key = name.toLocaleLowerCase('en-US');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const entry = DOCX_GOOGLE_FONTS[key];
+      if (entry) inventory.push({
+        requestedFamily: name,
+        resolvedFamily: entry.loadFamily ?? name,
+        source: 'google',
+      });
+    }
+  }
+  const ctx = options.measureContext ?? (typeof OffscreenCanvas !== 'undefined'
+    ? new OffscreenCanvas(1, 1).getContext('2d')
+    : typeof document !== 'undefined'
+      ? document.createElement('canvas').getContext('2d')
+      : null);
+  const textBase = createTextLayoutService({
+    fonts: createFontResolver(inventory),
+    measurer: {
+      fingerprint: ctx ? 'canvas-text-metrics-v1' : 'canvas-text-metrics-unavailable-v1',
+      measure(request: Readonly<GlyphMeasureRequest>) {
+        if (!ctx) throw new Error('Canvas text measurement is unavailable');
+        const previousFont = ctx.font;
+        const previousLetterSpacing = ctx.letterSpacing;
+        ctx.font = `${request.style} ${request.weight} ${request.fontSizePt}px ${JSON.stringify(request.resolvedFamily)}`;
+        ctx.letterSpacing = `${request.letterSpacingPt}px`;
+        const metrics = ctx.measureText(request.text);
+        ctx.font = previousFont;
+        ctx.letterSpacing = previousLetterSpacing;
+        return {
+          advancePt: metrics.width,
+          ascentPt: metrics.fontBoundingBoxAscent ?? metrics.actualBoundingBoxAscent ?? 0,
+          descentPt: metrics.fontBoundingBoxDescent ?? metrics.actualBoundingBoxDescent ?? 0,
+        };
+      },
+    },
+  });
+  const mathResources = options.mathResources ?? collectMathRuns(doc.body).map(({ nodes }) => ({
+    resourceKey: mathAstResourceKey(nodes),
+    widthEm: 0,
+    ascentEm: 0,
+    descentEm: 0,
+    available: false,
+    diagnostics: [{
+      code: 'UNSUPPORTED_FEATURE' as const,
+      severity: 'warning' as const,
+      message: 'The optional DOM math engine is unavailable; using the worker-safe text fallback',
+    }],
+  }));
+  return Object.freeze({
+    text: Object.freeze({ ...textBase, resolvedLocalFonts: localMetrics }),
+    images: createImageMetadataService(documentImageMetadataRecords(doc)),
+    math: createMathMetadataService(mathResources),
+    mathDrawables: new Map(options.mathDrawables),
+  });
+}
+
 /** Rasterize an SVG string to an <img> (browser). Resolves once decoded. */
 function svgToImage(svg: string): Promise<HTMLImageElement> {
   const url = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
@@ -320,29 +422,49 @@ function svgToImage(svg: string): Promise<HTMLImageElement> {
   });
 }
 
-/**
- * Convert + rasterize every equation in the document. Must complete before
- * pagination/render (which read extents synchronously). Idempotent per equation.
- */
-export async function prepareMathRuns(body: BodyElement[], math: MathRenderer): Promise<void> {
+/** Convert equations before layout and address the resulting metadata by a
+ * stable content key. Parser array identity is deliberately not retained. */
+export async function prepareMathRuns(
+  body: BodyElement[],
+  math: MathRenderer,
+) {
   const runs = collectMathRuns(body);
-  if (runs.length === 0) return;
+  if (runs.length === 0) return { records: [], drawables: new Map() };
   await math.loadMathJax();
+  const records: MathLayoutResource[] = [];
+  const drawables = new Map<string, CanvasImageSource>();
+  const seen = new Set<string>();
   for (const r of runs) {
-    if (mathRenders.has(r.nodes)) continue;
+    const resourceKey = mathAstResourceKey(r.nodes);
+    if (seen.has(resourceKey)) continue;
+    seen.add(resourceKey);
     try {
       const out = await math.mathMLToSvg(mathToMathML(r.nodes, r.display));
       const img = await svgToImage(recolorSvg(out.svg, '#000000'));
-      mathRenders.set(r.nodes, {
-        img,
+      records.push({
+        resourceKey,
         widthEm: out.widthEm,
         ascentEm: out.ascentEm,
         descentEm: out.descentEm,
+        diagnostics: [],
       });
+      drawables.set(resourceKey, img);
     } catch {
-      // Conversion failure: leave the equation unrendered (zero-size) rather than throw.
+      records.push({
+        resourceKey,
+        widthEm: 0,
+        ascentEm: 0,
+        descentEm: 0,
+        available: false,
+        diagnostics: [{
+          code: 'UNSUPPORTED_FEATURE',
+          severity: 'warning',
+          message: 'Math conversion failed; using the deterministic text fallback',
+        }],
+      });
     }
   }
+  return { records, drawables };
 }
 
 export interface RenderState {
@@ -419,6 +541,8 @@ export interface RenderState {
   /** Exact local faces and version-adaptive Word line metrics resolved before
    * pagination. Keyed by normalized authored family. */
   resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>>;
+  /** Instance-scoped resource snapshot shared by pagination and paint. */
+  layoutServices?: LayoutServices;
   /** ECMA-376 §17.15.1.58–.60 — resolved Japanese line-breaking rules
    *  (kinsoku enabled flag + line-start/line-end forbidden character sets).
    *  Default is the application's Japanese kinsoku table with kinsoku ON. */
@@ -710,6 +834,10 @@ export interface RenderDocumentOptions {
    *  render). Provide a fixed value to make DATE/TIME field output deterministic
    *  (e.g. in tests / reproducible exports). */
   currentDate?: Date | number;
+  /** Internal per-document service snapshot. Public render options never expose it. */
+  layoutServices?: LayoutServices;
+  /** Internal load-time default captured once and mirrored into worker mode. */
+  defaultCurrentDateMs?: number;
 }
 
 // ===== Image preloading =====
@@ -756,13 +884,6 @@ interface ImagePair {
    *  crop, so the decode must prefer the raster (the crop math needs the
    *  bitmap's native pixel grid; an SVG vector original has none). */
   hasCrop?: boolean;
-}
-
-/** Normalize the `currentDate` render option (Date | epoch-ms | undefined) to
- *  epoch milliseconds. Undefined ⇒ the real current time (§17.16.4.1 DATE/TIME). */
-function resolveCurrentDateMs(currentDate: Date | number | undefined): number {
-  if (currentDate == null) return Date.now();
-  return typeof currentDate === 'number' ? currentDate : currentDate.getTime();
 }
 
 /** Returns a stable map key for an (imagePath, colorReplaceFrom, duotone)
@@ -1148,31 +1269,6 @@ export async function preloadImages(
  */
 const renderTokens = new WeakMap<HTMLCanvasElement | OffscreenCanvas, number>();
 
-/** Async font resolution is document-scoped runtime state, not parser output.
- * Keeping it in a WeakMap avoids mutating the public parsed model while both
- * main-thread and worker renderers consume the same explicit document key. */
-const resolvedLocalFontsByDocument = new WeakMap<
-  DocxDocumentModel,
-  Readonly<Record<string, ResolvedLocalFontMetric>>
->();
-
-export function setResolvedLocalFonts(
-  doc: DocxDocumentModel,
-  metrics: Readonly<Record<string, ResolvedLocalFontMetric>>,
-): void {
-  resolvedLocalFontsByDocument.set(doc, metrics);
-}
-
-export function clearResolvedLocalFonts(doc: DocxDocumentModel): void {
-  resolvedLocalFontsByDocument.delete(doc);
-}
-
-function resolvedLocalFontsFor(
-  doc: DocxDocumentModel,
-): Readonly<Record<string, ResolvedLocalFontMetric>> {
-  return resolvedLocalFontsByDocument.get(doc) ?? {};
-}
-
 /** True when a section flows VERTICALLY (glyphs stack top→bottom, lines advance
  *  across the page). `<w:sectPr><w:textDirection>` uses the TRANSITIONAL
  *  ST_TextDirection enum (ECMA-376 Part 4 §14.11.7; Word writes these, not the
@@ -1411,69 +1507,6 @@ export function physicalPageSizeForPage(
     : { widthPt: g.pageWidth, heightPt: g.pageHeight };
 }
 
-/**
- * RB7: paint a placeholder page for a document whose body part failed to parse.
- * A neutral card, a warning glyph, a heading, and the part-tagged error wrapped
- * to a few lines. Coordinates are in CSS px (the ctx is already dpr-scaled by the
- * caller). Only ever called for a document carrying `parseError`.
- */
-function drawParseErrorPlaceholder(
-  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
-  widthPx: number,
-  heightPx: number,
-  message: string,
-): void {
-  ctx.save();
-  // The white page fill is already painted by the caller; add a dashed frame.
-  const pad = Math.max(24, Math.min(widthPx, heightPx) * 0.06);
-  ctx.strokeStyle = '#c8ccd2';
-  ctx.lineWidth = Math.max(1, Math.min(widthPx, heightPx) * 0.003);
-  ctx.setLineDash([ctx.lineWidth * 6, ctx.lineWidth * 5]);
-  ctx.strokeRect(pad, pad, widthPx - pad * 2, heightPx - pad * 2);
-  ctx.setLineDash([]);
-
-  const cx = widthPx / 2;
-  const base = Math.min(widthPx, heightPx);
-
-  const glyph = Math.max(24, base * 0.09);
-  ctx.fillStyle = '#b23b3b';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.font = `${glyph}px sans-serif`;
-  ctx.fillText('⚠', cx, heightPx * 0.34);
-
-  const headSize = Math.max(13, base * 0.032);
-  ctx.fillStyle = '#333333';
-  ctx.font = `600 ${headSize}px sans-serif`;
-  ctx.fillText('This document could not be displayed', cx, heightPx * 0.44);
-
-  const detailSize = Math.max(10, base * 0.02);
-  ctx.fillStyle = '#666666';
-  ctx.font = `${detailSize}px sans-serif`;
-  const maxLineWidth = widthPx - pad * 4;
-  const words = message.split(/\s+/);
-  const lines: string[] = [];
-  let line = '';
-  for (const word of words) {
-    const candidate = line ? `${line} ${word}` : word;
-    if (ctx.measureText(candidate).width > maxLineWidth && line) {
-      lines.push(line);
-      line = word;
-    } else {
-      line = candidate;
-    }
-    if (lines.length >= 4) break;
-  }
-  if (line && lines.length < 4) lines.push(line);
-  const lineHeight = detailSize * 1.4;
-  let y = heightPx * 0.5 + lineHeight;
-  for (const l of lines.slice(0, 4)) {
-    ctx.fillText(l, cx, y);
-    y += lineHeight;
-  }
-  ctx.restore();
-}
-
 export async function renderDocumentToCanvas(
   doc: DocxDocumentModel,
   canvas: HTMLCanvasElement | OffscreenCanvas,
@@ -1505,6 +1538,12 @@ async function renderDocumentToCanvasLeased(
   pageIndex: number,
   opts: RenderDocumentOptions = {},
 ): Promise<void> {
+  const layoutServices = opts.layoutServices ?? createLayoutServices(doc, {
+    measureContext: canvas.getContext('2d') as
+      | CanvasRenderingContext2D
+      | OffscreenCanvasRenderingContext2D
+      | null,
+  });
   // Cancellation guard. renderDocumentToCanvas is async (it awaits image decode
   // via preloadImages), so rapid page navigation can start a newer render of the
   // SAME canvas before this one finishes. Both clear the canvas (`canvas.width =
@@ -1530,7 +1569,13 @@ async function renderDocumentToCanvasLeased(
   // get `doc` unchanged (referential identity ⇒ byte-identical). Text direction
   // is PER-SECTION (issue #1000), so the `vertical` flag is resolved per PAGE
   // below, after the stamped page frame is merged.
-  const resolvedLocalFonts = resolvedLocalFontsFor(doc);
+  const resolvedLocalFonts = (layoutServices.text as TextLayoutService & {
+    readonly resolvedLocalFonts?: Readonly<Record<string, ResolvedLocalFontMetric>>;
+  }).resolvedLocalFonts ?? {};
+  const layoutOptions = normalizeLayoutOptions(
+    opts.currentDate,
+    opts.defaultCurrentDateMs ?? Date.now(),
+  );
   const layoutDoc = verticalLayoutDoc(doc);
   const layoutSettings = resolveDocumentLayoutSettings(layoutDoc);
   const kinsoku = layoutSettings.kinsoku;
@@ -1541,6 +1586,8 @@ async function renderDocumentToCanvasLeased(
     layoutSettings,
     layoutDoc.footnotes ?? [],
     resolvedLocalFonts,
+    layoutServices,
+    layoutOptions,
   );
   const totalPages = Math.max(opts.totalPages ?? pages.length, pages.length);
   const elements = pages[pageIndex] ?? pages[0] ?? [];
@@ -1626,7 +1673,12 @@ async function renderDocumentToCanvasLeased(
   // short-circuits BEFORE the vertical page rotation below: a degraded page has no
   // logical flow to rotate, and the placeholder is laid out in physical space.
   if (doc.parseError != null) {
-    drawParseErrorPlaceholder(ctx, cssWidth, cssHeight, doc.parseError);
+    const errorLayout = layoutParseErrorPage(
+      doc.parseError,
+      { widthPt: physPageWidth, heightPt: physPageHeight },
+      layoutServices.text,
+    );
+    await paintRetainedLayoutPage(errorLayout, 0, canvas, { scale, dpr: effectiveDpr });
     return;
   }
 
@@ -1706,6 +1758,7 @@ async function renderDocumentToCanvasLeased(
     docEastAsian: layoutSettings.documentHasEastAsianText,
     fontFamilyClasses: fontClassesWithPitches(doc.fontFamilyClasses, doc.fontFamilyPitches),
     resolvedLocalFonts,
+    layoutServices,
     kinsoku,
     // §17.15.1.25 — automatic tab interval, resolved once and threaded like
     // `kinsoku` so the measure and draw passes agree.
@@ -1718,7 +1771,7 @@ async function renderDocumentToCanvasLeased(
     onTextRun: opts.onTextRun,
     showTrackChanges: opts.showTrackChanges ?? true,
     // §17.16.4.1 — the instant DATE/TIME fields format against (default real time).
-    currentDateMs: resolveCurrentDateMs(opts.currentDate),
+    currentDateMs: layoutOptions.currentDateMs,
     noteNumbers,
     // ECMA-376 §17.6.20 — the frame-level vertical flag. On a tbRl-family page
     // the glyph-draw path counter-rotates upright (CJK) glyphs so they stand up
@@ -2337,6 +2390,9 @@ export function computePages(
   resolvedLayoutSettings?: DocumentLayoutSettings,
   /** Exact local faces resolved before pagination; absent in pure unit callers. */
   resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>> = {},
+  /** Instance-scoped resources; omitted by legacy pure unit callers. */
+  layoutServices?: LayoutServices,
+  layoutOptions?: LayoutOptions,
 ): PaginatedBodyElement[][] {
   // ECMA-376 §17.6.11: the body is inset from each page edge by the margin's MAGNITUDE
   // (a negative margin measures the body |margin| from the edge and overlaps the
@@ -2368,6 +2424,8 @@ export function computePages(
     fontFamilyClasses,
     documentSettings,
     resolvedLocalFonts,
+    layoutServices,
+    layoutOptions,
   );
   // ECMA-376 §17.6.20 + §17.4.80 (issue #988 batch-3 adjudication ④): in a
   // vertical (tbRl) section a block table is an UPRIGHT block: its cells lay
@@ -4376,6 +4434,8 @@ function paginateWithHeaderFooterReserve(
   layoutSettings: DocumentLayoutSettings,
   footnotes: DocNote[],
   resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>> = {},
+  layoutServices?: LayoutServices,
+  layoutOptions?: LayoutOptions,
 ): PaginatedBodyElement[][] {
   // §17.15.1.25 — resolve once here so both pagination passes and the
   // reserve-measure state share the document's automatic tab interval.
@@ -4391,6 +4451,8 @@ function paginateWithHeaderFooterReserve(
     doc.settings,
     layoutSettings,
     resolvedLocalFonts,
+    layoutServices,
+    layoutOptions,
   );
   // ECMA-376 §17.6.20 + §17.10.1 (issue #988): a vertical (tbRl) section lays its
   // header/footer out HORIZONTALLY in physical space with NO body reserve (see the
@@ -4417,6 +4479,8 @@ function paginateWithHeaderFooterReserve(
     fontFamilyClasses,
     layoutSettings,
     resolvedLocalFonts,
+    layoutServices,
+    layoutOptions,
   );
   // Issue #1000 — a horizontal page's header/footer must be measured against its
   // OWN frame: in a vertical-body mixed document the body-level `measure` is the
@@ -4432,6 +4496,8 @@ function paginateWithHeaderFooterReserve(
           fontFamilyClasses,
           layoutSettings,
           resolvedLocalFonts,
+          layoutServices,
+          layoutOptions,
         );
       }
     : (): RenderState => measure;
@@ -4455,6 +4521,8 @@ function paginateWithHeaderFooterReserve(
     doc.settings,
     layoutSettings,
     resolvedLocalFonts,
+    layoutServices,
+    layoutOptions,
   );
 }
 
@@ -4476,7 +4544,11 @@ function paginateWithHeaderFooterReserve(
  *  measure-time and paint-time text metrics are identical), where the old
  *  recompute path would at least have re-wrapped the within-page text under the
  *  late-loaded fonts. */
-export function paginateDocument(doc: DocxDocumentModel): PaginatedBodyElement[][] {
+export function paginateDocument(
+  doc: DocxDocumentModel,
+  services: LayoutServices = createLayoutServices(doc),
+  options: LayoutOptions = normalizeLayoutOptions(undefined, Date.now()),
+): PaginatedBodyElement[][] {
   const ctx = new OffscreenCanvas(1, 1).getContext('2d');
   if (!ctx) return [doc.body];
   // ECMA-376 §17.6.20 — a vertical (tbRl) section is laid out in the SWAPPED
@@ -4486,7 +4558,9 @@ export function paginateDocument(doc: DocxDocumentModel): PaginatedBodyElement[]
   // the swapped doc here keeps the two passes consistent whether the pages are
   // prebuilt (this path) or paginated inline. Horizontal docs are unchanged
   // (referential identity).
-  const resolvedLocalFonts = resolvedLocalFontsFor(doc);
+  const resolvedLocalFonts = (services.text as TextLayoutService & {
+    readonly resolvedLocalFonts?: Readonly<Record<string, ResolvedLocalFontMetric>>;
+  }).resolvedLocalFonts ?? {};
   const layoutDoc = verticalLayoutDoc(doc);
   const layoutSettings = resolveDocumentLayoutSettings(layoutDoc);
   return paginateWithHeaderFooterReserve(
@@ -4496,6 +4570,8 @@ export function paginateDocument(doc: DocxDocumentModel): PaginatedBodyElement[]
     layoutSettings,
     layoutDoc.footnotes ?? [],
     resolvedLocalFonts,
+    services,
+    options,
   );
 }
 
@@ -4518,10 +4594,16 @@ export function paginateDocument(doc: DocxDocumentModel): PaginatedBodyElement[]
  * the page top, and each `PlacedFragment.columnIndex` locates its fragment within those
  * columns.
  */
-export function layoutDocument(doc: DocxDocumentModel): DocumentLayout {
+export function layoutDocument(
+  doc: DocxDocumentModel,
+  services: LayoutServices = createLayoutServices(doc),
+  options: LayoutOptions = normalizeLayoutOptions(undefined, Date.now()),
+): DocumentLayout {
   const ctx = new OffscreenCanvas(1, 1).getContext('2d');
   if (!ctx) return Object.freeze({ pages: Object.freeze([]) });
-  const resolvedLocalFonts = resolvedLocalFontsFor(doc);
+  const resolvedLocalFonts = (services.text as TextLayoutService & {
+    readonly resolvedLocalFonts?: Readonly<Record<string, ResolvedLocalFontMetric>>;
+  }).resolvedLocalFonts ?? {};
   const layoutDoc = verticalLayoutDoc(doc);
   const layoutSettings = resolveDocumentLayoutSettings(layoutDoc);
   const pages = paginateWithHeaderFooterReserve(
@@ -4531,6 +4613,8 @@ export function layoutDocument(doc: DocxDocumentModel): DocumentLayout {
     layoutSettings,
     layoutDoc.footnotes ?? [],
     resolvedLocalFonts,
+    services,
+    options,
   );
   const layoutPages: LayoutPage[] = pages.map((elements, pageIndex) => {
     const firstEl = elements[0] as PaginatedBodyElement | undefined;
@@ -4592,6 +4676,8 @@ function buildMeasureState(
   fontFamilyClasses: Record<string, string> = {},
   layoutSettings: DocumentLayoutSettings,
   resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>> = {},
+  layoutServices?: LayoutServices,
+  layoutOptions?: LayoutOptions,
 ): RenderState {
   const sectionLayout = resolveSectionLayoutContext(layoutSettings, section);
   return {
@@ -4636,6 +4722,8 @@ function buildMeasureState(
     docEastAsian: layoutSettings.documentHasEastAsianText,
     fontFamilyClasses,
     resolvedLocalFonts,
+    layoutServices,
+    currentDateMs: layoutOptions?.currentDateMs,
     kinsoku: layoutSettings.kinsoku,
     defaultTabPt: layoutSettings.defaultTabPt,
     characterSpacingControl: layoutSettings.characterSpacingControl,
@@ -9274,13 +9362,22 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
         continue;
       }
       if ('mathNodes' in seg) {
-        const render = mathRenders.get(seg.mathNodes);
-        if (!dryRun && render) {
+        const resourceKey = mathAstResourceKey(seg.mathNodes);
+        let metadata;
+        try {
+          metadata = state.layoutServices?.math.resolve(resourceKey);
+        } catch {
+          metadata = undefined;
+        }
+        const drawable = (state.layoutServices as (LayoutServices & {
+          readonly mathDrawables?: ReadonlyMap<string, CanvasImageSource>;
+        }) | undefined)?.mathDrawables?.get(resourceKey);
+        if (!dryRun && metadata && metadata.available !== false && drawable) {
           const emPx = seg.fontSize * scale;
-          const w = render.widthEm * emPx;
-          const h = (render.ascentEm + render.descentEm) * emPx;
-          const top = baseline - render.ascentEm * emPx;
-          ctx.drawImage(render.img, x, top, w, h);
+          const w = metadata.widthEm * emPx;
+          const h = (metadata.ascentEm + metadata.descentEm) * emPx;
+          const top = baseline - metadata.ascentEm * emPx;
+          ctx.drawImage(drawable, x, top, w, h);
         } else if (!dryRun && seg.fallbackText) {
           ctx.font = buildFont(false, false, seg.fontSize * scale, null, fontFamilyClasses);
           ctx.fillStyle = seg.color ?? defaultColor;
