@@ -15,9 +15,9 @@ const DOCX_SOURCE = 'packages/docx/src';
 const PAINT_SOURCE = `${DOCX_SOURCE}/paint`;
 const LAYOUT_SOURCE = `${DOCX_SOURCE}/layout`;
 const PARSER_MODEL = `${DOCX_SOURCE}/parser-model.ts`;
-const LAYOUT_PARSER_MODEL_ALLOWLIST = new Set([
-  `${LAYOUT_SOURCE}/resources.ts`,
-]);
+const LAYOUT_PARSER_MODEL_GATEWAY = `${LAYOUT_SOURCE}/resources.ts`;
+const LAYOUT_PARSER_MODEL_GATEWAY_IMPORT = '../parser-model.js';
+const LAYOUT_PARSER_MODEL_GATEWAY_SYMBOL = 'normalizeInternalDocumentModel';
 
 const FINAL_RENDERER_EXPORTS = new Set([
   'DocxTextRunInfo',
@@ -151,6 +151,7 @@ function moduleEdges(path) {
           ]
         : [];
       edges.push({
+        kind: 'import',
         specifier: statement.moduleSpecifier.text,
         typeOnly: importIsTypeOnly(statement),
         literal: true,
@@ -164,6 +165,7 @@ function moduleEdges(path) {
       && statement.moduleSpecifier
       && ts.isStringLiteral(statement.moduleSpecifier)) {
       edges.push({
+        kind: 'export',
         specifier: statement.moduleSpecifier.text,
         typeOnly: exportIsTypeOnly(statement),
         literal: true,
@@ -178,16 +180,16 @@ function moduleEdges(path) {
       && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
       const argument = node.arguments[0];
       edges.push(argument && (ts.isStringLiteral(argument) || ts.isNoSubstitutionTemplateLiteral(argument))
-        ? { specifier: argument.text, typeOnly: false, literal: true }
-        : { specifier: '<dynamic>', typeOnly: false, literal: false });
+        ? { kind: 'dynamic-import', specifier: argument.text, typeOnly: false, literal: true }
+        : { kind: 'dynamic-import', specifier: '<dynamic>', typeOnly: false, literal: false });
     }
     if (ts.isCallExpression(node)
       && ts.isIdentifier(node.expression)
       && node.expression.text === 'require') {
       const argument = node.arguments[0];
       edges.push(argument && (ts.isStringLiteral(argument) || ts.isNoSubstitutionTemplateLiteral(argument))
-        ? { specifier: argument.text, typeOnly: false, literal: true }
-        : { specifier: '<dynamic>', typeOnly: false, literal: false });
+        ? { kind: 'require', specifier: argument.text, typeOnly: false, literal: true }
+        : { kind: 'require', specifier: '<dynamic>', typeOnly: false, literal: false });
     }
     ts.forEachChild(node, visit);
   };
@@ -307,6 +309,60 @@ function assertCapabilityBoundaries(root) {
   }
 }
 
+function isExactLayoutParserModelGatewayImportEdge(currentRel, edge, dependency, parserModel) {
+  return currentRel === LAYOUT_PARSER_MODEL_GATEWAY
+    && dependency === parserModel
+    && edge.kind === 'import'
+    && edge.specifier === LAYOUT_PARSER_MODEL_GATEWAY_IMPORT
+    && edge.typeOnly === false
+    && edge.aliased === false
+    && edge.bare === false
+    && edge.importedNames?.length === 1
+    && edge.importedNames[0] === LAYOUT_PARSER_MODEL_GATEWAY_SYMBOL;
+}
+
+function hasExactLayoutParserModelGatewayProjection(path) {
+  const source = sourceFile(path);
+  let bindingReferences = 0;
+  const countBindingReferences = (node) => {
+    if (ts.isIdentifier(node) && node.text === LAYOUT_PARSER_MODEL_GATEWAY_SYMBOL) {
+      bindingReferences += 1;
+    }
+    ts.forEachChild(node, countBindingReferences);
+  };
+  countBindingReferences(source);
+  if (bindingReferences !== 2) return false;
+
+  const projections = source.statements.filter((statement) => (
+    ts.isFunctionDeclaration(statement)
+    && statement.name?.text === 'documentMathOccurrences'
+  ));
+  if (projections.length !== 1) return false;
+  const projection = projections[0];
+  const exported = projection.modifiers?.some((modifier) => (
+    modifier.kind === ts.SyntaxKind.ExportKeyword
+  ));
+  if (!exported || !projection.body || projection.parameters.length !== 1) return false;
+  const parameter = projection.parameters[0];
+  if (!ts.isIdentifier(parameter.name) || projection.body.statements.length !== 1) return false;
+  const returned = projection.body.statements[0];
+  if (!ts.isReturnStatement(returned)
+    || !returned.expression
+    || !ts.isArrayLiteralExpression(returned.expression)
+    || returned.expression.elements.length !== 1) return false;
+  const spread = returned.expression.elements[0];
+  if (!ts.isSpreadElement(spread)
+    || !ts.isPropertyAccessExpression(spread.expression)
+    || spread.expression.name.text !== 'mathOccurrences') return false;
+  const call = spread.expression.expression;
+  return ts.isCallExpression(call)
+    && ts.isIdentifier(call.expression)
+    && call.expression.text === LAYOUT_PARSER_MODEL_GATEWAY_SYMBOL
+    && call.arguments.length === 1
+    && ts.isIdentifier(call.arguments[0])
+    && call.arguments[0].text === parameter.name.text;
+}
+
 function layoutParserModelBoundaryViolations(root) {
   const graph = dependencyGraph(root);
   const parserModel = resolve(root, PARSER_MODEL);
@@ -322,11 +378,6 @@ function layoutParserModelBoundaryViolations(root) {
     while (stack.length > 0) {
       const current = stack.pop();
       const currentRel = posixPath(relative(root, current.path));
-      // `layout/resources.ts` is the explicit parser-model gateway: it projects
-      // parser-owned facts into stable resource contracts. The graph walk stops
-      // at that boundary instead of treating its intentional adapter edge as a
-      // layout-algorithm dependency.
-      if (LAYOUT_PARSER_MODEL_ALLOWLIST.has(currentRel)) continue;
       for (const edge of graph.get(current.path) ?? []) {
         if (!edge.literal) {
           nonLiteral.push(current.chain.map((path) => posixPath(relative(root, path))));
@@ -337,6 +388,17 @@ function layoutParserModelBoundaryViolations(root) {
         if (!dependency) continue;
         const chain = [...current.chain, dependency];
         if (dependency === parserModel) {
+          // The parser-model gateway permits exactly one projection edge. Only
+          // that edge is terminal; every other resources.ts dependency remains
+          // part of the transitive runtime graph and is inspected normally.
+          if (isExactLayoutParserModelGatewayImportEdge(currentRel, edge, dependency, parserModel)) {
+            if (hasExactLayoutParserModelGatewayProjection(current.path)) continue;
+            violations.push([
+              ...chain.map((path) => posixPath(relative(root, path))),
+              `invalid use of ${LAYOUT_PARSER_MODEL_GATEWAY_SYMBOL}`,
+            ]);
+            continue;
+          }
           violations.push(chain.map((path) => posixPath(relative(root, path))));
           continue;
         }
@@ -344,8 +406,6 @@ function layoutParserModelBoundaryViolations(root) {
         // dependency through the referenced contract. A direct parser-model
         // type import was rejected above so layout stays parser-model-free.
         if (edge.typeOnly) continue;
-        const dependencyRel = posixPath(relative(root, dependency));
-        if (LAYOUT_PARSER_MODEL_ALLOWLIST.has(dependencyRel)) continue;
         if (graph.has(dependency) && !visited.has(dependency)) {
           visited.add(dependency);
           stack.push({ path: dependency, chain });

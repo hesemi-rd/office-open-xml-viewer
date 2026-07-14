@@ -275,9 +275,10 @@ nor paint dereferences the private parser wire representation.
 **Specification evidence:** ECMA-376 §17.3.2.26 (`w:rFonts`), §17.8 embedded
 fonts, §17.16.5.13/§17.16.5.65 DATE/TIME, §17.16.5.42 NUMPAGES and
 §17.16.5.44 PAGE define layout-affecting font/field facts. Numbering-level
-properties apply to the marker under §17.9.6 (`w:lvl`); the paragraph mark and
-its run properties are defined by §17.3.1.29 (`w:pPr`) and §17.4.52
-(`w:rPr`). DrawingML inline and
+properties apply to the marker under §17.9.6 (`w:lvl`) together with the
+§17.3.2.26 font-slot rules. Paragraph-mark run properties are defined by
+§17.3.1.29 (`w:pPr`). Table auto-fit selection is defined by §17.4.52
+(`w:tblLayout`). DrawingML inline and
 anchor extents (`wp:extent`) supply image/chart intrinsic layout size. Font
 substitution is environment/Office compatibility behavior and must emit a
 resolution record, not hide inside paragraph geometry.
@@ -303,8 +304,12 @@ theme precedence, retaining the shaped spans for paint. Cover empty and
 anchor-only paragraph marks in main and worker mode through the same text-service
 metrics. Boundary tests must reject direct and transitive parser-model reachability
 through bridge modules, aliases, literal/non-literal dynamic imports, and
-CommonJS `require`, while proving the exact parser gateway and erased type-only
-contracts remain valid.
+CommonJS `require`, while proving that only the exact unaliased named runtime
+import `{ normalizeInternalDocumentModel }` from `../parser-model.js` in
+`layout/resources.ts` is terminal, and that binding is used only by the exact
+`documentMathOccurrences` projection to return `.mathOccurrences`. Local
+re-export, alias, leak, or extra reference cases fail. All other gateway edges
+remain traversed; erased type-only contracts remain valid.
 
 - [ ] **Step 2: Run tests to verify Red**
 
@@ -352,10 +357,15 @@ tuning one marker string.
 Keep the transitional `renderShapeText` hash normalization mechanically exact:
 it may erase only the complete marker snapshot -> service shape -> retained-span
 paint sequence, and must reject any partial or altered sequence. Enforce the
-layout/parser boundary with a transitive runtime import-graph walk. Reject
-indirect bridge, alias, dynamic-import, and CommonJS paths; stop only at the
-explicit parser projection gateway or an erased type-only contract so layout and
-paint remain parser-model-free without false positives.
+layout/parser boundary with a transitive runtime import-graph walk from every
+production layout module. Reject indirect bridge, alias, dynamic-import, and
+CommonJS paths. Treat only the exact unaliased named runtime import
+`{ normalizeInternalDocumentModel }` from `../parser-model.js` in
+`layout/resources.ts` as a terminal parser projection edge, and AST-freeze its
+sole use to the exported `documentMathOccurrences` return of
+`[...normalizeInternalDocumentModel(doc).mathOccurrences]`. Reject local
+re-export, alias, leak, or extra references; traverse every other gateway edge
+normally. Erased type-only contracts do not create runtime paths.
 
 - [ ] **Step 4: Verify Green and main/worker service parity**
 
@@ -363,7 +373,7 @@ Run:
 
 ```bash
 pnpm vitest run packages/docx/src/layout/{font-service,resources,options,convergence,error-page}.test.ts
-pnpm vitest run packages/docx/src/layout/services-integration.test.ts packages/docx/src/fit-text-fixes.test.ts packages/docx/src/paragraph-measure.test.ts packages/docx/src/parser-model-numbering.test.ts packages/docx/src/numbering-marker-*.test.ts packages/docx/src/textbox-numbering-font.test.ts
+pnpm vitest run packages/docx/src/layout/services-integration.test.ts packages/docx/src/fit-text-fixes.test.ts packages/docx/src/column-widths.test.ts packages/docx/src/paragraph-measure.test.ts packages/docx/src/empty-paragraph-mark-height.test.ts packages/docx/src/numbering-marker-font.test.ts
 cargo test -p docx-parser
 pnpm test:docx-boundaries
 node scripts/check-docx-layout-boundaries.mjs --base-ref 02863444
@@ -376,7 +386,8 @@ pnpm typecheck
 Expected: tests pass; main and worker factories given identical inventories
 produce identical resolution/service fingerprints; auto-fit, numbering, and
 paragraph marks use that service in both modes; direct and transitive parser-model
-paths fail except for the exact gateway/type-only controls; the exact public API
+paths fail except for the exact normalization import, while all other gateway
+edges are inspected and type-only contracts stay erased; the exact public API
 surface is unchanged; and `rg` has no production global-state or
 paint-error-wrapper matches.
 

@@ -151,17 +151,18 @@ and paragraph-mark run facts remain private parser-wire metadata. The
 parser-model boundary projects numbering into a plain immutable shape input;
 the parser-free layout module shapes mixed-script body and text-box markers and
 the parser-free paint module serializes the retained spans. This follows
-ECMA-376 §17.9.6 (`w:lvl`), §17.3.1.29 (`w:pPr`), and §17.4.52 (`w:rPr`)
-without reconstructing effective formatting in layout. Empty and anchor-only
-paragraph-mark metrics also use the text service, so main and worker execution
-share one font authority.
+ECMA-376 §17.9.6 (`w:lvl`) and the §17.3.2.26 (`w:rFonts`) font-slot rules.
+Paragraph-mark run properties follow §17.3.1.29 (`w:pPr`), without
+reconstructing effective formatting in layout. Empty and anchor-only paragraph-
+mark metrics also use the text service, so main and worker execution share one
+font authority.
 
 Auto-fit text enters through the ordinary `buildSegments` pipeline. Each atom
 retains its complete service request and route, including the four independent
 `w:rFonts` slots and theme-presence semantics from ECMA-376 §17.3.2.26. The
 region resolver sums the actual shaped advances across grapheme, kinsoku,
 font-route, and `joinPrev` boundaries instead of replacing them with one leading
-run font.
+run font. Table auto-fit selection follows §17.4.52 (`w:tblLayout`).
 The image service resolves intrinsic dimensions and metadata. Services are inputs
 only; functions, Canvas objects, and resource handles never enter the layout
 result.
@@ -178,12 +179,18 @@ pure traversal shallow-clones only math-bearing ancestry and attaches typed
 plain-data `SourceRef`/resource keys to internal math runs; neither parser-array
 identity nor a WeakMap participates in layout.
 
-Static enforcement walks the transitive runtime module graph from every layout
-entry and rejects any path to `parser-model.ts`, including bridge modules,
-aliases, literal or non-literal dynamic imports, and CommonJS `require`. The walk
-stops only at the explicit parser projection gateway or an erased type-only
-contract. This prevents parser ownership from leaking back into layout while
-avoiding false positives for type-only layout contracts.
+Static enforcement walks the transitive runtime module graph from every
+production layout module and rejects any path to `parser-model.ts`, including
+bridge modules, aliases, literal or non-literal dynamic imports, and CommonJS
+`require`. Only the exact unaliased named runtime import
+`{ normalizeInternalDocumentModel }` from `../parser-model.js` in
+`layout/resources.ts` is a terminal parser projection edge. Its binding has one
+permitted use: the exported `documentMathOccurrences` function returns
+`[...normalizeInternalDocumentModel(doc).mathOccurrences]`. Static enforcement
+rejects local re-export, alias, leak, or extra references. Every other gateway
+edge is traversed normally; erased type-only contracts do not create runtime
+paths. This prevents parser ownership from leaking back into layout without
+false positives for type-only contracts.
 
 ### Document layout
 
@@ -450,7 +457,7 @@ Paint tests use a Canvas stub whose `measureText` throws. Static analysis reject
   imports from the plain layout result contract;
 - direct or transitive runtime paths from layout to the private parser model,
   including bridge, dynamic-import, alias, and CommonJS paths, except the exact
-  projection gateway;
+  `layout/resources.ts` named normalization import and its AST-frozen projection;
 - display-scale/DPR state in layout modules without rejecting authored OOXML text
   scale properties;
 - runtime layout stamps on parser model types;

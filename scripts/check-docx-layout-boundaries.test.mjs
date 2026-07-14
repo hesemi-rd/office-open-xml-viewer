@@ -47,10 +47,16 @@ function initializeRepository() {
 function initializeLayoutParserBoundaryRepository() {
   const root = mkdtempSync(join(tmpdir(), 'docx-layout-parser-boundary-'));
   write(root, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
-  write(root, 'packages/docx/src/parser-model.ts', 'export const parserFacts = true;\nexport interface ParserFacts { value: string; }\n');
+  write(root, 'packages/docx/src/parser-model.ts', 'export function normalizeInternalDocumentModel(document: unknown) { return { document, mathOccurrences: [] }; }\nexport const parserFacts = true;\nexport interface ParserFacts { value: string; }\n');
   write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
   return root;
 }
+
+const exactParserGatewaySource =
+  "import { normalizeInternalDocumentModel } from '../parser-model.js';\n"
+  + 'export function documentMathOccurrences(doc: unknown): unknown[] {\n'
+  + '  return [...normalizeInternalDocumentModel(doc).mathOccurrences];\n'
+  + '}\n';
 
 function initializeShapeRepository() {
   const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-shape-'));
@@ -202,17 +208,17 @@ test('rejects non-literal dynamic and CommonJS imports reachable from layout', (
   }
 });
 
-test('allows the exact parser gateway and stops at erased type-only contracts', () => {
+test('allows only the exact parser normalization gateway and erased type-only contracts', () => {
   const gateway = initializeLayoutParserBoundaryRepository();
   write(
     gateway,
     'packages/docx/src/layout/numbering-marker.ts',
-    "import { resourceFacts } from './resources.js';\nexport const marker = resourceFacts;\n",
+    "import { documentMathOccurrences } from './resources.js';\nexport const marker = documentMathOccurrences;\n",
   );
   write(
     gateway,
     'packages/docx/src/layout/resources.ts',
-    "import { parserFacts } from '../parser-model.js';\nexport const resourceFacts = parserFacts;\n",
+    exactParserGatewaySource,
   );
   assert.equal(runChecker(gateway, '--final').status, 0);
 
@@ -228,6 +234,89 @@ test('allows the exact parser gateway and stops at erased type-only contracts', 
     "import { parserFacts } from './parser-model.js';\nexport interface BridgeFacts { value: typeof parserFacts; }\n",
   );
   assert.equal(runChecker(typeOnly, '--final').status, 0);
+});
+
+test('rejects non-exact parser-model syntax in the parser normalization gateway', () => {
+  for (const source of [
+    "import { normalizeInternalDocumentModel, parserFacts } from '../parser-model.js';\nexport const value = [normalizeInternalDocumentModel, parserFacts];\n",
+    "import { normalizeInternalDocumentModel as normalize } from '../parser-model.js';\nexport const value = normalize;\n",
+    "import * as parserModel from '../parser-model.js';\nexport const value = parserModel;\n",
+    "export { normalizeInternalDocumentModel } from '../parser-model.js';\n",
+    "export * from '../parser-model.js';\n",
+  ]) {
+    const root = initializeLayoutParserBoundaryRepository();
+    write(root, 'packages/docx/src/layout/resources.ts', source);
+
+    const result = runChecker(root, '--final');
+
+    assert.notEqual(result.status, 0, source);
+    assert.match(result.output, /LAYOUT_PARSER_MODEL_DEPENDENCY/, source);
+    assert.match(result.output, /layout\/resources\.ts.*parser-model\.ts/s, source);
+  }
+});
+
+test('rejects parser normalizer re-exports, leaks, and local aliases in the gateway', () => {
+  for (const source of [
+    `${exactParserGatewaySource}export { normalizeInternalDocumentModel };\n`,
+    `${exactParserGatewaySource}export const leak = normalizeInternalDocumentModel;\n`,
+    "import { normalizeInternalDocumentModel } from '../parser-model.js';\nconst normalize = normalizeInternalDocumentModel;\nexport function documentMathOccurrences(doc: unknown): unknown[] { return [...normalize(doc).mathOccurrences]; }\n",
+  ]) {
+    const root = initializeLayoutParserBoundaryRepository();
+    write(root, 'packages/docx/src/layout/resources.ts', source);
+
+    const result = runChecker(root, '--final');
+
+    assert.notEqual(result.status, 0, source);
+    assert.match(result.output, /LAYOUT_PARSER_MODEL_DEPENDENCY/, source);
+    assert.match(result.output, /layout\/resources\.ts.*normalizeInternalDocumentModel/s, source);
+  }
+});
+
+test('traverses gateway bridges and rejects literal dynamic and CommonJS parser edges', () => {
+  const bridge = initializeLayoutParserBoundaryRepository();
+  write(
+    bridge,
+    'packages/docx/src/layout/resources.ts',
+    "import { normalizeInternalDocumentModel } from '../parser-model.js';\nimport { bridgeFacts } from '../parser-bridge.js';\nexport const value = [normalizeInternalDocumentModel, bridgeFacts];\n",
+  );
+  write(
+    bridge,
+    'packages/docx/src/parser-bridge.ts',
+    "import { parserFacts } from './parser-model.js';\nexport const bridgeFacts = parserFacts;\n",
+  );
+  const bridged = runChecker(bridge, '--final');
+  assert.notEqual(bridged.status, 0);
+  assert.match(bridged.output, /LAYOUT_PARSER_MODEL_DEPENDENCY/);
+  assert.match(bridged.output, /layout\/resources\.ts.*parser-bridge\.ts.*parser-model\.ts/s);
+
+  for (const source of [
+    "export const load = () => import('../parser-model.js');\n",
+    "export const load = () => require('../parser-model.js');\n",
+  ]) {
+    const root = initializeLayoutParserBoundaryRepository();
+    write(root, 'packages/docx/src/layout/resources.ts', source);
+
+    const result = runChecker(root, '--final');
+
+    assert.notEqual(result.status, 0, source);
+    assert.match(result.output, /LAYOUT_PARSER_MODEL_DEPENDENCY/, source);
+  }
+});
+
+test('rejects non-literal dynamic and CommonJS edges in the parser gateway', () => {
+  for (const source of [
+    "export const load = (name: string) => import(`../${name}.js`);\n",
+    "export const load = (name: string) => require('../' + name + '.js');\n",
+  ]) {
+    const root = initializeLayoutParserBoundaryRepository();
+    write(root, 'packages/docx/src/layout/resources.ts', source);
+
+    const result = runChecker(root, '--final');
+
+    assert.notEqual(result.status, 0, source);
+    assert.match(result.output, /NON_LITERAL_LAYOUT_MODULE_EDGE/, source);
+    assert.match(result.output, /layout\/resources\.ts/, source);
+  }
 });
 
 test('rejects any paint runtime dependency outside the paint owner directory', () => {
