@@ -234,8 +234,8 @@ Use the roadmap review gate.
 - Create: `rule-tests/no-docx-migration-flags-test.yml`
 - Create: `packages/docx/src/layout/architecture.test.ts`
 - Modify: `scripts/check-docx-public-api.mjs`
-- Delete: `scripts/check-docx-layout-boundaries.mjs`
-- Delete: `scripts/check-docx-layout-boundaries.test.mjs`
+- Modify: `scripts/check-docx-layout-boundaries.mjs`
+- Modify: `scripts/check-docx-layout-boundaries.test.mjs`
 - Delete: `scripts/docx-layout-boundary-baseline.json`
 - Create: `.agents/skills/docx-architecture-audit/SKILL.md`
 - Modify: `sgconfig.yml`
@@ -354,14 +354,16 @@ public APIs remain compatible. Run this skill for C3, major DOCX architecture
 changes, and periodic audits rather than pretending semantic review is fully
 enforceable on every CI run.
 
-- [ ] **Step 7: Fix findings, reverify, commit, and merge PR C3**
+- [ ] **Step 7: Clean up, fix findings, reverify the final tree, commit, and merge PR C3**
 
 Commit subject: `refactor(docx): complete immutable layout pipeline`.
-Repeat Steps 4–6 after material fixes, then merge with `gh pr merge <number> --merge`.
-Before committing, delete the migration roadmap and Series A/B/C execution plans;
+Before the final verification, delete the migration roadmap and Series A/B/C execution plans;
 their durable architectural decisions remain in `docx-layout-engine-redesign.md`,
 while Issue #1037 retains the implementation history. Remove the transitional
-boundary checker and baseline. Retain only deterministic static/API/contract
-gates in CI, and retain the semantic architecture audit as a repository skill.
-Close Issue #1037 only after GitHub shows PR C3 merged. Do not create a release
-or tag.
+boundary baseline, which puts `check-docx-layout-boundaries.mjs` into permanent
+final mode; retain that checker and its test for transitive import ownership.
+Retain only deterministic static/API/contract gates in CI, and retain the
+semantic architecture audit as a repository skill. Repeat Steps 4–6 against the
+exact post-cleanup tree after every material fix, then merge with
+`gh pr merge <number> --merge`. Close Issue #1037 only after GitHub shows PR C3
+merged. Do not create a release or tag.

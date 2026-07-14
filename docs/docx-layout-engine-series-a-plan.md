@@ -348,7 +348,8 @@ Use the roadmap review gate.
 **Specification evidence:** ECMA-376 §17.3.1.13 (`w:jc`), §17.3.1.38
 (`w:tabs`), §17.3.1.33 (`w:spacing`), §17.3.1.19/§17.9 numbering,
 §17.3.2.41 (`w:vanish`), §17.16 fields, §17.6.20 text direction,
-§20.4.2.7 (`wp:inline`), and §20.4.2.3 (`wp:anchor`). Picture bullets follow
+§20.4.2.8 (`wp:inline`), §20.4.2.7 (`wp:extent`), and §20.4.2.3
+(`wp:anchor`). Picture bullets follow
 §17.9.9/§17.9.20. DrawingML chart paint remains the shared core implementation;
 DOCX owns only inline/anchor flow placement.
 
@@ -476,7 +477,7 @@ Use the roadmap review gate.
 - Consumes: `layoutParagraph` and A1's recursive `layoutFlowBlocks` coordinator.
 - Produces: `TableLayout`, `TableRowLayout`, `TableCellLayout`, `ResolvedBorderSegment`, `layoutTable`, and `paintTableLayout`.
 
-**Specification evidence:** ECMA-376 §17.4.37 (`w:tbl`), §17.4.47
+**Specification evidence:** ECMA-376 §17.4.37 (`w:tbl`), §17.4.48
 (`w:tblGrid`), §17.4.52 (`w:tblLayout`), §17.4.80 (`w:trHeight`),
 §17.4.84 (`w:vMerge`), §17.4.68 (`w:tcMar`), §17.4.71 (`w:tcW`), and
 the table/cell border conflict rules in §17.4 define the retained geometry.
