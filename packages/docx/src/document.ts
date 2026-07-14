@@ -32,6 +32,7 @@ import type {
   RenderWorkerResponse,
   WireRenderPageOptions,
 } from './worker-protocol';
+import { normalizeInternalDocumentModel } from './parser-model.js';
 
 /** Options for {@link DocxDocument.load}. Extends the shared load-options type
  *  from `@silurus/ooxml-core` (`useGoogleFonts`, `maxZipEntryBytes`) with the
@@ -225,9 +226,10 @@ export class DocxDocument {
       // The model arrives as transferred UTF-8 JSON bytes; decode + parse once
       // here (the only serialization on the parse-mode path).
       const { documentJson } = res as Extract<WorkerResponse, { type: 'parsed' }>;
-      this._document = JSON.parse(
+      const parsed = JSON.parse(
         new TextDecoder().decode(new Uint8Array(documentJson)),
       ) as DocxDocumentModel;
+      this._document = normalizeInternalDocumentModel(parsed).document;
     }
   }
 

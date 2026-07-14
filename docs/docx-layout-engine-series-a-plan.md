@@ -234,15 +234,26 @@ Use the roadmap review gate and merge only with all checks and findings clear.
 - Produces: the final `TextLayoutService`, `ImageMetadataService`, `MathMetadataService`, `FontResolver`, `LayoutOptions`, `layoutOptionsKey`, `convergeLayout`, and parse-error `DocumentLayout` contracts used unchanged by all later PRs.
 
 ```ts
-export interface FontResolution { readonly requestedFamily: string; readonly resolvedFamily: string; readonly source: 'embedded' | 'local' | 'google' | 'substitute' | 'generic'; readonly weight: number; readonly style: 'normal' | 'italic'; readonly diagnostics: readonly LayoutDiagnostic[] }
+export interface CanvasFontRoute { readonly familyList: string; readonly scope: 'registered' | 'native' | 'generic'; readonly fingerprint: string }
+export interface FontResolution { readonly requestedFamily: string; readonly resolvedFamily: string; readonly source: 'embedded' | 'local' | 'google' | 'substitute' | 'native' | 'generic'; readonly route: CanvasFontRoute; readonly weight: number; readonly style: 'normal' | 'italic'; readonly diagnostics: readonly LayoutDiagnostic[] }
 export interface FontResolver { resolve(request: Readonly<FontRequest>): FontResolution }
-export interface TextLayoutService { readonly fingerprint: string; shape(request: Readonly<TextShapeRequest>): TextShapeResult }
+export interface TextLayoutService { readonly fingerprint: string; resolve(request: Readonly<TextFontResolveRequest>): FontResolution; shape(request: Readonly<TextShapeRequest>): TextShapeResult }
 export interface ImageMetadataService { readonly fingerprint: string; resolve(resourceKey: string): Readonly<{ widthPt: number; heightPt: number; mimeType: string }> }
 export interface MathMetadataService { readonly fingerprint: string; resolve(resourceKey: string): DeepReadonly<MathLayoutResource> }
 export interface LayoutOptions { readonly currentDateMs: number }
 export function layoutOptionsKey(options: LayoutOptions, services: LayoutServices): string;
 export function convergeLayout(seed: LayoutIteration, step: (iteration: LayoutIteration) => LayoutIteration, limit: number): LayoutIteration;
 ```
+
+`CanvasFontRoute` is a format-neutral, immutable CSS request created and
+serialized by core. DOCX retains Word-specific four-slot/theme/fontTable policy.
+An uninventoried authored family uses an engine-scoped `native` route with an
+explicit metadata-derived generic tail; this makes no portable availability or
+geometry claim. Inventory faces are exact `(family, weight, style)` tuples, not
+Cartesian products. Service fingerprints identify immutable resources and route
+syntax; A3's retained/document-layout geometry is the downstream boundary. It
+preserves same-browser main/worker parity without claiming cross-browser Canvas
+geometry portability; cross-browser guarantees remain semantic invariants.
 
 **Specification evidence:** ECMA-376 §17.3.2.26 (`w:rFonts`), §17.8 embedded
 fonts, §17.16.5.13/§17.16.5.65 DATE/TIME, §17.16.5.42 NUMPAGES and

@@ -3,6 +3,10 @@ import { stableFingerprint } from './fingerprint.js';
 import type { BodyElement, DocRun, DocTable, DocxDocumentModel, ShapeRun } from '../types.js';
 import type { MathNode } from '@silurus/ooxml-core';
 import { rasterExceedsBudget, sniffRasterDimensions } from '@silurus/ooxml-core';
+import { imageResourceKey, mathResourceKey } from './source-key.js';
+import { normalizeInternalDocumentModel } from '../parser-model.js';
+
+export { imageResourceKey, mathResourceKey } from './source-key.js';
 
 export interface ImageLayoutResource {
   readonly widthPt: number;
@@ -27,8 +31,7 @@ export interface MathOccurrence {
   readonly nodes: MathNode[];
   readonly display: boolean;
   readonly source: SourceRef;
-  readonly runs: readonly DocRun[];
-  readonly runIndex: number;
+  readonly resourceKey: string;
 }
 
 export interface ImageMetadataService {
@@ -39,18 +42,6 @@ export interface ImageMetadataService {
 export interface MathMetadataService {
   readonly fingerprint: string;
   resolve(resourceKey: string): DeepReadonly<MathLayoutResource>;
-}
-
-function sourceKey(source: SourceRef): string {
-  return `${source.story}:${encodeURIComponent(source.storyInstance)}:${source.path.join('.')}`;
-}
-
-export function imageResourceKey(source: SourceRef, partPath: string): string {
-  return `image:${sourceKey(source)}:${encodeURIComponent(partPath)}`;
-}
-
-export function mathResourceKey(source: SourceRef, localName: string): string {
-  return `math:${sourceKey(source)}:${encodeURIComponent(localName)}`;
 }
 
 export function bodyMathOccurrences(
@@ -68,8 +59,10 @@ export function bodyMathOccurrences(
             nodes: run.nodes,
             display: run.display,
             source: { story, storyInstance, path: [...path, runIndex] },
-            runs: element.runs,
-            runIndex,
+            resourceKey: mathResourceKey(
+              { story, storyInstance, path: [...path, runIndex] },
+              run.display ? 'display' : 'inline',
+            ),
           });
         });
       } else if (element.type === 'table') {
@@ -89,30 +82,7 @@ export function bodyMathOccurrences(
  * traversal when that model begins retaining MathNode rather than silently
  * resolving an absent resource. */
 export function documentMathOccurrences(doc: DocxDocumentModel): MathOccurrence[] {
-  const found = bodyMathOccurrences(doc.body, 'body', 'body');
-  const add = (
-    body: BodyElement[],
-    story: 'header' | 'footer' | 'footnote' | 'endnote',
-    storyInstance: string,
-  ) => found.push(...bodyMathOccurrences(body, story, storyInstance));
-  for (const kind of ['default', 'first', 'even'] as const) {
-    const header = doc.headers[kind];
-    const footer = doc.footers[kind];
-    if (header) add(header.body, 'header', kind);
-    if (footer) add(footer.body, 'footer', kind);
-  }
-  doc.body.forEach((element, elementIndex) => {
-    if (element.type !== 'sectionBreak') return;
-    for (const kind of ['default', 'first', 'even'] as const) {
-      const header = element.headers?.[kind];
-      const footer = element.footers?.[kind];
-      if (header) add(header.body, 'header', `section:${elementIndex}:${kind}`);
-      if (footer) add(footer.body, 'footer', `section:${elementIndex}:${kind}`);
-    }
-  });
-  for (const note of doc.footnotes ?? []) add(note.content, 'footnote', note.id);
-  for (const note of doc.endnotes ?? []) add(note.content, 'endnote', note.id);
-  return found;
+  return [...normalizeInternalDocumentModel(doc).mathOccurrences];
 }
 
 function finiteNonNegative(value: number, name: string): number {
@@ -214,6 +184,17 @@ export function documentImageMetadataRecords(doc: DocxDocumentModel): ImageMetad
     body.forEach((element, elementIndex) => {
       const path = [...prefix, elementIndex];
       if (element.type === 'paragraph') {
+        const numbering = element.numbering;
+        if (numbering?.picBulletImagePath && numbering.picBulletMimeType
+          && numbering.picBulletWidthPt != null && numbering.picBulletHeightPt != null) {
+          add(
+            { story, storyInstance, path },
+            numbering.picBulletImagePath,
+            numbering.picBulletMimeType,
+            numbering.picBulletWidthPt,
+            numbering.picBulletHeightPt,
+          );
+        }
         element.runs.forEach((run, runIndex) => visitRun(run, { story, storyInstance, path: [...path, runIndex] }));
       } else if (element.type === 'table') {
         visitTable(element, story, storyInstance, path);
@@ -235,5 +216,7 @@ export function documentImageMetadataRecords(doc: DocxDocumentModel): ImageMetad
     if (header) visitBody(header.body, 'header', kind);
     if (footer) visitBody(footer.body, 'footer', kind);
   }
+  for (const note of doc.footnotes ?? []) visitBody(note.content, 'footnote', note.id);
+  for (const note of doc.endnotes ?? []) visitBody(note.content, 'endnote', note.id);
   return records;
 }

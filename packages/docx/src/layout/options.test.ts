@@ -1,10 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import { layoutOptionsKey, normalizeLayoutOptions } from './options.js';
 import type { LayoutServices } from './types.js';
+import { createCanvasFontRoute } from '@silurus/ooxml-core';
 
 function services(text: string, images: string, math: string): LayoutServices {
   return {
-    text: { fingerprint: text, localMetrics: {}, shape: () => ({ advancePt: 0, ascentPt: 0, descentPt: 0, spans: [], diagnostics: [] }) },
+    text: {
+      fingerprint: text,
+      localMetrics: {},
+      resolve: () => ({
+        requestedFamily: 'sans-serif', resolvedFamily: 'sans-serif',
+        route: createCanvasFontRoute('sans-serif', 'generic'),
+        source: 'generic', weight: 400, style: 'normal', diagnostics: [], genericFamily: 'sans-serif',
+      }),
+      shape: () => ({ advancePt: 0, ascentPt: 0, descentPt: 0, spans: [], graphemeBoundaries: [0], diagnostics: [] }),
+    },
     images: { fingerprint: images, resolve: () => ({ widthPt: 1, heightPt: 1, mimeType: 'image/png' }) },
     math: { fingerprint: math, resolve: () => ({ resourceKey: 'm', widthEm: 1, ascentEm: 1, descentEm: 0, diagnostics: [] }) },
   };

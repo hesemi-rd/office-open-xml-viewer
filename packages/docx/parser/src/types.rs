@@ -1269,6 +1269,26 @@ pub enum PathCmd {
 
 #[derive(Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct RunFontAxisValues {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ascii: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub high_ansi: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub east_asia: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub complex_script: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RunFontSlots {
+    pub direct: RunFontAxisValues,
+    pub theme: RunFontAxisValues,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct FieldRun {
     /// "page" | "numPages" | "other"
     pub field_type: String,
@@ -1284,6 +1304,10 @@ pub struct FieldRun {
     pub font_size: f64,
     pub color: Option<String>,
     pub font_family: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_high_ansi: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_slots: Option<RunFontSlots>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_family_east_asia: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1346,6 +1370,11 @@ pub struct TextRun {
     pub font_size: f64,
     pub color: Option<String>,
     pub font_family: Option<String>,
+    /// ECMA-376 §17.3.2.26 hAnsi axis, preserved independently from ascii.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_high_ansi: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_slots: Option<RunFontSlots>,
     /// ECMA-376 §17.3.2.26 eastAsia axis (`<w:rFonts w:eastAsia>`), resolved
     /// through the style chain + docDefaults. CJK characters in this run render
     /// with this family; `font_family` keeps the conflated single-font fallback

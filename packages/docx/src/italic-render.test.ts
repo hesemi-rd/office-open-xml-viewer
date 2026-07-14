@@ -128,9 +128,9 @@ describe('run italic axis at paint time (§17.3.2.16 w:i / §17.3.2.17 w:iCs)', 
       textRun('полужирный', { bold: true }),
       textRun('курсивный', { italic: true }),
     ])]);
-    expect(fonts.get('обычный')).toMatch(/^normal normal /);
-    expect(fonts.get('полужирный')).toMatch(/^normal bold /);
-    expect(fonts.get('курсивный')).toMatch(/^italic normal /);
+    expect(fonts.get('обычный')).toMatch(/^normal 400 /);
+    expect(fonts.get('полужирный')).toMatch(/^normal 700 /);
+    expect(fonts.get('курсивный')).toMatch(/^italic 400 /);
   });
 
   it('inert CS metadata (szCs + langBidi) does not shadow w:i on non-CS text', async () => {
@@ -150,7 +150,7 @@ describe('run italic axis at paint time (§17.3.2.16 w:i / §17.3.2.17 w:iCs)', 
     const fonts = await paintFonts([para([
       textRun('курсив', { italic: true, cs: true, italicCs: false, fontSizeCs: FONT_PX }),
     ])]);
-    expect(fonts.get('курсив')).toMatch(/^normal normal /);
+    expect(fonts.get('курсив')).toMatch(/^normal 400 /);
   });
 
   it('force-CS run (w:cs) with w:i and absent w:iCs paints upright (#937 Case A)', async () => {
@@ -161,7 +161,7 @@ describe('run italic axis at paint time (§17.3.2.16 w:i / §17.3.2.17 w:iCs)', 
     const fonts = await paintFonts([para([
       textRun('курсив', { italic: true, cs: true, fontSizeCs: FONT_PX }),
     ])]);
-    expect(fonts.get('курсив')).toMatch(/^normal normal /);
+    expect(fonts.get('курсив')).toMatch(/^normal 400 /);
   });
 
   it('w:rtl run with w:i and absent w:iCs paints upright (#937 Case C)', async () => {
@@ -183,6 +183,6 @@ describe('run italic axis at paint time (§17.3.2.16 w:i / §17.3.2.17 w:iCs)', 
     const fonts = await paintFonts([para([
       textRun('نص', { bold: true, rtl: true, fontSizeCs: FONT_PX, langBidi: 'ar-sa' }),
     ])]);
-    expect(fonts.get('نص')).toMatch(/^normal normal /);
+    expect(fonts.get('نص')).toMatch(/^normal 400 /);
   });
 });

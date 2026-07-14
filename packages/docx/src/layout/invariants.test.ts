@@ -12,6 +12,7 @@ import type {
   SourceRef,
 } from './types.js';
 import type { SectionLayoutContext } from '../layout-context.js';
+import { createCanvasFontRoute } from '@silurus/ooxml-core';
 
 const source = (index: number): SourceRef => ({
   story: 'body',
@@ -56,7 +57,12 @@ function serviceStubs(): LayoutServices {
     text: {
       fingerprint: 'text',
       localMetrics: {},
-      shape: () => ({ advancePt: 0, ascentPt: 0, descentPt: 0, spans: [], diagnostics: [] }),
+      resolve: () => ({
+        requestedFamily: 'sans-serif', resolvedFamily: 'sans-serif',
+        route: createCanvasFontRoute('sans-serif', 'generic'),
+        source: 'generic', weight: 400, style: 'normal', diagnostics: [], genericFamily: 'sans-serif',
+      }),
+      shape: () => ({ advancePt: 0, ascentPt: 0, descentPt: 0, spans: [], graphemeBoundaries: [0], diagnostics: [] }),
     },
     images: {
       fingerprint: 'images',

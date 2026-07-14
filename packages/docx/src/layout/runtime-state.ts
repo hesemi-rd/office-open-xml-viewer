@@ -1,6 +1,4 @@
 import type { DeepReadonly, DocumentLayout, LayoutServices } from './types.js';
-import type { DocRun } from '../types.js';
-import { mathResourceKey, type MathOccurrence } from './resources.js';
 
 export interface DocumentLayoutRuntimeState {
   services: LayoutServices | null;
@@ -75,42 +73,4 @@ export function attachPrivateResourceLookup<T>(
 
 export function privateResourceLookupOf<T>(owner: object): ImmutableResourceLookup<T> | undefined {
   return privateResourceLookups.get(owner) as ImmutableResourceLookup<T> | undefined;
-}
-
-export interface MathOccurrenceLookup {
-  resourceKey(runs: readonly DocRun[], runIndex: number): string;
-}
-
-const mathOccurrenceLookups = new WeakMap<object, MathOccurrenceLookup>();
-
-/** Address parser runs by their owning array and ordinal. Formula contents are
- * deliberately absent from this private registry and every public snapshot. */
-export function attachMathOccurrenceLookup(
-  owner: object,
-  occurrences: readonly MathOccurrence[],
-): void {
-  if (mathOccurrenceLookups.has(owner)) throw new Error('Math occurrence lookup is already attached');
-  const byRuns = new WeakMap<readonly DocRun[], ReadonlyMap<number, string>>();
-  const mutable = new Map<readonly DocRun[], Map<number, string>>();
-  for (const occurrence of occurrences) {
-    const entries = mutable.get(occurrence.runs) ?? new Map<number, string>();
-    if (entries.has(occurrence.runIndex)) throw new Error('Duplicate math run occurrence');
-    entries.set(
-      occurrence.runIndex,
-      mathResourceKey(occurrence.source, occurrence.display ? 'display' : 'inline'),
-    );
-    mutable.set(occurrence.runs, entries);
-  }
-  for (const [runs, entries] of mutable) byRuns.set(runs, new Map(entries));
-  mathOccurrenceLookups.set(owner, Object.freeze({
-    resourceKey(runs: readonly DocRun[], runIndex: number): string {
-      const key = byRuns.get(runs)?.get(runIndex);
-      if (!key) throw new Error(`Unknown math occurrence at run ${runIndex}`);
-      return key;
-    },
-  }));
-}
-
-export function mathOccurrenceLookupOf(owner: object): MathOccurrenceLookup | undefined {
-  return mathOccurrenceLookups.get(owner);
 }

@@ -102,7 +102,7 @@ describe('layout resource snapshots', () => {
     const image = (widthPt: number, heightPt: number) => ({
       type: 'image', imagePath: 'word/media/shared.png', mimeType: 'image/png', widthPt, heightPt,
     });
-    const paragraph = (runs: unknown[]) => ({ type: 'paragraph', runs });
+    const paragraph = (runs: unknown[], numbering: unknown = null) => ({ type: 'paragraph', runs, numbering });
     const doc = {
       body: [paragraph([
         image(10, 20),
@@ -111,9 +111,14 @@ describe('layout resource snapshots', () => {
             text: '', imagePath: 'word/media/shared.png', mimeType: 'image/png', imageWidthPt: 5, imageHeightPt: 6,
           }],
         },
-      ])],
+      ], {
+        picBulletImagePath: 'word/media/bullet.gif', picBulletMimeType: 'image/gif',
+        picBulletWidthPt: 7, picBulletHeightPt: 8,
+      })],
       headers: { default: { body: [paragraph([image(11, 21)])] }, first: null, even: null },
       footers: { default: { body: [paragraph([image(12, 22)])] }, first: null, even: null },
+      footnotes: [{ id: '4', content: [paragraph([image(13, 23)])] }],
+      endnotes: [{ id: '9', content: [paragraph([image(14, 24)])] }],
     } as unknown as DocxDocumentModel;
 
     const records = documentImageMetadataRecords(doc);
@@ -122,6 +127,9 @@ describe('layout resource snapshots', () => {
       { resourceKey: imageResourceKey({ story: 'header', storyInstance: 'default', path: [0, 0] }, 'word/media/shared.png'), widthPt: 11, heightPt: 21, mimeType: 'image/png' },
       { resourceKey: imageResourceKey({ story: 'footer', storyInstance: 'default', path: [0, 0] }, 'word/media/shared.png'), widthPt: 12, heightPt: 22, mimeType: 'image/png' },
       { resourceKey: imageResourceKey({ story: 'textbox', storyInstance: 'body:body:0.1', path: [0] }, 'word/media/shared.png'), widthPt: 5, heightPt: 6, mimeType: 'image/png' },
+      { resourceKey: imageResourceKey({ story: 'body', storyInstance: 'body', path: [0] }, 'word/media/bullet.gif'), widthPt: 7, heightPt: 8, mimeType: 'image/gif' },
+      { resourceKey: imageResourceKey({ story: 'footnote', storyInstance: '4', path: [0, 0] }, 'word/media/shared.png'), widthPt: 13, heightPt: 23, mimeType: 'image/png' },
+      { resourceKey: imageResourceKey({ story: 'endnote', storyInstance: '9', path: [0, 0] }, 'word/media/shared.png'), widthPt: 14, heightPt: 24, mimeType: 'image/png' },
     ]));
     expect(new Set(records.map((record) => record.resourceKey)).size).toBe(records.length);
   });

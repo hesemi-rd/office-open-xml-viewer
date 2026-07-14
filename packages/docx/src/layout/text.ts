@@ -1,7 +1,6 @@
 import type { LayoutDiagnostic } from './types.js';
 import {
   graphemeClusterOffsets,
-  classifyFontGeneric,
   normalizeLocalFontMetricFamily,
   type ResolvedLocalFontMetric,
 } from '@silurus/ooxml-core';
@@ -10,6 +9,7 @@ import type {
   FontResolver,
   FontStyle,
 } from './font-service.js';
+import type { CanvasFontRoute } from '@silurus/ooxml-core';
 import { stableFingerprint } from './fingerprint.js';
 
 export type FontScriptSlot = 'ascii' | 'highAnsi' | 'eastAsia' | 'complexScript';
@@ -44,15 +44,23 @@ export interface TextShapeRequest {
   readonly measure?: boolean;
 }
 
+export interface TextFontResolveRequest {
+  readonly fonts: TextFontSlots;
+  readonly themeFonts?: TextFontSlots;
+  readonly slot: FontScriptSlot;
+  readonly weight?: number;
+  readonly style?: FontStyle;
+  readonly genericFamily?: 'serif' | 'sans-serif' | 'monospace';
+}
+
 export interface GlyphMeasureRequest {
   readonly text: string;
-  readonly resolvedFamily: string;
+  readonly fontRoute: CanvasFontRoute;
   readonly fontSizePt: number;
   readonly weight: number;
   readonly style: FontStyle;
   readonly letterSpacingPt: number;
   readonly kerning?: boolean;
-  readonly genericFamily: 'serif' | 'sans-serif' | 'monospace';
 }
 
 export interface GlyphMeasurement {
@@ -71,17 +79,23 @@ export interface TextShapeSpan extends GlyphMeasurement {
   readonly start: number;
   readonly end: number;
   readonly script: FontScriptSlot;
+  /** False when this scalar span continues the preceding grapheme cluster. */
+  readonly breakBefore: boolean;
   readonly font: FontResolution;
+  readonly fontRoute: CanvasFontRoute;
 }
 
 export interface TextShapeResult extends GlyphMeasurement {
   readonly spans: readonly TextShapeSpan[];
+  /** UTF-16 offsets at which line splitting may legally separate graphemes. */
+  readonly graphemeBoundaries: readonly number[];
   readonly diagnostics: readonly LayoutDiagnostic[];
 }
 
 export interface TextLayoutService {
   readonly fingerprint: string;
   readonly localMetrics: Readonly<Record<string, Readonly<ResolvedLocalFontMetric>>>;
+  resolve(request: Readonly<TextFontResolveRequest>): FontResolution;
   shape(request: Readonly<TextShapeRequest>): TextShapeResult;
 }
 
@@ -93,9 +107,8 @@ export interface TextLayoutServiceInput {
   readonly genericFamilies?: Readonly<Record<string, 'serif' | 'sans-serif' | 'monospace'>>;
 }
 
-/** Generic fallback for an unavailable authored DOCX face. fontTable
- * family/pitch metadata is authoritative; the shared OOXML name classifier is
- * used only for absent or `auto` entries. */
+/** Generic tail for an authored DOCX face. Only fontTable family/pitch metadata
+ * is evidence; absent or `auto` entries deliberately use the fixed sans tail. */
 export function classifyDocxFontGeneric(
   family: string | null | undefined,
   fontFamilyClasses: Readonly<Record<string, string>> = {},
@@ -106,9 +119,7 @@ export function classifyDocxFontGeneric(
   if (tableClass === 'roman') return 'serif';
   if (tableClass === 'swiss') return 'sans-serif';
   if (tableClass === 'modern' && fontFamilyPitches[family] === 'fixed') return 'monospace';
-  if (tableClass && tableClass !== 'auto') return 'sans-serif';
-  const generic = classifyFontGeneric(family);
-  return generic === 'serif' ? 'serif' : generic === 'mono' ? 'monospace' : 'sans-serif';
+  return 'sans-serif';
 }
 
 const LOCAL_METRIC_SNAPSHOT = Symbol('docx.localMetricSnapshot');
@@ -231,11 +242,14 @@ function scriptSlot(
   return tableSlot;
 }
 
-function requestedFamily(request: Readonly<TextShapeRequest>, slot: FontScriptSlot): string | null | undefined {
-  return request.fonts[slot]
-    ?? request.themeFonts?.[slot]
-    ?? request.fonts.ascii
-    ?? request.themeFonts?.ascii;
+function requestedFamily(
+  request: Readonly<Pick<TextShapeRequest, 'fonts' | 'themeFonts'>>,
+  slot: FontScriptSlot,
+): string | null | undefined {
+  return request.themeFonts?.[slot]
+    ?? request.fonts[slot]
+    ?? request.themeFonts?.ascii
+    ?? request.fonts.ascii;
 }
 
 /**
@@ -257,20 +271,38 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
     eastAsiaFontCharsets: input.eastAsiaFontCharsets ?? {},
     genericFamilies,
   });
+  const resolve = (request: Readonly<TextFontResolveRequest>): FontResolution => {
+    const authoredFamily = requestedFamily(request, request.slot);
+    const genericFamily = authoredFamily
+      ? genericFamilies[authoredFamily.trim().toLocaleLowerCase('en-US')]
+        ?? request.genericFamily
+        ?? 'sans-serif'
+      : request.genericFamily;
+    return input.fonts.resolve({
+      requestedFamily: authoredFamily,
+      genericFamily,
+      weight: request.weight,
+      style: request.style,
+    });
+  };
   return Object.freeze({
     fingerprint,
     localMetrics,
+    resolve,
     shape(request: Readonly<TextShapeRequest>): TextShapeResult {
       if (!Number.isFinite(request.fontSizePt) || request.fontSizePt < 0) {
         throw new RangeError('fontSizePt must be a finite non-negative number');
       }
-      const grouped: { text: string; start: number; end: number; script: FontScriptSlot }[] = [];
-      const boundaries = [0, ...graphemeClusterOffsets(request.text), request.text.length]
-        .filter((offset, index, values) => index === 0 || offset !== values[index - 1]);
-      for (let index = 0; index < boundaries.length - 1; index += 1) {
-        const start = boundaries[index];
-        const end = boundaries[index + 1];
-        const character = request.text.slice(start, end);
+      const grouped: {
+        text: string; start: number; end: number; script: FontScriptSlot; breakBefore: boolean;
+      }[] = [];
+      const graphemeBoundaries = Object.freeze(
+        [...new Set([0, ...graphemeClusterOffsets(request.text), request.text.length])].sort((a, b) => a - b),
+      );
+      const graphemeStarts = new Set(graphemeBoundaries);
+      let start = 0;
+      for (const character of request.text) {
+        const end = start + character.length;
         const eastAsiaFamily = requestedFamily(request, 'eastAsia');
         const eastAsiaCharset = request.eastAsiaFontCharset
           ?? (eastAsiaFamily
@@ -288,23 +320,19 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
           previous.text += character;
           previous.end = end;
         } else {
-          grouped.push({ text: character, start, end, script });
+          grouped.push({ text: character, start, end, script, breakBefore: graphemeStarts.has(start) });
         }
+        start = end;
       }
 
       const spans = grouped.map((group): TextShapeSpan => {
-        const authoredFamily = requestedFamily(request, group.script);
-        const nameGeneric = authoredFamily ? classifyFontGeneric(authoredFamily) : 'sans';
-        const genericFamily = authoredFamily
-          ? genericFamilies[authoredFamily.trim().toLocaleLowerCase('en-US')]
-            ?? request.genericFamily
-            ?? (nameGeneric === 'serif' ? 'serif' : nameGeneric === 'mono' ? 'monospace' : 'sans-serif')
-          : request.genericFamily;
-        const font = input.fonts.resolve({
-          requestedFamily: authoredFamily,
-          genericFamily,
+        const font = resolve({
+          fonts: request.fonts,
+          themeFonts: request.themeFonts,
+          slot: group.script,
           weight: request.weight,
           style: request.style,
+          genericFamily: request.genericFamily,
         });
         const measurement = request.measure === false ? {
           advancePt: 0,
@@ -312,15 +340,16 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
           descentPt: 0,
         } : input.measurer.measure({
           text: group.text,
-          resolvedFamily: font.resolvedFamily,
+          fontRoute: font.route,
           fontSizePt: request.fontSizePt,
           weight: font.weight,
           style: font.style,
           letterSpacingPt: request.letterSpacingPt ?? 0,
           kerning: request.kerning,
-          genericFamily: font.genericFamily,
         });
-        return Object.freeze({ ...group, ...measurement, font });
+        return Object.freeze({
+          ...group, ...measurement, font, fontRoute: font.route,
+        });
       });
       const diagnostics = spans.flatMap((span) => span.font.diagnostics);
       return Object.freeze({
@@ -328,6 +357,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
         ascentPt: Math.max(0, ...spans.map((span) => span.ascentPt)),
         descentPt: Math.max(0, ...spans.map((span) => span.descentPt)),
         spans: Object.freeze(spans),
+        graphemeBoundaries,
         diagnostics: Object.freeze(diagnostics),
       });
     },

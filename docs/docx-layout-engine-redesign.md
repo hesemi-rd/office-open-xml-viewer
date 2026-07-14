@@ -133,6 +133,13 @@ export interface LayoutOptions {
 ```
 
 The text service is responsible for font selection, shaping, and measurement.
+It preserves the four independent WordprocessingML `rFonts` axes, applies theme
+precedence within each cascaded slot, and returns per-scalar spans plus legal
+grapheme boundaries. Each span carries one immutable core `CanvasFontRoute`;
+measurement, kashida/vertical probes, and paint serialize that same complete CSS
+family list. Exact registered tuples win first. Otherwise an authored family is
+an engine-scoped native CSS request with a fontTable-derived generic tail (or the
+fixed sans default), not a claim that a local face was discovered.
 The image service resolves intrinsic dimensions and metadata. Services are inputs
 only; functions, Canvas objects, and resource handles never enter the layout
 result.
@@ -143,6 +150,11 @@ field convergence. Geometry-affecting render options are normalized before layou
 and participate in a stable layout cache key together with fingerprints derived
 from the injected service instances; callers cannot provide service fingerprints
 independently. Paint-only width, DPR, and color do not participate.
+
+Math resource addressing is normalized once at the parser-model boundary. That
+pure traversal shallow-clones only math-bearing ancestry and attaches typed
+plain-data `SourceRef`/resource keys to internal math runs; neither parser-array
+identity nor a WeakMap participates in layout.
 
 ### Document layout
 

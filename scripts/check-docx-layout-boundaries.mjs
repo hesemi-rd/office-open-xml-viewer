@@ -39,7 +39,7 @@ const PLANNED_NON_LAYOUT_MODULES = new Set([
 ]);
 
 const SHARED_PAINT_IMPORTS = new Map([
-  ['@silurus/ooxml-core', new Set(['renderChart'])],
+  ['@silurus/ooxml-core', new Set(['renderChart', 'canvasFontString'])],
 ]);
 
 const LEGACY_SYMBOLS = [
@@ -151,6 +151,8 @@ function moduleEdges(path) {
         typeOnly: importIsTypeOnly(statement),
         literal: true,
         importedNames,
+        aliased: !!(bindings && ts.isNamedImports(bindings)
+          && bindings.elements.some((element) => element.propertyName && element.propertyName.text !== element.name.text)),
         bare: !statement.importClause,
       });
     }
@@ -239,6 +241,7 @@ function paintBoundaryViolations(root) {
         if (!edge.specifier.startsWith('.')) {
           const allowedNames = SHARED_PAINT_IMPORTS.get(edge.specifier);
           const allowed = !edge.typeOnly
+            && !edge.aliased
             && allowedNames
             && edge.importedNames?.length > 0
             && edge.importedNames?.every((name) => allowedNames.has(name));
@@ -418,6 +421,89 @@ function normalizedComputePagesHash(node, source) {
   return createHash('sha256').update(JSON.stringify(shape(node))).digest('hex');
 }
 
+/** A2 routes service-produced shape text through the same immutable Canvas
+ * route used by measurement. The legacy text-box implementation remains hash
+ * frozen except for appending `s.fontRoute` to existing buildFont calls. */
+function normalizedRenderShapeTextHash(node, source) {
+  const omittedRouteParameters = new Set();
+  const findAllowedRouteParameters = (current) => {
+    if (ts.isVariableDeclaration(current)
+      && ts.isIdentifier(current.name)
+      && current.name.text === 'shapeLineMetrics'
+      && current.initializer
+      && ts.isArrowFunction(current.initializer)) {
+      const tail = current.initializer.parameters.slice(-2);
+      const exact = ['familyRoute?: CanvasFontRoute', 'familyEaRoute?: CanvasFontRoute'];
+      if (tail.length === 2 && tail.every((parameter, index) => (
+        parameter.getText(source).replace(/\s+/g, ' ').trim() === exact[index]
+      ))) {
+        tail.forEach((parameter) => omittedRouteParameters.add(parameter));
+      }
+    }
+    ts.forEachChild(current, findAllowedRouteParameters);
+  };
+  findAllowedRouteParameters(node);
+  const shape = (current) => {
+    if (ts.isVariableStatement(current)
+      && current.declarationList.declarations.length === 1) {
+      const [declaration] = current.declarationList.declarations;
+      if (ts.isIdentifier(declaration.name)
+        && declaration.name.text === 'measureRoute'
+        && current.getText(source).replace(/\s+/g, ' ').trim()
+          === 'const measureRoute = eaIntended > asciiIntended ? familyEaRoute : familyRoute;') {
+        return null;
+      }
+    }
+    if (omittedRouteParameters.has(current)) return null;
+    if (ts.isCallExpression(current)
+      && ts.isIdentifier(current.expression)
+      && current.expression.text === 'buildFont') {
+      const route = current.arguments.at(-1);
+      const hasAllowedRoute = current.arguments.length === 6
+        && route != null
+        && ((ts.isPropertyAccessExpression(route)
+          && ts.isIdentifier(route.expression)
+          && route.expression.text === 's'
+          && route.name.text === 'fontRoute')
+          || (ts.isIdentifier(route) && route.text === 'measureRoute'));
+      const args = hasAllowedRoute ? current.arguments.slice(0, -1) : current.arguments;
+      return [
+        ts.SyntaxKind[current.kind],
+        undefined,
+        shape(current.expression),
+        ...args.map(shape),
+      ];
+    }
+    if (ts.isCallExpression(current)
+      && ts.isIdentifier(current.expression)
+      && current.expression.text === 'shapeLineMetrics') {
+      const [fontRoute, eaFloorRoute] = current.arguments.slice(-2);
+      const fontRouteText = fontRoute?.getText(source);
+      const eaFloorRouteText = eaFloorRoute?.getText(source);
+      const hasAllowedRoutes = current.arguments.length >= 3
+        && (fontRouteText === 's.fontRoute' || fontRouteText === 'tallest?.fontRoute')
+        && (eaFloorRouteText === 's.eaFloorRoute' || eaFloorRouteText === 'tallest?.eaFloorRoute');
+      const args = hasAllowedRoutes ? current.arguments.slice(0, -2) : current.arguments;
+      return [
+        ts.SyntaxKind[current.kind],
+        undefined,
+        shape(current.expression),
+        ...args.map(shape),
+      ];
+    }
+    const text = ts.isIdentifier(current) || ts.isLiteralExpression(current)
+      ? current.getText(source)
+      : undefined;
+    const children = [];
+    current.forEachChild((child) => {
+      const childShape = shape(child);
+      if (childShape !== null) children.push(childShape);
+    });
+    return [ts.SyntaxKind[current.kind], text, ...children];
+  };
+  return createHash('sha256').update(JSON.stringify(shape(node))).digest('hex');
+}
+
 function declarationInventory(root) {
   const sourceRoot = resolve(root, DOCX_SOURCE);
   const nonLayoutDeclarationKeys = [];
@@ -440,6 +526,8 @@ function declarationInventory(root) {
         if (LEGACY_SYMBOLS.includes(name)) {
           legacyDeclarationHashes[key] = name === 'computePages'
             ? normalizedComputePagesHash(statement, source)
+            : name === 'renderShapeText'
+              ? normalizedRenderShapeTextHash(statement, source)
             : normalizedNodeHash(statement, source);
         }
       }
@@ -501,18 +589,24 @@ function mergeBaseBaseline(root, baseRef) {
   if (shown.status !== 0) return null;
   const value = JSON.parse(shown.stdout);
   if (value.version !== 2) fail('INVALID_BASELINE', `${mergeBase}:${BASELINE_PATH}`);
-  // The stored A1 hash predates the A2-specific normalization. Recompute only
-  // computePages from the immutable merge-base source with today's mechanical
-  // rule; every other declaration continues to use the committed baseline.
+  // The stored A1 hashes predate the A2-specific normalization. Recompute only
+  // the two mechanically constrained declarations from the immutable merge-base
+  // source; every other declaration continues to use the committed baseline.
   const renderer = git(root, ['show', `${mergeBase}:${DOCX_SOURCE}/renderer.ts`], true);
   if (renderer.status === 0) {
     const source = ts.createSourceFile('renderer.ts', renderer.stdout, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-    const declaration = source.statements.find((statement) => (
-      ts.isFunctionDeclaration(statement) && statement.name?.text === 'computePages'
+    const declaration = (name) => source.statements.find((statement) => (
+      ts.isFunctionDeclaration(statement) && statement.name?.text === name
     ));
-    if (declaration) {
+    const computePages = declaration('computePages');
+    if (computePages) {
       value.legacyDeclarationHashes[`${DOCX_SOURCE}/renderer.ts#FunctionDeclaration#computePages`]
-        = normalizedComputePagesHash(declaration, source);
+        = normalizedComputePagesHash(computePages, source);
+    }
+    const renderShapeText = declaration('renderShapeText');
+    if (renderShapeText) {
+      value.legacyDeclarationHashes[`${DOCX_SOURCE}/renderer.ts#FunctionDeclaration#renderShapeText`]
+        = normalizedRenderShapeTextHash(renderShapeText, source);
     }
   }
   return value;
@@ -752,17 +846,24 @@ export function checkDocxLayoutBoundaries(options) {
 
   const baseBaseline = mergeBaseBaseline(root, options.baseRef);
   const headBaseline = readBaseline(baselinePath);
-  if (baseBaseline) assertNoExpansion(headBaseline, baseBaseline);
-  const coordinatorKey = `${DOCX_SOURCE}/renderer.ts#FunctionDeclaration#computePages`;
-  if (baseBaseline?.legacyDeclarationHashes[coordinatorKey]) {
-    // A1's committed baseline intentionally had no coordinator hash. Treat the
-    // immutable merge-base declaration as its virtual baseline entry so A2 can
-    // constrain the one dependency-threading edit without rewriting the file.
-    headBaseline.legacyDeclarationHashes[coordinatorKey]
-      = baseBaseline.legacyDeclarationHashes[coordinatorKey];
+  const normalizedDeclarationKeys = [
+    `${DOCX_SOURCE}/renderer.ts#FunctionDeclaration#computePages`,
+    `${DOCX_SOURCE}/renderer.ts#FunctionDeclaration#renderShapeText`,
+  ];
+  for (const key of normalizedDeclarationKeys) {
+    if (baseBaseline?.legacyDeclarationHashes[key]) {
+      // Treat the immutable merge-base declaration as the virtual baseline so
+      // A2 can constrain exact dependency/route threading without rewriting the
+      // committed A1 baseline.
+      headBaseline.legacyDeclarationHashes[key]
+        = baseBaseline.legacyDeclarationHashes[key];
+    }
+  }
+  if (baseBaseline) {
     headBaseline.legacyDeclarationHashes = Object.fromEntries(
       Object.entries(headBaseline.legacyDeclarationHashes).sort(([left], [right]) => left.localeCompare(right)),
     );
+    assertNoExpansion(headBaseline, baseBaseline);
   }
   const actual = currentAllowances(root);
   if (baseBaseline) assertNoExpansion(actual, baseBaseline);

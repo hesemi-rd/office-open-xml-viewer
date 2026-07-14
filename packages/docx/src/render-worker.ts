@@ -27,6 +27,7 @@ import type { DocumentLayout } from './layout/types.js';
 import { layoutParseErrorPage } from './layout/error-page.js';
 import { deepFreezeDocumentLayout } from './layout/invariants.js';
 import type { RenderWorkerRequest, RenderWorkerResponse, DocumentMeta } from './worker-protocol';
+import { normalizeInternalDocumentModel } from './parser-model.js';
 
 // RB6: self-poison + auto-respawn. A trap during parse (or an in-worker image /
 // embedded-font read) recycles the instance so the next document renders on
@@ -107,11 +108,12 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       // converts a graceful failure into an error response. Render mode consumes
       // the model in-worker, so decode + parse it here (one decode, no
       // passthrough).
-      const model = host.run(() => {
+      const parsedModel = host.run(() => {
         const archive = new DocxArchive(bytes, max);
         host.setArchive(archive);
         return JSON.parse(new TextDecoder().decode(archive.parse())) as DocxDocumentModel;
       });
+      const model = normalizeInternalDocumentModel(parsedModel).document;
       let googleFaces: FontFace[] = [];
       if (req.useGoogleFonts) {
         // Pagination measures text, so fonts must land BEFORE computePages —

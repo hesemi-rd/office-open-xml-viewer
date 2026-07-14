@@ -3017,6 +3017,33 @@ fn extract_text_from_runs(node: roxmltree::Node) -> String {
     out
 }
 
+fn resolved_run_font_slots(fmt: &RunFmt, theme: &ThemeColors) -> Option<RunFontSlots> {
+    let direct = RunFontAxisValues {
+        ascii: fmt.font_family_ascii_direct.clone(),
+        high_ansi: fmt.font_family_high_ansi_direct.clone(),
+        east_asia: fmt.font_family_east_asia_direct.clone(),
+        complex_script: fmt.font_family_cs_direct.clone(),
+    };
+    let theme_values = RunFontAxisValues {
+        ascii: theme.resolve_font_ref(fmt.font_family_ascii_theme.clone()),
+        high_ansi: theme.resolve_font_ref(fmt.font_family_high_ansi_theme.clone()),
+        east_asia: theme.resolve_font_ref(fmt.font_family_east_asia_theme.clone()),
+        complex_script: theme.resolve_font_ref(fmt.font_family_cs_theme.clone()),
+    };
+    let any = direct.ascii.is_some()
+        || direct.high_ansi.is_some()
+        || direct.east_asia.is_some()
+        || direct.complex_script.is_some()
+        || theme_values.ascii.is_some()
+        || theme_values.high_ansi.is_some()
+        || theme_values.east_asia.is_some()
+        || theme_values.complex_script.is_some();
+    any.then_some(RunFontSlots {
+        direct,
+        theme: theme_values,
+    })
+}
+
 fn make_field_run(instr: &str, fmt: &RunFmt, fallback: &str, theme: &ThemeColors) -> DocRun {
     let field_type = classify_field(instr);
     DocRun::Field(FieldRun {
@@ -3032,6 +3059,8 @@ fn make_field_run(instr: &str, fmt: &RunFmt, fallback: &str, theme: &ThemeColors
         font_family: theme
             .resolve_font_ref(fmt.font_family_ascii.clone())
             .or_else(|| theme.resolve_font_ref(fmt.font_family_east_asia.clone())),
+        font_family_high_ansi: theme.resolve_font_ref(fmt.font_family_high_ansi.clone()),
+        font_slots: resolved_run_font_slots(fmt, theme),
         font_family_east_asia: theme.resolve_font_ref(fmt.font_family_east_asia.clone()),
         font_hint: fmt.font_hint.clone(),
         rtl: fmt.rtl,
@@ -3251,6 +3280,8 @@ fn parse_run_inner(
     let font_family = theme
         .resolve_font_ref(fmt.font_family_ascii.clone())
         .or_else(|| theme.resolve_font_ref(fmt.font_family_east_asia.clone()));
+    let font_family_high_ansi = theme.resolve_font_ref(fmt.font_family_high_ansi.clone());
+    let font_slots = resolved_run_font_slots(&fmt, theme);
     // ECMA-376 §17.3.2.26 eastAsia axis, resolved INDEPENDENTLY of ascii so the
     // renderer can pick per character (CJK glyphs → eastAsia face). `font_family`
     // above keeps the conflated single-font fallback for non-per-char paths.
@@ -3361,6 +3392,8 @@ fn parse_run_inner(
                         font_size,
                         color: color.clone(),
                         font_family: font_family.clone(),
+                        font_family_high_ansi: font_family_high_ansi.clone(),
+                        font_slots: font_slots.clone(),
                         font_family_east_asia: font_family_east_asia.clone(),
                         font_hint: font_hint.clone(),
                         is_link,
@@ -3438,6 +3471,8 @@ fn parse_run_inner(
                         font_size,
                         color: color.clone(),
                         font_family: sym_font.clone(),
+                        font_family_high_ansi: sym_font.clone(),
+                        font_slots: None,
                         // Keep the eastAsia axis pointed at the sym font too, so a
                         // glyph that happens to classify as CJK still resolves
                         // against the symbol font rather than the run's eastAsia
@@ -3495,6 +3530,8 @@ fn parse_run_inner(
                     font_size,
                     color: color.clone(),
                     font_family: font_family.clone(),
+                    font_family_high_ansi: font_family_high_ansi.clone(),
+                    font_slots: font_slots.clone(),
                     font_family_east_asia: font_family_east_asia.clone(),
                     font_hint: font_hint.clone(),
                     is_link,
@@ -3592,6 +3629,8 @@ fn parse_run_inner(
                     font_size,
                     color: color.clone(),
                     font_family: font_family.clone(),
+                    font_family_high_ansi: font_family_high_ansi.clone(),
+                    font_slots: font_slots.clone(),
                     font_family_east_asia: font_family_east_asia.clone(),
                     font_hint: font_hint.clone(),
                     is_link,
@@ -3791,6 +3830,8 @@ fn parse_run_inner(
                     font_size,
                     color: color.clone(),
                     font_family: font_family.clone(),
+                    font_family_high_ansi: font_family_high_ansi.clone(),
+                    font_slots: font_slots.clone(),
                     font_family_east_asia: font_family_east_asia.clone(),
                     font_hint: font_hint.clone(),
                     is_link,
@@ -16614,7 +16655,7 @@ mod numbering_marker_font_tests {
         let body_xml = format!(
             r#"<w:document{NS}><w:body>
               <w:p><w:r>
-                <w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="ＭＳ 明朝"/></w:rPr>
+                <w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Arial" w:eastAsia="ＭＳ 明朝"/></w:rPr>
                 <w:t>本文テキスト</w:t>
               </w:r></w:p>
             </w:body></w:document>"#
@@ -16653,7 +16694,15 @@ mod numbering_marker_font_tests {
             })
             .unwrap();
         assert_eq!(run.font_family.as_deref(), Some("Times New Roman"));
+        assert_eq!(run.font_family_high_ansi.as_deref(), Some("Arial"));
         assert_eq!(run.font_family_east_asia.as_deref(), Some("ＭＳ 明朝"));
+        let slots = run
+            .font_slots
+            .as_ref()
+            .expect("internal four-axis font slots");
+        assert_eq!(slots.direct.ascii.as_deref(), Some("Times New Roman"));
+        assert_eq!(slots.direct.high_ansi.as_deref(), Some("Arial"));
+        assert_eq!(slots.direct.east_asia.as_deref(), Some("ＭＳ 明朝"));
     }
 
     // ---- Table conditional formatting: ST_Cnf bit decode (§14.11.9) ----

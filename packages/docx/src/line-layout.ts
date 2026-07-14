@@ -19,7 +19,7 @@ import type {
   DocParagraph, DocRun, DocxTextRun, ImageRun, ShapeTextRun, FieldRun,
   LineSpacing, TabStop, DocxRunBorder, DocSettings, EmphasisMark,
 } from './types';
-import type { MathNode, KinsokuRules, ChartModel, HyperlinkTarget, NumberFormat, Duotone, ResolvedLocalFontMetric } from '@silurus/ooxml-core';
+import type { CanvasFontRoute, MathNode, KinsokuRules, ChartModel, HyperlinkTarget, NumberFormat, Duotone, ResolvedLocalFontMetric } from '@silurus/ooxml-core';
 import type { RenderState, DecodedImage } from './renderer.js';
 import {
   classifyCjkFont,
@@ -47,6 +47,7 @@ import {
   parseDateTimePictureSwitch,
   fontAdvanceBiasEm,
   normalizeLocalFontMetricFamily,
+  canvasFontString,
 } from '@silurus/ooxml-core';
 import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
 import { groupFitTextRegions, type FitTextRun } from './fit-text.js';
@@ -57,10 +58,9 @@ import {
 } from './float-layout.js';
 import { verticalRunInkExtraPx } from './vertical-text.js';
 import type { LayoutServices } from './layout/types.js';
-import type { TextLayoutService, TextShapeRequest } from './layout/text.js';
-import type { InternalTextBearingRun } from './parser-model.js';
+import type { TextLayoutService, TextShapeRequest, TextShapeSpan } from './layout/text.js';
+import type { InternalMathRun, InternalTextBearingRun } from './parser-model.js';
 import type { MathLayoutResource } from './layout/resources.js';
-import { mathOccurrenceLookupOf } from './layout/runtime-state.js';
 
 export interface LineBoundary {
   segIndex: number;
@@ -93,6 +93,7 @@ export interface LayoutTextSeg extends LayoutSegSource {
   fontSize: number;  // pt
   color: string | null;
   fontFamily: string | null;
+  fontRoute?: CanvasFontRoute;
   /** Exact local face selected during async document loading. The family above
    * is its isolated alias; this measured ratio supplies Word's design-line floor
    * without a version-specific font constant. */
@@ -148,6 +149,8 @@ export interface LayoutTextSeg extends LayoutSegSource {
    *  per segment, so body behaviour is unchanged); the TEXT-BOX metrics
    *  (`lineMetricsFor`) floor on it so a text box matches PR #640/#646/#648. */
   eaFloorFamily?: string | null;
+  /** Exact Canvas route for the explicit East Asian design-line probe. */
+  eaFloorRoute?: CanvasFontRoute;
   resolvedEaFloorLineHeightRatio?: number;
   /** IX1 — the resolved hyperlink target of the originating run (ECMA-376
    *  §17.16.22 external `r:id` URL / §17.16.23 internal `w:anchor` bookmark),
@@ -764,7 +767,9 @@ export function buildFont(
   sizePx: number,
   family: string | null,
   fontFamilyClasses: Record<string, string> = {},
+  fontRoute?: CanvasFontRoute,
 ): string {
+  if (fontRoute) return canvasFontString(fontRoute, sizePx, bold ? 700 : 400, italic ? 'italic' : 'normal');
   const w = bold ? 'bold' : 'normal';
   const s = italic ? 'italic' : 'normal';
   const f = normalizeFontFamily(family, fontFamilyClasses);
@@ -2291,6 +2296,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
     // `w:rtl`+`w:cs`+`w:b` (no `w:bCs`) Arabic headings render at regular weight.
     const csFontSize = r.fontSizeCs ?? base.fontSize;
     const csFontFamily = r.fontFamilyCs ?? base.fontFamily;
+    const highAnsiFontFamily = r.fontFamilyHighAnsi ?? base.fontFamily;
     const csBold = r.boldCs ?? false;
     const csItalic = r.italicCs ?? false;
 
@@ -2319,30 +2325,26 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
     // Latin/digits/neutral (ascii face). Each segment stays SINGLE-FONT — one
     // family for its whole `.text` — so the measure==draw / docGrid char-grid
     // invariant holds and the draw loop needs no per-segment font switching.
-    const pushSeg = (text: string, cs: boolean, fontFamily: string | null) => {
+    const pushSeg = (
+      text: string,
+      cs: boolean,
+      fontFamily: string | null,
+      authoritativeSpan?: TextShapeSpan,
+    ) => {
       const bold = cs ? csBold : base.bold;
       const italic = cs ? csItalic : base.italic;
       const weight = bold ? 700 : 400;
       const style = italic ? 'italic' as const : 'normal' as const;
-      const localFont = resolvedFont(fontFamily, weight, style);
-      const localEaFloor = resolvedFont(eaFontFamily, weight, style);
-      const familyLineMetric = localFont ?? (fontFamily
-        ? environment.resolvedLocalFonts?.[normalizeLocalFontMetricFamily(fontFamily)]
-        : undefined);
-      const eaLineMetric = localEaFloor ?? (eaFontFamily
-        ? environment.resolvedLocalFonts?.[normalizeLocalFontMetricFamily(eaFontFamily)]
-        : undefined);
-      const localPaintFamily = localFont?.family;
-      const localEaFloorFamily = localEaFloor?.family;
       const textShapeRequest: TextShapeRequest = Object.freeze({
         text,
         fontSizePt: cs ? csFontSize : base.fontSize,
-        fonts: {
+        fonts: r.fontSlots?.direct ?? {
           ascii: base.fontFamily,
-          highAnsi: base.fontFamily,
+          highAnsi: highAnsiFontFamily,
           eastAsia: eaFontFamily,
           complexScript: csFontFamily,
         },
+        themeFonts: r.fontSlots?.theme,
         weight,
         style,
         complexScript: cs,
@@ -2353,7 +2355,9 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
           : (cs ? csFontSize : base.fontSize) >= r.kerning,
         measure: false,
       });
-      const shaped = environment.layoutServices?.text.shape(textShapeRequest);
+      const shaped = authoritativeSpan
+        ? { spans: [authoritativeSpan] }
+        : environment.layoutServices?.text.shape(textShapeRequest);
       const resolvedAxisDiffers = shaped?.spans.some((span) =>
         (span.script === 'complexScript') !== cs,
       ) ?? false;
@@ -2364,15 +2368,44 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
             ? csFontFamily
             : span.script === 'eastAsia'
               ? eaFontFamily
-              : base.fontFamily;
-          pushSeg(span.text, spanCs, spanFamily);
+              : span.script === 'highAnsi'
+                ? highAnsiFontFamily
+                : base.fontFamily;
+          pushSeg(span.text, spanCs, spanFamily, span);
         }
         return;
       }
-      const resolvedFamilies = new Set(shaped?.spans.map((span) => span.font.resolvedFamily));
-      const resolvedPaintFamily = resolvedFamilies.size === 1
-        ? shaped?.spans[0]?.font.resolvedFamily
-        : undefined;
+      const resolvedSpan = shaped?.spans[0];
+      const serviceMetric = (resolvedFamily: string | undefined, requestedFamily?: string) => {
+        if (!resolvedFamily) return undefined;
+        const candidates = Object.values(environment.layoutServices?.text.localMetrics ?? {}).filter((metric) =>
+            normalizeLocalFontMetricFamily(metric.family) === normalizeLocalFontMetricFamily(resolvedFamily)
+            && (metric.weight ?? 400) === weight
+            && (metric.style ?? 'normal') === style,
+          );
+        return candidates.find((metric) => requestedFamily
+          && normalizeLocalFontMetricFamily(metric.requestedFamily ?? '')
+            === normalizeLocalFontMetricFamily(requestedFamily)) ?? candidates[0];
+      };
+      const localFont = resolvedSpan
+        ? serviceMetric(resolvedSpan.font.resolvedFamily, resolvedSpan.font.requestedFamily)
+        : resolvedFont(fontFamily, weight, style);
+      const eaResolution = environment.layoutServices?.text.resolve({
+        fonts: textShapeRequest.fonts,
+        themeFonts: textShapeRequest.themeFonts,
+        slot: 'eastAsia',
+        weight,
+        style,
+      });
+      const localEaFloor = eaResolution
+        ? serviceMetric(eaResolution.resolvedFamily, eaResolution.requestedFamily)
+        : resolvedFont(eaFontFamily, weight, style);
+      const familyLineMetric = localFont ?? (fontFamily
+        ? environment.resolvedLocalFonts?.[normalizeLocalFontMetricFamily(fontFamily)]
+        : undefined);
+      const eaLineMetric = localEaFloor ?? (eaFontFamily
+        ? environment.resolvedLocalFonts?.[normalizeLocalFontMetricFamily(eaFontFamily)]
+        : undefined);
       segs.push({
         text,
         bold,
@@ -2386,14 +2419,15 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         strikethrough: base.strikethrough,
         fontSize: cs ? csFontSize : base.fontSize,
         color: base.color,
-        fontFamily: resolvedPaintFamily ?? localPaintFamily ?? fontFamily,
+        fontFamily: resolvedSpan?.font.resolvedFamily ?? localFont?.family ?? fontFamily,
+        fontRoute: resolvedSpan?.fontRoute,
         resolvedLineHeightRatio: familyLineMetric?.lineHeightRatio,
         vertAlign,
         measuredWidth: 0,
         textLayoutService: environment.layoutServices?.text,
         textShapeRequest,
         smallCaps: reduced,
-        joinPrev: gluePending ? true : undefined,
+        joinPrev: gluePending || authoritativeSpan?.breakBefore === false ? true : undefined,
         doubleStrikethrough: base.doubleStrikethrough ?? false,
         highlight: base.highlight ?? null,
         // §17.3.2.12 w:em — carried on both DocxTextRun and FieldRun (a field's
@@ -2408,7 +2442,8 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         digitsAsAN: digitsAsAN ? true : undefined,
         // §17.3.2.26 declared eastAsia axis — recorded for the text-box line-box
         // floor only (see LayoutTextSeg.eaFloorFamily). Inert for the body path.
-        eaFloorFamily: localEaFloorFamily ?? eaFontFamily,
+        eaFloorFamily: eaResolution?.resolvedFamily ?? localEaFloor?.family ?? eaFontFamily,
+        eaFloorRoute: eaResolution?.route,
         resolvedEaFloorLineHeightRatio: eaLineMetric?.lineHeightRatio,
         // IX1 — resolved hyperlink target of the originating run, for the
         // text-layer clickable overlay. Does not affect layout or drawing.
@@ -2474,6 +2509,10 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
     // (ascii). Keeps each emitted segment single-font (so a serif ascii digit
     // sits next to a gothic eastAsia title) without changing the cs path.
     const emitNonCs = (slice: string) => {
+      if (environment.layoutServices?.text) {
+        pushSeg(slice, false, base.fontFamily);
+        return;
+      }
       for (const part of splitByEastAsia(slice)) emit(part.text, part.ea ? 'ea' : 'latin');
     };
 
@@ -2611,9 +2650,10 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
       // The parser resolves the paragraph font size; fall back to a nearby run only
       // if it is somehow absent.
       const fontSize = run.fontSize || findNearbyFontSize(runs, runs.indexOf(run));
-      const resourceKey = environment.layoutServices
-        ? mathOccurrenceLookupOf(environment.layoutServices)?.resourceKey(runs, runIndex)
-        : undefined;
+      const resourceKey = (run as Partial<InternalMathRun>).resourceKey;
+      if (environment.layoutServices && !resourceKey) {
+        throw new Error('Service-backed math layout requires a normalized structural resource key');
+      }
       const mathMetadata = resourceKey
         ? environment.layoutServices?.math.resolve(resourceKey)
         : undefined;
@@ -3171,7 +3211,7 @@ export function layoutLines(
         fontBoundingBoxDescent: shaped.descentPt,
       } as TextMetrics;
     }
-    setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses));
+    setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses, s.fontRoute));
     const prevKern = setSegKerning(s);
     const m = ctx.measureText(s.text);
     restoreKerning(prevKern);
@@ -3192,7 +3232,7 @@ export function layoutLines(
     // The format-neutral text service may measure on a different adapter and
     // restores its Canvas state. The vertical-feature probe is intentionally
     // paint-context-local, so select the same resolved face explicitly here.
-    setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses));
+    setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses, s.fontRoute));
     const prevKern = setSegKerning(s);
     try {
       return verticalRunInkExtraPx(ctx, text);
@@ -3288,7 +3328,7 @@ export function layoutLines(
       });
       return segAdvanceWidth({ ...s, text }, shaped.advancePt + verticalInkExtra(s, text), gridDeltaPx, scale);
     }
-    setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses));
+    setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses, s.fontRoute));
     const prevKern = setSegKerning(s);
     const natural = ctx.measureText(text).width;
     restoreKerning(prevKern);
@@ -3604,7 +3644,7 @@ export function layoutLines(
         } as TextMetrics;
       } else {
         const prevFont = ctx.font;
-        ctx.font = buildFont(s.bold, s.italic, fullPx, s.fontFamily, fontFamilyClasses);
+        ctx.font = buildFont(s.bold, s.italic, fullPx, s.fontFamily, fontFamilyClasses, s.fontRoute);
         metricM = ctx.measureText(s.text || 'X');
         ctx.font = prevFont;
       }
@@ -3861,7 +3901,7 @@ export function layoutLines(
       //  separate: it sums per-char advances, whereas this path uses substring
       //  binary-search + the cross-run 追い出し below. Don't naively unify them.)
       const available = availW() - currentWidth;
-      setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses));
+      setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses, s.fontRoute));
       const prevKern = setSegKerning(s);
       let rawPrefix = '';
       try {
@@ -4080,7 +4120,7 @@ export function layoutLines(
       // already one space-delimited word (splitTextForLayout), so this never
       // breaks where a space could have wrapped.
       const available = availW();
-      setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses));
+      setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses, s.fontRoute));
       const allChars = [...s.text];
       const prevKern = setSegKerning(s);
       let split = 0;
@@ -4111,6 +4151,14 @@ export function layoutLines(
         });
       }
     } else {
+      if (s.joinPrev) {
+        // A scalar span that continues the preceding grapheme (or another
+        // explicitly glued piece) may overflow a pathological narrow line, but
+        // it must never become a new line head and tear the cluster.
+        s.measuredWidth = w;
+        addToLine(s, w, h, asc, desc, trailingSpaceW);
+        continue;
+      }
       // Latin word does not fit on the current (non-empty) line: move it to a fresh
       // line and re-process. There it either fits, or — when it is wider than the
       // whole column — the empty-line branch above breaks it at the character level
@@ -4249,7 +4297,7 @@ export function rescaleLayoutLines(
         fontBoundingBoxDescent: shaped.descentPt,
       } as TextMetrics;
     }
-    ctx.font = buildFont(s.bold, s.italic, fontPx, s.fontFamily, fontFamilyClasses);
+    ctx.font = buildFont(s.bold, s.italic, fontPx, s.fontFamily, fontFamilyClasses, s.fontRoute);
     return withSegKerning(s, () => ctx.measureText(text));
   };
 
@@ -4258,7 +4306,7 @@ export function rescaleLayoutLines(
     // Vertical feature capability belongs to the paint context, not the
     // format-neutral text service. Select the exact resolved paint face before
     // applying this narrow glyph-cell correction.
-    ctx.font = buildFont(s.bold, s.italic, fontPx, s.fontFamily, fontFamilyClasses);
+    ctx.font = buildFont(s.bold, s.italic, fontPx, s.fontFamily, fontFamilyClasses, s.fontRoute);
     return withSegKerning(s, () => verticalRunInkExtraPx(ctx, text));
   };
 

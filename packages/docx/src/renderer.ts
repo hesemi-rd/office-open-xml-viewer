@@ -53,7 +53,7 @@ import {
   drawUnderline,
   renderChart,
 } from '@silurus/ooxml-core';
-import type { MathNode, MathRenderer, KinsokuRules, HyperlinkTarget, NumberFormat, Duotone, ResolvedLocalFontMetric } from '@silurus/ooxml-core';
+import type { CanvasFontRoute, MathNode, MathRenderer, KinsokuRules, HyperlinkTarget, NumberFormat, Duotone, ResolvedLocalFontMetric } from '@silurus/ooxml-core';
 import { computePageNumbering } from './page-numbering.js';
 import { docxUnderlineToDrawingML } from './underline-map.js';
 import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
@@ -128,7 +128,7 @@ import {
   type SectionLayoutContext,
   type StoryContext,
 } from './layout-context.js';
-import { justifiedPiecePositions } from '@silurus/ooxml-core';
+import { canvasFontString, justifiedPiecePositions } from '@silurus/ooxml-core';
 import type { LayoutServices } from './layout/types.js';
 import type { DocumentLayout as RetainedDocumentLayout } from './layout/types.js';
 import { normalizeLayoutOptions } from './layout/options.js';
@@ -145,7 +145,6 @@ import {
 } from './layout/resources.js';
 import { createFontResolver, type FontInventoryFace } from './layout/font-service.js';
 import {
-  attachMathOccurrenceLookup,
   attachPrivateResourceLookup,
   privateResourceLookupOf,
 } from './layout/runtime-state.js';
@@ -158,6 +157,7 @@ import {
 } from './layout/text.js';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts.js';
 import { internalDocumentModel } from './parser-model.js';
+import { normalizeInternalDocumentModel } from './parser-model.js';
 
 
 export { computeColumns };
@@ -286,6 +286,7 @@ function computeLineKashidaDistribution(
       calcEffectiveFontPx(s, scale),
       s.fontFamily,
       fontFamilyClasses,
+      s.fontRoute,
     );
     const prevKerning = ctx.fontKerning;
     const prevLetterSpacing = ctx.letterSpacing;
@@ -387,8 +388,8 @@ export function createLayoutServices(
       requestedFamily: font.fontName,
       resolvedFamily: loaded.displayFamily,
       source: 'embedded' as const,
-      weights: [weight],
-      styles: [style],
+      weight,
+      style,
     }];
   });
   for (const [requestedFamily, metric] of Object.entries(localMetrics)) {
@@ -396,8 +397,8 @@ export function createLayoutServices(
       requestedFamily: metric.requestedFamily ?? requestedFamily,
       resolvedFamily: metric.family,
       source: 'local',
-      weights: [metric.weight ?? 400],
-      styles: [metric.style ?? 'normal'],
+      weight: metric.weight ?? 400,
+      style: metric.style ?? 'normal',
     });
   }
   if (options.useGoogleFonts) {
@@ -416,8 +417,8 @@ export function createLayoutServices(
           requestedFamily: name,
           resolvedFamily: loaded.displayFamily,
           source: normalizedFaceFamily(resolvedFamily) === normalizedFaceFamily(name) ? 'google' : 'substitute',
-          weights: [loaded.weight],
-          styles: [loaded.style],
+          weight: loaded.weight,
+          style: loaded.style,
         });
       }
     }
@@ -454,7 +455,7 @@ export function createLayoutServices(
         const previousLetterSpacing = ctx.letterSpacing;
         const previousKerning = ctx.fontKerning;
         try {
-          ctx.font = `${request.style} ${request.weight} ${request.fontSizePt}px ${JSON.stringify(request.resolvedFamily)}, ${request.genericFamily}`;
+          ctx.font = canvasFontString(request.fontRoute, request.fontSizePt, request.weight, request.style);
           ctx.letterSpacing = `${request.letterSpacingPt}px`;
           if (request.kerning != null) ctx.fontKerning = request.kerning ? 'normal' : 'none';
           const metrics = ctx.measureText(request.text);
@@ -471,7 +472,7 @@ export function createLayoutServices(
       },
     },
   });
-  const mathOccurrences = documentMathOccurrences(doc);
+  const mathOccurrences = normalizeInternalDocumentModel(doc).mathOccurrences;
   const mathResources = options.mathResources ?? mathOccurrences.map(({ display, source }) => ({
     resourceKey: mathResourceKey(source, display ? 'display' : 'inline'),
     widthEm: 0,
@@ -499,7 +500,6 @@ export function createLayoutServices(
       `Math metadata membership mismatch: missing [${missingMetadata.join(', ')}]; extra [${extraMetadata.join(', ')}]`,
     );
   }
-  attachMathOccurrenceLookup(services, mathOccurrences);
   const availableMathKeys = mathResources
     .filter((resource) => resource.available !== false)
     .map((resource) => resource.resourceKey);
@@ -522,20 +522,23 @@ function svgToImage(svg: string): Promise<HTMLImageElement> {
   });
 }
 
-/** Convert equations before layout. Public records contain only structural
- * SourceRef identities; parser run-array identity stays in the private runtime. */
+/** Convert equations before layout. Math resources use only normalized,
+ * structural SourceRef/resourceKey facts; parser object identity is irrelevant. */
 export async function prepareMathRuns(
   input: BodyElement[] | DocxDocumentModel,
   math: MathRenderer,
 ) {
-  const runs = Array.isArray(input) ? collectMathRuns(input) : documentMathOccurrences(input);
+  if (Array.isArray(input)) {
+    throw new TypeError('prepareMathRuns requires a document model so every story has an explicit structural source');
+  }
+  const runs = normalizeInternalDocumentModel(input).mathOccurrences;
   if (runs.length === 0) return { records: [], drawables: new Map() };
   await math.loadMathJax();
   const records: MathLayoutResource[] = [];
   const drawables = new Map<string, CanvasImageSource>();
   const seen = new Set<string>();
   for (const r of runs) {
-    const resourceKey = mathResourceKey(r.source, r.display ? 'display' : 'inline');
+    const resourceKey = r.resourceKey;
     if (seen.has(resourceKey)) throw new Error(`Duplicate math occurrence: ${resourceKey}`);
     seen.add(resourceKey);
     try {
@@ -4646,8 +4649,9 @@ export function paginateDocument(
   services: LayoutServices = createLayoutServices(doc),
   options: LayoutOptions = normalizeLayoutOptions(undefined, Date.now()),
 ): PaginatedBodyElement[][] {
+  const normalizedDoc = normalizeInternalDocumentModel(doc).document;
   const ctx = new OffscreenCanvas(1, 1).getContext('2d');
-  if (!ctx) return [doc.body];
+  if (!ctx) return [normalizedDoc.body];
   // ECMA-376 §17.6.20 — a vertical (tbRl) section is laid out in the SWAPPED
   // logical geometry (see `verticalLayoutDoc`), so pagination — which stamps each
   // page's `sectionGeom` — must run on the swapped section. `renderDocumentToCanvas`
@@ -4656,7 +4660,7 @@ export function paginateDocument(
   // prebuilt (this path) or paginated inline. Horizontal docs are unchanged
   // (referential identity).
   const resolvedLocalFonts = services.text.localMetrics;
-  const layoutDoc = verticalLayoutDoc(doc);
+  const layoutDoc = verticalLayoutDoc(normalizedDoc);
   const layoutSettings = resolveDocumentLayoutSettings(layoutDoc);
   return paginateWithHeaderFooterReserve(
     layoutDoc,
@@ -9516,7 +9520,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
             : s.vertAlign === 'sub'
               ? s.fontSize * scale * 0.15
               : 0) + positionOffset;
-        ctx.font = buildFont(s.bold, s.italic, glyphSizePx, s.fontFamily, fontFamilyClasses);
+        ctx.font = buildFont(s.bold, s.italic, glyphSizePx, s.fontFamily, fontFamilyClasses, s.fontRoute);
 
         // ECMA-376 §17.3.2.43 `<w:w>` horizontal glyph scale (1 = 100%) and
         // §17.3.2.35 `<w:spacing>` per-code-point character pitch in px. Both were
@@ -9991,7 +9995,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           // Overlay consumers receive paint-space geometry and must see the
           // corresponding paint-size font even though the glyphs themselves were
           // shaped at scale 1 and mapped through the local viewport transform.
-          ctx.font = buildFont(s.bold, s.italic, effSizePx, s.fontFamily, fontFamilyClasses);
+          ctx.font = buildFont(s.bold, s.italic, effSizePx, s.fontFamily, fontFamilyClasses, s.fontRoute);
         }
         // §17.3.2.19 — restore the inherited font-kerning now the run's glyphs are
         // painted (the following ruby / emphasis-mark draws are separate glyphs at
@@ -10001,7 +10005,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
         // Ruby annotation: small text centered above the base glyphs.
         if (s.ruby) {
           const rubySizePx = s.ruby.fontSizePt * scale;
-          const rubyFont = buildFont(s.bold, s.italic, rubySizePx, s.fontFamily, fontFamilyClasses);
+          const rubyFont = buildFont(s.bold, s.italic, rubySizePx, s.fontFamily, fontFamilyClasses, s.fontRoute);
           ctx.save();
           ctx.font = rubyFont;
           const rubyW = ctx.measureText(s.ruby.text).width;
@@ -11155,12 +11159,14 @@ export function measureShapeTextAutoFitHeight(
       ? segmentEastAsiaFloorSingleLinePx(tallest, fontPx, tallestEa)
       : intendedSingleLinePx(eaFamily, fontPx, tallestEa);
     const measureFamily = eaIntended > asciiIntended ? eaFamily : family;
+    const measureRoute = eaIntended > asciiIntended ? tallest?.eaFloorRoute : tallest?.fontRoute;
     ctx.font = buildFont(
       tallest?.bold ?? b.bold ?? false,
       tallest?.italic ?? b.italic ?? false,
       fontPx,
       measureFamily,
       fontFamilyClasses,
+      measureRoute,
     );
     const m = ctx.measureText('Mg');
     const rawAsc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? fontPx * 0.8;
@@ -11504,6 +11510,8 @@ export function renderShapeText(
     // only when the measured segment is East Asian. `eastAsian` above stays
     // line-wide (it gates the §17.6.5 grid cell rounding).
     metricEastAsian = eastAsian,
+    familyRoute?: CanvasFontRoute,
+    familyEaRoute?: CanvasFontRoute,
   ): { lineH: number; baselineOffset: number } => {
     // Floor the single-line box by the TALLEST design line among the run's
     // declared faces (ascii §17.3.2.26 + eastAsia). The common Japanese encoding
@@ -11530,7 +11538,8 @@ export function renderShapeText(
     // both untabled) keep measuring ascii, so an all-untabled line is byte-for-
     // byte unchanged from before this change.
     const measureFamily = eaIntended > asciiIntended ? (familyEa ?? null) : (family ?? null);
-    ctx.font = buildFont(bold, italic, fontPx, measureFamily, fontFamilyClasses);
+    const measureRoute = eaIntended > asciiIntended ? familyEaRoute : familyRoute;
+    ctx.font = buildFont(bold, italic, fontPx, measureFamily, fontFamilyClasses, measureRoute);
     const m = ctx.measureText('Mg');
     const rawAsc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? fontPx * 0.8;
     const rawDesc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? fontPx * 0.2;
@@ -11637,6 +11646,8 @@ export function renderShapeText(
       // METRIC hint = tallest segment's own script (Latin tallest keeps its
       // Canvas box on a CJK-bearing line); grid rounding stays line-wide.
       tallestEa,
+      tallest?.fontRoute,
+      tallest?.eaFloorRoute,
     );
   };
 
@@ -12055,7 +12066,7 @@ export function renderShapeText(
             : s.vertAlign === 'sub'
               ? s.fontSize * scale * 0.15
               : 0;
-          ctx.font = buildFont(s.bold, s.italic, effSizePx, s.fontFamily, fontFamilyClasses);
+          ctx.font = buildFont(s.bold, s.italic, effSizePx, s.fontFamily, fontFamilyClasses, s.fontRoute);
           // §17.3.2.6: a run's own color wins; otherwise fall to `defaultColor`,
           // which folds the shape's §20.1.4.1.17 fontRef default over the
           // document/theme default (black). A color-less run in a fontRef text
@@ -12118,7 +12129,7 @@ export function renderShapeText(
               const step = natural <= spanAlong ? spanAlong / rubyChars.length : rubyPx;
               // ctx.save()/restore() preserves font/textAlign/textBaseline.
               ctx.save();
-              ctx.font = buildFont(s.bold, s.italic, rubyPx, s.fontFamily, fontFamilyClasses);
+              ctx.font = buildFont(s.bold, s.italic, rubyPx, s.fontFamily, fontFamilyClasses, s.fontRoute);
               ctx.textAlign = 'center';
               ctx.textBaseline = 'middle';
               for (let ri = 0; ri < rubyChars.length; ri++) {
@@ -12234,7 +12245,7 @@ export function renderShapeText(
           if (s.ruby) {
             const spanW = s.measuredWidth + internalStretch;
             const rubySizePx = s.ruby.fontSizePt * scale;
-            const rubyFont = buildFont(s.bold, s.italic, rubySizePx, s.fontFamily, fontFamilyClasses);
+            const rubyFont = buildFont(s.bold, s.italic, rubySizePx, s.fontFamily, fontFamilyClasses, s.fontRoute);
             ctx.save();
             ctx.font = rubyFont;
             const rubyW = ctx.measureText(s.ruby.text).width;

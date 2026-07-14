@@ -44,6 +44,36 @@ function initializeRepository() {
   return root;
 }
 
+function initializeShapeRepository() {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-shape-'));
+  write(root, 'packages/docx/src/renderer.ts', 'function buildFont(bold: boolean, italic: boolean, size: number, family: string | null, classes: Record<string, string>) { return String([bold, italic, size, family, classes]); }\nexport function renderShapeText(s: { bold: boolean; italic: boolean; size: number; family: string | null; fontRoute?: unknown }, classes: Record<string, string>) { return buildFont(s.bold, s.italic, s.size, s.family, classes); }\n');
+  write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
+  write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
+  git(root, 'init', '-b', 'main');
+  git(root, 'config', 'user.email', 'boundary-test@example.invalid');
+  git(root, 'config', 'user.name', 'Boundary Test');
+  git(root, 'add', '.');
+  git(root, 'commit', '-m', 'base');
+  git(root, 'switch', '-c', 'a1');
+  establishA1Baseline(root);
+  return root;
+}
+
+function initializeMetricShapeRepository() {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-shape-metric-'));
+  write(root, 'packages/docx/src/renderer.ts', 'function buildFont(bold: boolean, italic: boolean, size: number, family: string | null, classes: Record<string, string>, route?: unknown) { return String([bold, italic, size, family, classes, route]); }\nexport function renderShapeText(s: { bold: boolean; italic: boolean; size: number; family: string | null; fontRoute?: unknown; eaFloorRoute?: unknown }, classes: Record<string, string>) { const shapeLineMetrics = (family: string | null) => { return buildFont(s.bold, s.italic, s.size, family, classes); }; return shapeLineMetrics(s.family); }\n');
+  write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
+  write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
+  git(root, 'init', '-b', 'main');
+  git(root, 'config', 'user.email', 'boundary-test@example.invalid');
+  git(root, 'config', 'user.name', 'Boundary Test');
+  git(root, 'add', '.');
+  git(root, 'commit', '-m', 'base');
+  git(root, 'switch', '-c', 'a1');
+  establishA1Baseline(root);
+  return root;
+}
+
 function establishA1Baseline(root) {
   const writeResult = runChecker(root, '--write-transitional-baseline', '--base-ref', 'main');
   assert.equal(writeResult.status, 0, writeResult.output);
@@ -102,6 +132,21 @@ test('allows only named shared atomic painters from core', () => {
   write(root, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
   write(root, 'packages/docx/src/paint/canvas-page.ts', "import { renderChart } from '@silurus/ooxml-core';\nexport { renderChart };\n");
   assert.equal(runChecker(root, '--final').status, 0);
+
+  write(root, 'packages/docx/src/paint/canvas-page.ts', "import { canvasFontString } from '@silurus/ooxml-core';\nexport { canvasFontString };\n");
+  assert.equal(runChecker(root, '--final').status, 0);
+
+  for (const source of [
+    "import { createCanvasFontRoute } from '@silurus/ooxml-core';\nexport { createCanvasFontRoute };\n",
+    "import { canvasFontString as fontString } from '@silurus/ooxml-core';\nexport { fontString };\n",
+    "import * as core from '@silurus/ooxml-core';\nexport { core };\n",
+    "export const load = () => import('@silurus/ooxml-core');\n",
+  ]) {
+    write(root, 'packages/docx/src/paint/canvas-page.ts', source);
+    const rejected = runChecker(root, '--final');
+    assert.notEqual(rejected.status, 0);
+    assert.match(rejected.output, /FORBIDDEN_PAINT_EDGE/);
+  }
 
   write(root, 'packages/docx/src/paint/canvas-page.ts', "import { measureTextWidth as renderChart } from '@silurus/ooxml-core';\nexport { renderChart };\n");
   const result = runChecker(root, '--final');
@@ -224,6 +269,54 @@ test('allows only exact A2 service and option dependency threading through compu
   const result = runChecker(root, '--base-ref', 'main');
 
   assert.equal(result.status, 0, result.output);
+});
+
+test('allows only an exact A2 Canvas route argument on renderShapeText font calls', () => {
+  const root = initializeShapeRepository();
+  write(root, 'packages/docx/src/renderer.ts', 'function buildFont(bold: boolean, italic: boolean, size: number, family: string | null, classes: Record<string, string>, route?: unknown) { return String([bold, italic, size, family, classes, route]); }\nexport function renderShapeText(s: { bold: boolean; italic: boolean; size: number; family: string | null; fontRoute?: unknown }, classes: Record<string, string>) { return buildFont(s.bold, s.italic, s.size, s.family, classes, s.fontRoute); }\n');
+
+  const result = runChecker(root, '--base-ref', 'main');
+
+  assert.equal(result.status, 0, result.output);
+});
+
+test('allows only exact A2 routes on renderShapeText line-metric probes', () => {
+  const root = initializeMetricShapeRepository();
+  write(root, 'packages/docx/src/renderer.ts', 'function buildFont(bold: boolean, italic: boolean, size: number, family: string | null, classes: Record<string, string>, route?: unknown) { return String([bold, italic, size, family, classes, route]); }\nexport function renderShapeText(s: { bold: boolean; italic: boolean; size: number; family: string | null; fontRoute?: unknown; eaFloorRoute?: unknown }, classes: Record<string, string>) { const shapeLineMetrics = (family: string | null, familyRoute?: CanvasFontRoute, familyEaRoute?: CanvasFontRoute) => { const measureRoute = eaIntended > asciiIntended ? familyEaRoute : familyRoute; return buildFont(s.bold, s.italic, s.size, family, classes, measureRoute); }; return shapeLineMetrics(s.family, s.fontRoute, s.eaFloorRoute); }\n');
+
+  const result = runChecker(root, '--base-ref', 'main');
+
+  assert.equal(result.status, 0, result.output);
+});
+
+test('rejects non-exact renderShapeText line-metric route threading', () => {
+  for (const source of [
+    'function buildFont(bold: boolean, italic: boolean, size: number, family: string | null, classes: Record<string, string>, route?: unknown) { return String([bold, italic, size, family, classes, route]); }\nexport function renderShapeText(s: { bold: boolean; italic: boolean; size: number; family: string | null; fontRoute?: unknown; eaFloorRoute?: unknown }, classes: Record<string, string>) { const shapeLineMetrics = (family: string | null, familyRoute?: CanvasFontRoute, familyEaRoute?: CanvasFontRoute) => { const measureRoute = s.size > 0 ? familyEaRoute : undefined; return buildFont(s.bold, s.italic, s.size, family, classes, measureRoute); }; return shapeLineMetrics(s.family, s.fontRoute, s.eaFloorRoute); }\n',
+    'function buildFont(bold: boolean, italic: boolean, size: number, family: string | null, classes: Record<string, string>, route?: unknown) { return String([bold, italic, size, family, classes, route]); }\nexport function renderShapeText(s: { bold: boolean; italic: boolean; size: number; family: string | null; fontRoute?: unknown; eaFloorRoute?: unknown }, classes: Record<string, string>) { const shapeLineMetrics = (family: string | null, familyRoute?: unknown, familyEaRoute?: CanvasFontRoute) => { const measureRoute = s.size > 0 ? familyEaRoute : familyRoute; return buildFont(s.bold, s.italic, s.size, family, classes, measureRoute); }; return shapeLineMetrics(s.family, s.fontRoute, s.eaFloorRoute); }\n',
+    'function buildFont(bold: boolean, italic: boolean, size: number, family: string | null, classes: Record<string, string>, route?: unknown) { return String([bold, italic, size, family, classes, route]); }\nexport function renderShapeText(s: { bold: boolean; italic: boolean; size: number; family: string | null; fontRoute?: unknown; eaFloorRoute?: unknown }, classes: Record<string, string>) { const shapeLineMetrics = (family: string | null, familyRoute?: CanvasFontRoute, familyEaRoute?: CanvasFontRoute) => { const measureRoute = s.size > 0 ? familyEaRoute : familyRoute; buildFont(s.bold, s.italic, s.size, family, classes, measureRoute); return "changed"; }; return shapeLineMetrics(s.family, s.fontRoute, s.eaFloorRoute); }\n',
+    'function buildFont(bold: boolean, italic: boolean, size: number, family: string | null, classes: Record<string, string>, route?: unknown) { return String([bold, italic, size, family, classes, route]); }\nexport function renderShapeText(s: { bold: boolean; italic: boolean; size: number; family: string | null; fontRoute?: unknown; eaFloorRoute?: unknown }, classes: Record<string, string>) { const shapeLineMetrics = (family: string | null, familyRoute?: CanvasFontRoute, familyEaRoute?: CanvasFontRoute) => { const measureRoute = sideEffect() ? familyEaRoute : familyRoute; return buildFont(s.bold, s.italic, s.size, family, classes, measureRoute); }; return shapeLineMetrics(s.family, s.fontRoute, s.eaFloorRoute); }\n',
+    'function buildFont(bold: boolean, italic: boolean, size: number, family: string | null, classes: Record<string, string>, route?: unknown) { return String([bold, italic, size, family, classes, route]); }\nexport function renderShapeText(s: { bold: boolean; italic: boolean; size: number; family: string | null; fontRoute?: unknown; eaFloorRoute?: unknown }, classes: Record<string, string>) { const shapeLineMetrics = (family: string | null, familyRoute?: CanvasFontRoute, familyEaRoute?: CanvasFontRoute) => { let measureRoute = eaIntended > asciiIntended ? familyEaRoute : familyRoute; return buildFont(s.bold, s.italic, s.size, family, classes, measureRoute); }; return shapeLineMetrics(s.family, s.fontRoute, s.eaFloorRoute); }\n',
+    'function buildFont(bold: boolean, italic: boolean, size: number, family: string | null, classes: Record<string, string>, route?: unknown) { return String([bold, italic, size, family, classes, route]); }\nexport function renderShapeText(s: { bold: boolean; italic: boolean; size: number; family: string | null; fontRoute?: unknown; eaFloorRoute?: unknown }, classes: Record<string, string>) { const shapeLineMetrics = (familyRoute?: CanvasFontRoute, familyEaRoute?: CanvasFontRoute, family: string | null) => { const measureRoute = eaIntended > asciiIntended ? familyEaRoute : familyRoute; return buildFont(s.bold, s.italic, s.size, family, classes, measureRoute); }; return shapeLineMetrics(s.fontRoute, s.eaFloorRoute, s.family); }\n',
+  ]) {
+    const root = initializeMetricShapeRepository();
+    write(root, 'packages/docx/src/renderer.ts', source);
+    const result = runChecker(root, '--base-ref', 'main');
+    assert.notEqual(result.status, 0);
+    assert.match(result.output, /LEGACY_DECLARATION_CHANGED/);
+  }
+});
+
+test('rejects other renderShapeText changes beside exact Canvas route threading', () => {
+  for (const source of [
+    'function buildFont(bold: boolean, italic: boolean, size: number, family: string | null, classes: Record<string, string>, route?: unknown) { return String([bold, italic, size, family, classes, route]); }\nexport function renderShapeText(s: { bold: boolean; italic: boolean; size: number; family: string | null; fontRoute?: unknown }, classes: Record<string, string>) { buildFont(s.bold, s.italic, s.size, s.family, classes, s.fontRoute); return "changed"; }\n',
+    'function buildFont(bold: boolean, italic: boolean, size: number, family: string | null, classes: Record<string, string>, route?: unknown) { return String([bold, italic, size, family, classes, route]); }\nexport function renderShapeText(s: { bold: boolean; italic: boolean; size: number; family: string | null; fontRoute?: unknown }, classes: Record<string, string>) { return buildFont(s.bold, s.italic, s.size, s.family, classes, undefined); }\n',
+  ]) {
+    const root = initializeShapeRepository();
+    write(root, 'packages/docx/src/renderer.ts', source);
+    const result = runChecker(root, '--base-ref', 'main');
+    assert.notEqual(result.status, 0);
+    assert.match(result.output, /LEGACY_DECLARATION_CHANGED/);
+  }
 });
 
 test('rejects unrelated computePages control-flow, calls, and parameters during A2 threading', () => {

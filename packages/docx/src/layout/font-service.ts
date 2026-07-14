@@ -1,7 +1,8 @@
 import type { LayoutDiagnostic } from './types.js';
 import { stableFingerprint } from './fingerprint.js';
+import { createCanvasFontRoute, type CanvasFontRoute } from '@silurus/ooxml-core';
 
-export type FontResolutionSource = 'embedded' | 'local' | 'google' | 'substitute' | 'generic';
+export type FontResolutionSource = 'embedded' | 'local' | 'google' | 'substitute' | 'native' | 'generic';
 export type FontStyle = 'normal' | 'italic';
 
 export interface FontRequest {
@@ -14,6 +15,7 @@ export interface FontRequest {
 export interface FontResolution {
   readonly requestedFamily: string;
   readonly resolvedFamily: string;
+  readonly route: CanvasFontRoute;
   readonly source: FontResolutionSource;
   readonly weight: number;
   readonly style: FontStyle;
@@ -29,9 +31,9 @@ export interface FontResolver {
 export interface FontInventoryFace {
   readonly requestedFamily: string;
   readonly resolvedFamily: string;
-  readonly source: Exclude<FontResolutionSource, 'generic'>;
-  readonly weights?: readonly number[];
-  readonly styles?: readonly FontStyle[];
+  readonly source: Exclude<FontResolutionSource, 'generic' | 'native'>;
+  readonly weight?: number;
+  readonly style?: FontStyle;
 }
 
 function normalizeFamily(value: string): string {
@@ -47,6 +49,14 @@ function freezeResolution(value: FontResolution): FontResolution {
   return Object.freeze({ ...value, diagnostics: Object.freeze([...value.diagnostics]) });
 }
 
+function quoteCssFamily(value: string): string {
+  return `"${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
+}
+
+function cssFamilyList(family: string, generic: FontResolution['genericFamily']): string {
+  return `${quoteCssFamily(family)}, ${generic}`;
+}
+
 /**
  * Snapshot the font inventory used by one document. ECMA-376 §17.8.2 leaves
  * the substitution algorithm implementation-defined, so a substituted or
@@ -54,7 +64,7 @@ function freezeResolution(value: FontResolution): FontResolution {
  * in paragraph geometry.
  */
 export function createFontResolver(inventory: readonly FontInventoryFace[]): FontResolver {
-  const sourcePriority: Readonly<Record<Exclude<FontResolutionSource, 'generic'>, number>> = {
+  const sourcePriority: Readonly<Record<FontInventoryFace['source'], number>> = {
     embedded: 0,
     local: 1,
     google: 2,
@@ -64,8 +74,8 @@ export function createFontResolver(inventory: readonly FontInventoryFace[]): Fon
     .filter((face) => face.requestedFamily.trim() && face.resolvedFamily.trim())
     .map((face) => Object.freeze({
       ...face,
-      weights: Object.freeze([...(face.weights ?? [400])]),
-      styles: Object.freeze([...(face.styles ?? ['normal'])]),
+      weight: normalizedWeight(face.weight),
+      style: face.style ?? 'normal',
     }))
     .sort((a, b) => {
       const family = normalizeFamily(a.requestedFamily).localeCompare(normalizeFamily(b.requestedFamily));
@@ -86,9 +96,7 @@ export function createFontResolver(inventory: readonly FontInventoryFace[]): Fon
       const weight = normalizedWeight(request.weight);
       const style = request.style ?? 'normal';
       const candidates = byFamily.get(normalizeFamily(requestedFamily)) ?? [];
-      const face = candidates.find((candidate) =>
-        candidate.weights.includes(weight) && candidate.styles.includes(style),
-      );
+      const face = candidates.find((candidate) => candidate.weight === weight && candidate.style === style);
       if (face) {
         const diagnostics: LayoutDiagnostic[] = face.source === 'substitute'
           ? [{
@@ -97,9 +105,11 @@ export function createFontResolver(inventory: readonly FontInventoryFace[]): Fon
               message: `ECMA-376 §17.8.2 implementation-dependent font substitution: ${requestedFamily} resolved to ${face.resolvedFamily}`,
             }]
           : [];
+        const familyList = cssFamilyList(face.resolvedFamily, request.genericFamily ?? 'sans-serif');
         return freezeResolution({
           requestedFamily,
           resolvedFamily: face.resolvedFamily,
+          route: createCanvasFontRoute(familyList, 'registered'),
           source: face.source,
           weight,
           style,
@@ -109,19 +119,28 @@ export function createFontResolver(inventory: readonly FontInventoryFace[]): Fon
       }
 
       const generic = request.genericFamily ?? 'sans-serif';
+      const authored = request.requestedFamily?.trim();
+      if (authored) {
+        const familyList = cssFamilyList(authored, generic);
+        return freezeResolution({
+          requestedFamily,
+          resolvedFamily: authored,
+          route: createCanvasFontRoute(familyList, 'native'),
+          source: 'native',
+          weight,
+          style,
+          diagnostics: [],
+          genericFamily: generic,
+        });
+      }
       return freezeResolution({
         requestedFamily,
-        // Never leave an uninventoried authored family in Canvas's font list:
-        // that would silently pick a host-local face outside this snapshot.
         resolvedFamily: generic,
+        route: createCanvasFontRoute(generic, 'generic'),
         source: 'generic',
         weight,
         style,
-        diagnostics: [{
-          code: 'UNSUPPORTED_FEATURE',
-          severity: 'warning',
-          message: `Font ${requestedFamily} is unavailable; using generic ${generic}`,
-        }],
+        diagnostics: [],
         genericFamily: generic,
       });
     },

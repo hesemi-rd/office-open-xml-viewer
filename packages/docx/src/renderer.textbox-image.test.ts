@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { measureShapeTextAutoFitHeight, preloadImages, renderShapeText } from './renderer';
+import { createLayoutServices, measureShapeTextAutoFitHeight, preloadImages, renderShapeText } from './renderer';
 import type { DocxDocumentModel, ShapeRun, ShapeText, ShapeTextRun } from './types';
+import type { RenderState } from './renderer';
+import { canvasFontString } from '@silurus/ooxml-core';
 
 /**
  * Inline images living INSIDE a DOCX text box (`<wps:txbx>`) ride on the
@@ -26,15 +28,17 @@ function makeRecordingCtx(): {
   ctx: CanvasRenderingContext2D;
   drawImageCalls: DrawImageCall[];
   fillTextCalls: { text: string; x: number; y: number; font: string; fillStyle: string }[];
+  fontCalls: string[];
 } {
   let font = '10px serif';
   let fillStyle = '#000';
   const px = () => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
   const drawImageCalls: DrawImageCall[] = [];
   const fillTextCalls: { text: string; x: number; y: number; font: string; fillStyle: string }[] = [];
+  const fontCalls: string[] = [];
   const ctx = {
     get font() { return font; },
-    set font(v: string) { font = v; },
+    set font(v: string) { font = v; fontCalls.push(v); },
     get fillStyle() { return fillStyle; },
     set fillStyle(v: string) { fillStyle = v; },
     measureText: (s: string) => {
@@ -59,7 +63,7 @@ function makeRecordingCtx(): {
     strokeStyle: '#000', lineWidth: 1,
     textAlign: 'left' as CanvasTextAlign, direction: 'ltr' as CanvasDirection,
   };
-  return { ctx: ctx as unknown as CanvasRenderingContext2D, drawImageCalls, fillTextCalls };
+  return { ctx: ctx as unknown as CanvasRenderingContext2D, drawImageCalls, fillTextCalls, fontCalls };
 }
 
 /** Build a shape (ShapeRun) carrying a single rich-text block whose `runs`
@@ -251,6 +255,46 @@ describe('textbox inline images — rendering', () => {
 });
 
 describe('textbox rich text — per-run formatting', () => {
+  it('uses one byte-identical service route for auto-fit, line metrics, and paint', () => {
+    const { ctx, fontCalls } = makeRecordingCtx();
+    const doc = {
+      section: {
+        pageWidth: 612, pageHeight: 792,
+        marginTop: 72, marginRight: 72, marginBottom: 72, marginLeft: 72,
+        headerDistance: 36, footerDistance: 36,
+        titlePage: false, evenAndOddHeaders: false,
+      },
+      body: [],
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      fontFamilyClasses: { 'Roman Face': 'roman' },
+    } as DocxDocumentModel;
+    const services = createLayoutServices(doc, { measureContext: ctx });
+    const route = services.text.shape({
+      text: 'route', fontSizePt: 10, fonts: { ascii: 'Roman Face', highAnsi: 'Roman Face' },
+    }).spans[0]!.fontRoute;
+    const expected = canvasFontString(route, 10, 400, 'normal');
+    const state = {
+      pageIndex: 0,
+      totalPages: 1,
+      layoutServices: services,
+      resolvedLocalFonts: services.text.localMetrics,
+    } as unknown as RenderState;
+    const shape = richTextbox([{ text: 'route', fontSizePt: 10, fontFamily: 'Roman Face' }]);
+
+    fontCalls.length = 0;
+    measureShapeTextAutoFitHeight(shape, 200, ctx, 1, doc.fontFamilyClasses, new Map(), state);
+    expect(fontCalls.filter((font) => font.includes('Roman Face')))
+      .toEqual(expect.arrayContaining([expected]));
+    expect(fontCalls.filter((font) => font.includes('Roman Face')).every((font) => font === expected)).toBe(true);
+
+    fontCalls.length = 0;
+    renderShapeText(shape, 0, 0, 200, 100, ctx, 1, doc.fontFamilyClasses, new Map(), state);
+    expect(fontCalls.filter((font) => font.includes('Roman Face')))
+      .toEqual(expect.arrayContaining([expected]));
+    expect(fontCalls.filter((font) => font.includes('Roman Face')).every((font) => font === expected)).toBe(true);
+  });
+
   /** Tokens belonging to a substring, with the font each was drawn with. */
   function tokensFor(
     calls: { text: string; font: string }[],
