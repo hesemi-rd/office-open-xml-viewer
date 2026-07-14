@@ -6,6 +6,10 @@ import type { DocRun, DocxDocumentModel, DocxTextRun } from './types.js';
 function model(fonts: string[]): DocxDocumentModel {
   return {
     fontFamilyClasses: Object.fromEntries(fonts.map((font) => [font, 'modern'])),
+    body: [{
+      type: 'paragraph',
+      runs: fonts.map((font) => ({ type: 'text', text: 'x', fontFamily: font })),
+    }],
   } as unknown as DocxDocumentModel;
 }
 
@@ -17,6 +21,54 @@ function paragraphWithFamily(family: string): unknown {
 }
 
 describe('docxLocalMetricRequests', () => {
+  it('snapshots every authored family and requested weight/style tuple', () => {
+    const doc = {
+      body: [{
+        type: 'paragraph',
+        runs: [
+          { type: 'text', text: 'plain', fontFamily: 'Times New Roman', bold: false, italic: false },
+          { type: 'text', text: 'bold italic', fontFamily: 'Times New Roman', bold: true, italic: true },
+          { type: 'text', text: '国', fontFamily: 'Arial', fontFamilyEastAsia: 'Yu Mincho', bold: true, italic: false },
+        ],
+      }],
+    } as unknown as DocxDocumentModel;
+
+    expect(docxLocalMetricRequests(doc)).toEqual([
+      { family: 'Times New Roman', localNames: ['Times New Roman'] },
+      { family: 'Times New Roman', localNames: ['Times New Roman'], weight: 700, style: 'italic' },
+      { family: 'Arial', localNames: ['Arial'], weight: 700 },
+      { family: 'Yu Mincho', localNames: ['Yu Mincho'], weight: 700 },
+    ]);
+  });
+
+  it('inventories Latin/eastAsia and complex-script axes with their independent style tuples', () => {
+    const doc = {
+      body: [{
+        type: 'paragraph',
+        runs: [
+          {
+            type: 'text', text: 'mixed', fontFamily: 'Latin Regular',
+            fontFamilyEastAsia: 'EA Regular', fontFamilyCs: 'CS Bold',
+            bold: false, italic: false, boldCs: true, italicCs: false,
+          },
+          {
+            type: 'text', text: 'inverse', fontFamily: 'Latin Bold',
+            fontFamilyEastAsia: 'EA Bold', fontFamilyCs: 'CS Regular',
+            bold: true, italic: false, boldCs: false, italicCs: false,
+          },
+        ],
+      }],
+    } as unknown as DocxDocumentModel;
+
+    expect(docxLocalMetricRequests(doc)).toEqual([
+      { family: 'Latin Regular', localNames: ['Latin Regular'] },
+      { family: 'EA Regular', localNames: ['EA Regular'] },
+      { family: 'CS Bold', localNames: ['CS Bold'], weight: 700 },
+      { family: 'Latin Bold', localNames: ['Latin Bold'], weight: 700 },
+      { family: 'EA Bold', localNames: ['EA Bold'], weight: 700 },
+      { family: 'CS Regular', localNames: ['CS Regular'] },
+    ]);
+  });
   it('maps Japanese and English Meiryo names to the exact local family', () => {
     expect(docxLocalMetricRequests(model(['メイリオ', 'Meiryo']))).toEqual([
       { family: 'メイリオ', localNames: ['Meiryo'], lineHeightMultiplier: 1.3 },
@@ -24,8 +76,10 @@ describe('docxLocalMetricRequests', () => {
     ]);
   });
 
-  it('does not merge Meiryo UI into Meiryo because their design metrics differ', () => {
-    expect(docxLocalMetricRequests(model(['Meiryo UI']))).toEqual([]);
+  it('probes Meiryo UI under its own isolated alias rather than merging it into Meiryo', () => {
+    expect(docxLocalMetricRequests(model(['Meiryo UI']))).toEqual([
+      { family: 'Meiryo UI', localNames: ['Meiryo UI'] },
+    ]);
   });
 
   it('keeps an embedded regular face authoritative over terminal-local probing and aliases', () => {
@@ -90,6 +144,7 @@ describe('docxLocalMetricRequests', () => {
     } as unknown as DocxDocumentModel;
 
     expect(docxLocalMetricRequests(doc)).toEqual([
+      { family: 'Arial', localNames: ['Arial'] },
       { family: 'Meiryo', localNames: ['Meiryo'], lineHeightMultiplier: 1.3 },
     ]);
   });
@@ -156,6 +211,27 @@ describe('docxLocalMetricRequests', () => {
     const segment = segments[0];
     expect('text' in segment && segment.fontFamily).toBe('__ooxml_local_meiryo');
     expect('text' in segment && segmentIntendedSingleLinePx(segment, 10, true)).toBeCloseTo(19.5, 8);
+  });
+
+  it('uses an ordinary local alias without inventing a line-height override', () => {
+    const run = {
+      type: 'text', text: 'Latin', bold: false, italic: false, underline: false,
+      strikethrough: false, fontSize: 10, color: null, fontFamily: 'Times New Roman',
+      vertAlign: null,
+    } as unknown as DocxTextRun;
+    const [segment] = buildSegments([run as unknown as DocRun], {
+      pageIndex: 0,
+      totalPages: 1,
+      resolvedLocalFonts: {
+        'times new roman': {
+          family: '__ooxml_local_times', requestedFamily: 'Times New Roman',
+          weight: 400, style: 'normal',
+        },
+      },
+    });
+
+    expect(segment).toMatchObject({ fontFamily: '__ooxml_local_times' });
+    expect('text' in segment && segment.resolvedLineHeightRatio).toBeUndefined();
   });
 
   it.each([

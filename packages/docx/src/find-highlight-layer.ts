@@ -22,7 +22,6 @@
  */
 import { sliceHorizontalExtent, overlayPercent, type MatchRunSlice } from '@silurus/ooxml-core';
 import type { DocxTextRunInfo } from './renderer';
-import { tateChuYokoOverlayScale } from './tate-chu-yoko-overlay';
 
 /** One page's highlight input: the run-slices a match covers, and whether that
  *  match is the active one (emphasis colour). */
@@ -85,19 +84,28 @@ export function buildDocxHighlightLayer(
       const measure = measureForFont(run.font);
       const extent = sliceHorizontalExtent(run.text, slice.start, slice.end, measure);
       // Canvas draws glyph i at measure(prefix_i) + i*pitch. Keep the shared
-      // natural-width slice intact and compose the DOCX-only pitch before the
-      // 縦中横 scale; no pitch follows the slice's final glyph.
+      // measured slice intact and compose the DOCX-only pitch; no pitch follows
+      // the slice's final glyph. Match offsets are UTF-16 positions, while
+      // letter-spacing applies per Unicode scalar, hence the explicit prefix
+      // and slice scalar counts.
       const pitch = run.letterSpacingPx ?? 0;
-      const end = Math.min(slice.end, [...run.text].length);
-      const pitchedX = extent.x + slice.start * pitch;
-      const pitchedWidth = extent.width + Math.max(0, end - slice.start - 1) * pitch;
-      // ECMA-376 §17.3.2.10 縦中横 (#836): a tate-chu-yoko run is drawn compressed
-      // into one em cell (`run.w`), so its natural per-glyph extents overshoot the
-      // drawn box. Scale the slice offset + width by `run.w / naturalWidth` so the
-      // highlight lands on the compressed cell (a no-op factor of 1 for every
-      // ordinary run — see tate-chu-yoko-overlay.ts). Applying one factor keeps a
-      // partial match proportional within the cell.
-      const k = tateChuYokoOverlayScale(run, measure);
+      const start = Math.max(0, Math.min(slice.start, run.text.length));
+      const end = Math.max(start, Math.min(slice.end, run.text.length));
+      const prefixGlyphCount = [...run.text.slice(0, start)].length;
+      const sliceGlyphCount = [...run.text.slice(start, end)].length;
+      const fullGlyphCount = [...run.text].length;
+      const pitchedX = extent.x + prefixGlyphCount * pitch;
+      const pitchedWidth = extent.width + Math.max(0, sliceGlyphCount - 1) * pitch;
+      // `run.w` is the advance retained from the actual paint pass. A later
+      // overlay measure may differ because of contextual kerning, a substituted
+      // host face, fitText pitch, horizontal scaling, or §17.3.2.10 縦中横
+      // compression. Project both prefix and slice extents through the same
+      // full-run ratio so the full match ends exactly at the drawn run edge and
+      // partial matches keep their measured intra-run proportions.
+      const measuredFullAdvance = measure(run.text) + Math.max(0, fullGlyphCount - 1) * pitch;
+      const k = measuredFullAdvance > 0 && Number.isFinite(run.w) && run.w >= 0
+        ? run.w / measuredFullAdvance
+        : 1;
       const x = pitchedX * k;
       const width = pitchedWidth * k;
       if (width <= 0) continue;

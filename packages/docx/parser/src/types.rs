@@ -39,6 +39,9 @@ pub struct Document {
     /// no pitches. BTreeMap for deterministic (byte-stable) JSON key order.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub font_family_pitches: BTreeMap<String, String>,
+    /// ECMA-376 §17.8.3.1 font name → w:charset hexadecimal byte.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub font_family_charsets: BTreeMap<String, String>,
     /// ECMA-376 §17.8.3.3-.6 — embedded fonts declared in `word/fontTable.xml`
     /// (`<w:embedRegular>` / `embedBold` / `embedItalic` / `embedBoldItalic`),
     /// resolved through `word/_rels/fontTable.xml.rels` to their obfuscated
@@ -1333,6 +1336,9 @@ pub struct TextRun {
     /// falls back to `font_family`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_family_east_asia: Option<String>,
+    /// Resolved ECMA-376 §17.3.2.26 rFonts@hint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_hint: Option<String>,
     pub is_link: bool,
     pub background: Option<String>,
     /// ECMA-376 §17.3.2.6 — `<w:color w:val="auto"/>` was set on this run. The
@@ -1422,6 +1428,9 @@ pub struct TextRun {
     /// Arabic/Hebrew digit ordering). `None` when unspecified.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lang_bidi: Option<String>,
+    /// Resolved ECMA-376 §17.3.2.20 w:lang/@w:eastAsia.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang_east_asia: Option<String>,
     /// ECMA-376 §17.3.2.34 `<w:snapToGrid>` — run participation in the section
     /// character grid. `Some(false)` opts this run out; `None` inherits.
     #[serde(skip_serializing_if = "Option::is_none")]

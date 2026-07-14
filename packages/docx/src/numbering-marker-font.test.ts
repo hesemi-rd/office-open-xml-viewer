@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { renderDocumentToCanvas, type DocxTextRunInfo } from './renderer.js';
+import { createLayoutServices, renderDocumentToCanvas, type DocxTextRunInfo } from './renderer.js';
+import { testFontSnapshot } from './layout/test-font-snapshot.js';
 import type {
   BodyElement,
   DocParagraph,
@@ -119,10 +120,15 @@ function headingDoc(num: NumberingInfo | null): DocxDocumentModel {
 async function render(num: NumberingInfo | null) {
   const { canvas, fillTextCalls } = makeRecordingCanvas();
   const runs: DocxTextRunInfo[] = [];
-  await renderDocumentToCanvas(headingDoc(num), canvas, 0, {
+  const model = headingDoc(num);
+  await renderDocumentToCanvas(model, canvas, 0, {
     dpr: 1,
     width: 400, // scale = 1 (px per pt)
     onTextRun: (r) => runs.push(r),
+    layoutServices: createLayoutServices(model, {
+      localMetrics: testFontSnapshot(model),
+      measureContext: canvas.getContext('2d'),
+    }),
   });
   return { runs, fillTextCalls };
 }
@@ -191,6 +197,9 @@ describe('numbering marker + body eastAsia font routing (§17.3.2.26 / §17.9.6)
     } as unknown as DocxDocumentModel;
     await renderDocumentToCanvas(model, canvas, 0, {
       dpr: 1, width: 400, onTextRun: (r) => runs.push(r),
+      layoutServices: createLayoutServices(model, {
+        localMetrics: testFontSnapshot(model), measureContext: canvas.getContext('2d'),
+      }),
     });
     const seg = runs.find((r) => r.text === '原稿');
     expect(seg).toBeDefined();
@@ -223,6 +232,9 @@ describe('numbering marker + body eastAsia font routing (§17.3.2.26 / §17.9.6)
     } as unknown as DocxDocumentModel;
     await renderDocumentToCanvas(model, canvas, 0, {
       dpr: 1, width: 400, onTextRun: (r) => runs.push(r),
+      layoutServices: createLayoutServices(model, {
+        localMetrics: testFontSnapshot(model), measureContext: canvas.getContext('2d'),
+      }),
     });
     const seg = runs.find((r) => r.text === '本文')!;
     expect(headFamily(seg.font)).toBe('ＭＳ 明朝'); // eastAsia mincho

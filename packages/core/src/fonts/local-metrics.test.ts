@@ -25,7 +25,7 @@ afterEach(() => {
   _resetFontRegistryForTests();
 });
 
-function installFontEnvironment() {
+function installFontEnvironment(widthOf: (text: string) => number = () => 50) {
   const added: FakeFontFace[] = [];
   const deleted: FakeFontFace[] = [];
   class FakeFontFace {
@@ -33,6 +33,7 @@ function installFontEnvironment() {
     constructor(
       readonly family: string,
       readonly source: string,
+      readonly descriptors: FontFaceDescriptors = {},
     ) {}
     async load(): Promise<this> {
       if (this.source.includes('Missing Face')) {
@@ -52,7 +53,8 @@ function installFontEnvironment() {
     getContext() {
       return {
         font: '',
-        measureText: () => ({
+        measureText: (text: string) => ({
+          width: widthOf(text),
           fontBoundingBoxAscent: 106,
           fontBoundingBoxDescent: 44,
         }),
@@ -100,6 +102,39 @@ describe('loadLocalFontMetrics', () => {
     expect(deleted).toEqual(added);
   });
 
+  it('maps styled Canvas tuples to one positively loaded regular alias and fingerprints synthesis', async () => {
+    const { added } = installFontEnvironment();
+    const loaded = await loadLocalFontMetrics([
+      { family: 'Authored Serif', localNames: ['Authored Serif'] },
+      { family: 'Authored Serif', localNames: ['Authored Serif'], weight: 700, style: 'italic' },
+    ]);
+
+    expect(added).toHaveLength(1);
+    expect(added[0].descriptors).toEqual({});
+    expect(loaded.metrics['authored serif'].family)
+      .toBe(loaded.metrics['authored serif:700:italic'].family);
+    expect(loaded.metrics['authored serif:700:italic']).toMatchObject({
+      requestedFamily: 'Authored Serif', weight: 700, style: 'italic',
+    });
+    expect(loaded.metrics['authored serif:700:italic'].geometrySignature).toMatch(/^\[/);
+    expect(loaded.metrics['authored serif:700:italic'].lineHeightRatio).toBeUndefined();
+  });
+
+  it('changes the geometry hash when document-used glyphs differ despite matching sentinels', async () => {
+    const request = [{
+      family: 'Authored Serif', localNames: ['Authored Serif'], geometryProbeTexts: ['Q'],
+    }];
+    installFontEnvironment((text) => text === 'Q' ? 51 : 50);
+    const first = await loadLocalFontMetrics(request);
+    unloadLocalFontMetrics(first.faces);
+
+    installFontEnvironment((text) => text === 'Q' ? 52 : 50);
+    const second = await loadLocalFontMetrics(request);
+
+    expect(first.metrics['authored serif'].geometrySignature)
+      .not.toBe(second.metrics['authored serif'].geometrySignature);
+  });
+
   it('waits for a shared face that another document is still loading', async () => {
     const added: Array<{ family: string; source: string; status: FontFaceLoadStatus }> = [];
     let finishLoad!: () => void;
@@ -124,8 +159,8 @@ describe('loadLocalFontMetrics', () => {
         return {
           font: '',
           measureText: () => added[0]?.status === 'loaded'
-            ? { fontBoundingBoxAscent: 106, fontBoundingBoxDescent: 44 }
-            : { fontBoundingBoxAscent: Number.NaN, fontBoundingBoxDescent: Number.NaN },
+            ? { width: 50, fontBoundingBoxAscent: 106, fontBoundingBoxDescent: 44 }
+            : { width: Number.NaN, fontBoundingBoxAscent: Number.NaN, fontBoundingBoxDescent: Number.NaN },
         };
       }
     }

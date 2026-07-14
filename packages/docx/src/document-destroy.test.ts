@@ -116,7 +116,13 @@ function installLocalMetricFontEnvironment(): { added: FakeFace[] } {
     getContext() {
       return {
         font: '',
-        measureText: () => ({ fontBoundingBoxAscent: 106, fontBoundingBoxDescent: 44 }),
+        measureText: () => ({
+          width: 50,
+          actualBoundingBoxAscent: 80,
+          actualBoundingBoxDescent: 20,
+          fontBoundingBoxAscent: 106,
+          fontBoundingBoxDescent: 44,
+        }),
       };
     }
   }

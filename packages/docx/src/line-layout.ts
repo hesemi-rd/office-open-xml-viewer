@@ -1295,7 +1295,7 @@ export function paragraphMarkLineMetrics(
   } else {
     ({ asc, desc } = emptyLineNaturalPx(fs, scale));
   }
-  const intendedSingle = resolvedLocalFont
+  const intendedSingle = resolvedLocalFont?.lineHeightRatio != null
     ? fs * scale * resolvedLocalFont.lineHeightRatio
     : emptyIntendedSingleForScriptPx(para, scale, eastAsian);
   const gridCountSingle = eastAsian
@@ -2172,8 +2172,25 @@ function resolveFitTextSegments(
 
 export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment): LayoutSeg[] {
   const segs: LayoutSeg[] = [];
-  const resolvedFont = (family: string | null | undefined): ResolvedLocalFontMetric | undefined =>
-    family ? environment.resolvedLocalFonts?.[normalizeLocalFontMetricFamily(family)] : undefined;
+  const resolvedFont = (
+    family: string | null | undefined,
+    weight = 400,
+    style: 'normal' | 'italic' = 'normal',
+  ): ResolvedLocalFontMetric | undefined => {
+    if (!family) return undefined;
+    const normalized = normalizeLocalFontMetricFamily(family);
+    const metrics = environment.resolvedLocalFonts;
+    if (!metrics) return undefined;
+    const tuple = metrics[`${normalized}:${weight}:${style}`];
+    if (tuple) return tuple;
+    const normal = metrics[normalized];
+    if (weight === 400 && style === 'normal' && normal) return normal;
+    return Object.values(metrics).find((metric) =>
+      normalizeLocalFontMetricFamily(metric.requestedFamily ?? '') === normalized
+      && (metric.weight ?? 400) === weight
+      && (metric.style ?? 'normal') === style,
+    );
+  };
   // Group §17.3.2.14 adjacency over SOURCE RUNS before script/font, word, or
   // small-caps segmentation, but model each tab-delimited fragment as its own
   // source unit. A tab is a position-dependent advance rather than a glyph, so a
@@ -2234,6 +2251,10 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
       : undefined;
     const revision = (base as DocxTextRun).revision;
     const r = base as DocxTextRun;
+    const slotMetadata = r as DocxTextRun & {
+      fontHint?: 'default' | 'eastAsia' | 'cs';
+      langEastAsia?: string;
+    };
     const rtl = r.rtl === true ? true : undefined;
     const fitTextFragmentEntryIndex = sourceFragmentIndex === undefined
       ? undefined
@@ -2253,10 +2274,9 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         ? { kind: 'internal', ref: r.hyperlinkAnchor }
         : undefined;
 
-    // ECMA-376 §17.3.2.26 content classification. A run with `w:rtl`
-    // (§17.3.2.30) or the `<w:cs/>` toggle (§17.3.2.7) applies complex-script
-    // formatting to ALL of its characters; otherwise each character is routed by
-    // its Unicode block (Arabic/Hebrew/... → cs; Latin/digits/CJK → ascii/hAnsi).
+    // ECMA-376 §17.3.2.26 content classification. w:rtl/w:cs selects the cs
+    // axis except for a character assigned eastAsia while rFonts@hint=eastAsia;
+    // that protected span keeps the non-cs East Asian formatting axis.
     // NOTE rFonts@cs (fontFamilyCs) alone is just a font SLOT and must NOT
     // force cs — e.g. sample-1's Heading1 (Latin) has cstheme + szCs=52 but
     // renders at w:sz=24; forcing cs blew its size up to 26pt.
@@ -2305,15 +2325,18 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
     const pushSeg = (text: string, cs: boolean, fontFamily: string | null) => {
       const bold = cs ? csBold : base.bold;
       const italic = cs ? csItalic : base.italic;
-      const localFont = resolvedFont(fontFamily);
-      const localEaFloor = resolvedFont(eaFontFamily);
-      // Local-metric aliases intentionally register the normal face only. A
-      // bold/italic Canvas request against that alias would synthesize the
-      // style instead of resolving the installed family's real styled face.
-      // Keep the authored family for styled paint/measurement, while retaining
-      // the family-level design line ratio used by Word's line-box calculation.
-      const localPaintFamily = !bold && !italic ? localFont?.family : undefined;
-      const localEaFloorFamily = !bold && !italic ? localEaFloor?.family : undefined;
+      const weight = bold ? 700 : 400;
+      const style = italic ? 'italic' as const : 'normal' as const;
+      const localFont = resolvedFont(fontFamily, weight, style);
+      const localEaFloor = resolvedFont(eaFontFamily, weight, style);
+      const familyLineMetric = localFont ?? (fontFamily
+        ? environment.resolvedLocalFonts?.[normalizeLocalFontMetricFamily(fontFamily)]
+        : undefined);
+      const eaLineMetric = localEaFloor ?? (eaFontFamily
+        ? environment.resolvedLocalFonts?.[normalizeLocalFontMetricFamily(eaFontFamily)]
+        : undefined);
+      const localPaintFamily = localFont?.family;
+      const localEaFloorFamily = localEaFloor?.family;
       const textShapeRequest: TextShapeRequest = Object.freeze({
         text,
         fontSizePt: cs ? csFontSize : base.fontSize,
@@ -2323,15 +2346,32 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
           eastAsia: eaFontFamily,
           complexScript: csFontFamily,
         },
-        weight: bold ? 700 : 400,
-        style: italic ? 'italic' : 'normal',
+        weight,
+        style,
         complexScript: cs,
+        fontHint: slotMetadata.fontHint,
+        eastAsiaLanguage: slotMetadata.langEastAsia,
         kerning: r.kerning == null
           ? undefined
           : (cs ? csFontSize : base.fontSize) >= r.kerning,
         measure: false,
       });
       const shaped = environment.layoutServices?.text.shape(textShapeRequest);
+      const resolvedAxisDiffers = shaped?.spans.some((span) =>
+        (span.script === 'complexScript') !== cs,
+      ) ?? false;
+      if (shaped && (shaped.spans.length > 1 || resolvedAxisDiffers)) {
+        for (const span of shaped.spans) {
+          const spanCs = span.script === 'complexScript';
+          const spanFamily = spanCs
+            ? csFontFamily
+            : span.script === 'eastAsia'
+              ? eaFontFamily
+              : base.fontFamily;
+          pushSeg(span.text, spanCs, spanFamily);
+        }
+        return;
+      }
       const resolvedFamilies = new Set(shaped?.spans.map((span) => span.font.resolvedFamily));
       const resolvedPaintFamily = resolvedFamilies.size === 1
         ? shaped?.spans[0]?.font.resolvedFamily
@@ -2350,7 +2390,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         fontSize: cs ? csFontSize : base.fontSize,
         color: base.color,
         fontFamily: resolvedPaintFamily ?? localPaintFamily ?? fontFamily,
-        resolvedLineHeightRatio: localFont?.lineHeightRatio,
+        resolvedLineHeightRatio: familyLineMetric?.lineHeightRatio,
         vertAlign,
         measuredWidth: 0,
         textLayoutService: environment.layoutServices?.text,
@@ -2372,7 +2412,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         // §17.3.2.26 declared eastAsia axis — recorded for the text-box line-box
         // floor only (see LayoutTextSeg.eaFloorFamily). Inert for the body path.
         eaFloorFamily: localEaFloorFamily ?? eaFontFamily,
-        resolvedEaFloorLineHeightRatio: localEaFloor?.lineHeightRatio,
+        resolvedEaFloorLineHeightRatio: eaLineMetric?.lineHeightRatio,
         // IX1 — resolved hyperlink target of the originating run, for the
         // text-layer clickable overlay. Does not affect layout or drawing.
         hyperlink,
@@ -2606,9 +2646,16 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
       const bold = run.bold ?? false;
       const italic = run.italic ?? false;
       const authoredFamily = run.fontFamilyEastAsia ?? run.fontFamily ?? null;
-      const localFont = resolvedFont(authoredFamily);
-      const localEaFloor = resolvedFont(run.fontFamilyEastAsia ?? null);
-      const normalFace = !bold && !italic;
+      const weight = bold ? 700 : 400;
+      const style = italic ? 'italic' as const : 'normal' as const;
+      const localFont = resolvedFont(authoredFamily, weight, style);
+      const localEaFloor = resolvedFont(run.fontFamilyEastAsia ?? null, weight, style);
+      const familyLineMetric = localFont ?? (authoredFamily
+        ? environment.resolvedLocalFonts?.[normalizeLocalFontMetricFamily(authoredFamily)]
+        : undefined);
+      const eaLineMetric = localEaFloor ?? (run.fontFamilyEastAsia
+        ? environment.resolvedLocalFonts?.[normalizeLocalFontMetricFamily(run.fontFamilyEastAsia)]
+        : undefined);
       segs.push({
         text: '',
         metricOnly: true,
@@ -2619,13 +2666,13 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         strikethrough: false,
         fontSize: run.fontSize,
         color: null,
-        fontFamily: (normalFace ? localFont?.family : undefined) ?? authoredFamily,
-        resolvedLineHeightRatio: localFont?.lineHeightRatio,
+        fontFamily: localFont?.family ?? authoredFamily,
+        resolvedLineHeightRatio: familyLineMetric?.lineHeightRatio,
         vertAlign: null,
         measuredWidth: 0,
         eaFloorFamily:
-          (normalFace ? localEaFloor?.family : undefined) ?? run.fontFamilyEastAsia ?? null,
-        resolvedEaFloorLineHeightRatio: localEaFloor?.lineHeightRatio,
+          localEaFloor?.family ?? run.fontFamilyEastAsia ?? null,
+        resolvedEaFloorLineHeightRatio: eaLineMetric?.lineHeightRatio,
         snapToCharacterGrid: false,
       });
     }

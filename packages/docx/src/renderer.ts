@@ -336,6 +336,10 @@ export function createLayoutServices(
   } = {},
 ): LayoutServices {
   const localMetrics = Object.freeze({ ...(options.localMetrics ?? {}) });
+  const fontFamilyCharsets = Object.freeze(Object.fromEntries(
+    Object.entries((doc as DocxDocumentModel & { fontFamilyCharsets?: Record<string, string> }).fontFamilyCharsets ?? {})
+      .map(([family, charset]) => [family.trim().toLowerCase(), charset]),
+  ));
   const displayFaceFamily = (family: string): string => family
     .trim()
     .replace(/^(['"])(.*)\1$/, '$2');
@@ -382,7 +386,13 @@ export function createLayoutServices(
     }];
   });
   for (const [requestedFamily, metric] of Object.entries(localMetrics)) {
-    inventory.push({ requestedFamily, resolvedFamily: metric.family, source: 'local', weights: [400], styles: ['normal'] });
+    inventory.push({
+      requestedFamily: metric.requestedFamily ?? requestedFamily,
+      resolvedFamily: metric.family,
+      source: 'local',
+      weights: [metric.weight ?? 400],
+      styles: [metric.style ?? 'normal'],
+    });
   }
   if (options.useGoogleFonts) {
     const successfulGoogle = loadedFaces(options.googleFaces ?? []);
@@ -414,6 +424,7 @@ export function createLayoutServices(
   const textBase = createTextLayoutService({
     fonts: createFontResolver(inventory),
     localMetrics,
+    eastAsiaFontCharsets: fontFamilyCharsets,
     measurer: {
       fingerprint: ctx ? 'canvas-text-metrics-v1' : 'deterministic-text-metrics-v1',
       measure(request: Readonly<GlyphMeasureRequest>) {

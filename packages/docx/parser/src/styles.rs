@@ -44,6 +44,8 @@ pub struct RunFmt {
     pub color_auto: bool,
     pub font_family_ascii: Option<String>,
     pub font_family_east_asia: Option<String>,
+    /// ECMA-376 §17.3.2.26 rFonts@hint, resolved through the run style chain.
+    pub font_hint: Option<String>,
     pub background: Option<String>, // hex 6
     /// "super" | "sub" — mapped from w:vertAlign val="superscript|subscript"
     pub vert_align: Option<String>,
@@ -112,6 +114,8 @@ pub struct RunFmt {
     /// ECMA-376 §17.3.2.20 w:lang/@w:bidi — complex-script (RTL) language tag,
     /// lower-cased (e.g. "ar-sa", "ae-ar"). Drives Word's AN digit ordering.
     pub lang_bidi: Option<String>,
+    /// ECMA-376 §17.3.2.20 w:lang/@w:eastAsia, lower-cased.
+    pub lang_east_asia: Option<String>,
     /// ECMA-376 §17.3.2.35 `<w:spacing w:val>` — character-spacing adjustment,
     /// the pitch added AFTER each character before the next is rendered
     /// ("equivalent to the additional character pitch added by a document
@@ -929,6 +933,9 @@ pub(crate) fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     if src.font_family_east_asia.is_some() {
         dst.font_family_east_asia = src.font_family_east_asia.clone();
     }
+    if src.font_hint.is_some() {
+        dst.font_hint = src.font_hint.clone();
+    }
     if src.background.is_some() {
         dst.background = src.background.clone();
     }
@@ -983,6 +990,9 @@ pub(crate) fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     }
     if src.lang_bidi.is_some() {
         dst.lang_bidi = src.lang_bidi.clone();
+    }
+    if src.lang_east_asia.is_some() {
+        dst.lang_east_asia = src.lang_east_asia.clone();
     }
     // Run character-metric axes (§17.3.2.14 fitText / §17.3.2.35 spacing /
     // §17.3.2.43 w / §17.3.2.24 position / §17.3.2.19 kern). Each carries the
@@ -1380,6 +1390,11 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
                 fmt.lang_bidi = Some(bidi.to_lowercase());
             }
         }
+        if let Some(east_asia) = attr_w(lang, "eastAsia") {
+            if !east_asia.is_empty() {
+                fmt.lang_east_asia = Some(east_asia.to_lowercase());
+            }
+        }
     }
 
     // Color. An explicit `<w:color w:val="auto"/>` (ECMA-376 §17.3.2.6) does NOT
@@ -1409,6 +1424,7 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
     // reference string under the corresponding axis. Direct attributes take
     // precedence over theme refs per spec.
     if let Some(rf) = child_w(rpr, "rFonts") {
+        fmt.font_hint = attr_w(rf, "hint");
         let direct_ascii = attr_w(rf, "ascii").or_else(|| attr_w(rf, "hAnsi"));
         let theme_ascii = attr_w(rf, "asciiTheme").or_else(|| attr_w(rf, "hAnsiTheme"));
         fmt.font_family_ascii = direct_ascii.or_else(|| theme_ascii.map(|t| format!("@theme:{t}")));
@@ -1962,6 +1978,15 @@ mod tests {
         apply_run(&mut dst, &src);
         assert_eq!(dst.color, None);
         assert!(dst.color_auto);
+    }
+
+    #[test]
+    fn east_asia_font_hint_and_language_override_through_run_merge() {
+        let mut dst = run_fmt_from(r#"<w:rFonts w:hint="default"/><w:lang w:eastAsia="ja-JP"/>"#);
+        let src = run_fmt_from(r#"<w:rFonts w:hint="eastAsia"/><w:lang w:eastAsia="ZH-cn"/>"#);
+        apply_run(&mut dst, &src);
+        assert_eq!(dst.font_hint.as_deref(), Some("eastAsia"));
+        assert_eq!(dst.lang_east_asia.as_deref(), Some("zh-cn"));
     }
 
     #[test]

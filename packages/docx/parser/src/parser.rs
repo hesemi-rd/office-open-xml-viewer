@@ -347,7 +347,8 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
         })
         .unwrap_or_else(|| "word/fontTable.xml".to_string());
     let font_table_xml = read_zip_string(zip, &font_table_path).unwrap_or_default();
-    let (font_family_classes, font_family_pitches) = parse_font_table(&font_table_xml);
+    let (font_family_classes, font_family_pitches, font_family_charsets) =
+        parse_font_table(&font_table_xml);
     // ECMA-376 §17.8.3.3-.6 — embedded fonts. The `<w:embed*>` r:ids resolve
     // through the fontTable part's OWN relationships (`word/_rels/fontTable.xml.rels`
     // when the part is `word/fontTable.xml`): insert `_rels/` before the filename
@@ -414,6 +415,7 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
         minor_font,
         font_family_classes,
         font_family_pitches,
+        font_family_charsets,
         embedded_fonts,
         revisions,
         comments,
@@ -1032,11 +1034,18 @@ fn find_rel_target(rels_xml: &str, type_suffix: &str) -> Option<String> {
 /// (§17.18.66) is `fixed` (Fixed Width), `variable` (Proportional Width), or
 /// `default` (no pitch information). An omitted `<w:pitch>` is assumed to be
 /// `default`, so only explicitly declared pitch values are added to the map.
-fn parse_font_table(xml: &str) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
+fn parse_font_table(
+    xml: &str,
+) -> (
+    BTreeMap<String, String>,
+    BTreeMap<String, String>,
+    BTreeMap<String, String>,
+) {
     let mut classes = BTreeMap::new();
     let mut pitches = BTreeMap::new();
+    let mut charsets = BTreeMap::new();
     let Ok(doc) = parse_guarded(xml) else {
-        return (classes, pitches);
+        return (classes, pitches, charsets);
     };
     for font in doc.root_element().descendants().filter(|n| {
         n.is_element() && n.tag_name().name() == "font" && is_w_ns(n.tag_name().namespace())
@@ -1085,8 +1094,26 @@ fn parse_font_table(xml: &str) -> (BTreeMap<String, String>, BTreeMap<String, St
         if let Some(p) = pitch {
             pitches.insert(name.to_string(), p.to_string());
         }
+        let charset = font
+            .children()
+            .find(|n| {
+                n.is_element()
+                    && n.tag_name().name() == "charset"
+                    && is_w_ns(n.tag_name().namespace())
+            })
+            .and_then(|n| {
+                attr_ns(
+                    &n,
+                    wordprocessingml::TRANSITIONAL,
+                    wordprocessingml::STRICT,
+                    "val",
+                )
+            });
+        if let Some(value) = charset {
+            charsets.insert(name.to_string(), value.to_uppercase());
+        }
     }
-    (classes, pitches)
+    (classes, pitches, charsets)
 }
 
 #[cfg(test)]
@@ -1101,6 +1128,7 @@ mod font_table_tests {
                  <w:font w:name="Meiryo UI">
                    <w:family w:val="modern"/>
                    <w:pitch w:val="variable"/>
+                   <w:charset w:val="86"/>
                  </w:font>
                  <w:font w:name="No Pitch">
                    <w:family w:val="modern"/>
@@ -1108,7 +1136,7 @@ mod font_table_tests {
                </w:fonts>"#,
         );
 
-        let (classes, pitches) = parse_font_table(&xml);
+        let (classes, pitches, charsets) = parse_font_table(&xml);
 
         assert_eq!(classes.get("Meiryo UI").map(String::as_str), Some("modern"));
         assert_eq!(
@@ -1116,6 +1144,7 @@ mod font_table_tests {
             Some("variable")
         );
         assert!(!pitches.contains_key("No Pitch"));
+        assert_eq!(charsets.get("Meiryo UI").map(String::as_str), Some("86"));
     }
 }
 
@@ -3065,6 +3094,7 @@ fn text_runs_mergeable(a: &TextRun, b: &TextRun) -> bool {
         && a.color == b.color
         && a.font_family == b.font_family
         && a.font_family_east_asia == b.font_family_east_asia
+        && a.font_hint == b.font_hint
         && a.is_link == b.is_link
         && a.background == b.background
         && a.color_auto == b.color_auto
@@ -3083,6 +3113,7 @@ fn text_runs_mergeable(a: &TextRun, b: &TextRun) -> bool {
         && a.bold_cs == b.bold_cs
         && a.italic_cs == b.italic_cs
         && a.lang_bidi == b.lang_bidi
+        && a.lang_east_asia == b.lang_east_asia
         && a.snap_to_grid == b.snap_to_grid
         // Character metrics change measured or painted geometry, so every one
         // must match before a noBreakHyphen run can be folded into its neighbour.
@@ -3263,6 +3294,8 @@ fn parse_run_inner(
     let bold_cs = fmt.bold_cs;
     let italic_cs = fmt.italic_cs;
     let lang_bidi = fmt.lang_bidi.clone();
+    let lang_east_asia = fmt.lang_east_asia.clone();
+    let font_hint = fmt.font_hint.clone();
     let snap_to_grid = fmt.snap_to_grid;
     // Run character metrics (ECMA-376 §17.3.2.35 spacing / §17.3.2.43 w /
     // §17.3.2.24 position / §17.3.2.19 kern), resolved through the style chain
@@ -3319,6 +3352,7 @@ fn parse_run_inner(
                         color: color.clone(),
                         font_family: font_family.clone(),
                         font_family_east_asia: font_family_east_asia.clone(),
+                        font_hint: font_hint.clone(),
                         is_link,
                         background: fmt.background.clone(),
                         color_auto,
@@ -3340,6 +3374,7 @@ fn parse_run_inner(
                         bold_cs,
                         italic_cs,
                         lang_bidi: lang_bidi.clone(),
+                        lang_east_asia: lang_east_asia.clone(),
                         snap_to_grid,
                         char_spacing,
                         fit_text_val,
@@ -3399,6 +3434,7 @@ fn parse_run_inner(
                         // face. PUA sym chars route to the Latin slot, so the ascii
                         // axis (`font_family`) is what actually drives rendering.
                         font_family_east_asia: sym_font,
+                        font_hint: font_hint.clone(),
                         is_link,
                         background: fmt.background.clone(),
                         color_auto,
@@ -3420,6 +3456,7 @@ fn parse_run_inner(
                         bold_cs,
                         italic_cs,
                         lang_bidi: lang_bidi.clone(),
+                        lang_east_asia: lang_east_asia.clone(),
                         snap_to_grid,
                         char_spacing,
                         fit_text_val,
@@ -3449,6 +3486,7 @@ fn parse_run_inner(
                     color: color.clone(),
                     font_family: font_family.clone(),
                     font_family_east_asia: font_family_east_asia.clone(),
+                    font_hint: font_hint.clone(),
                     is_link,
                     background: fmt.background.clone(),
                     color_auto,
@@ -3470,6 +3508,7 @@ fn parse_run_inner(
                     bold_cs,
                     italic_cs,
                     lang_bidi: lang_bidi.clone(),
+                    lang_east_asia: lang_east_asia.clone(),
                     snap_to_grid,
                     char_spacing,
                     fit_text_val,
@@ -3544,6 +3583,7 @@ fn parse_run_inner(
                     color: color.clone(),
                     font_family: font_family.clone(),
                     font_family_east_asia: font_family_east_asia.clone(),
+                    font_hint: font_hint.clone(),
                     is_link,
                     background: fmt.background.clone(),
                     color_auto,
@@ -3565,6 +3605,7 @@ fn parse_run_inner(
                     bold_cs,
                     italic_cs,
                     lang_bidi: lang_bidi.clone(),
+                    lang_east_asia: lang_east_asia.clone(),
                     snap_to_grid,
                     char_spacing,
                     fit_text_val,
@@ -3741,6 +3782,7 @@ fn parse_run_inner(
                     color: color.clone(),
                     font_family: font_family.clone(),
                     font_family_east_asia: font_family_east_asia.clone(),
+                    font_hint: font_hint.clone(),
                     is_link,
                     background: fmt.background.clone(),
                     color_auto,
@@ -3767,6 +3809,7 @@ fn parse_run_inner(
                     bold_cs,
                     italic_cs,
                     lang_bidi: lang_bidi.clone(),
+                    lang_east_asia: lang_east_asia.clone(),
                     snap_to_grid,
                     char_spacing,
                     fit_text_val,
@@ -10946,7 +10989,8 @@ mod rtl_tests {
     fn complex_script_bold_italic_and_lang_bidi_are_extracted() {
         let body = body_from(
             r#"<w:p><w:r><w:rPr><w:rtl/><w:bCs/><w:iCs/>
-              <w:lang w:val="en-AE" w:bidi="ae-AR"/></w:rPr><w:t>28-02-2026</w:t></w:r></w:p>"#,
+              <w:rFonts w:ascii="Latin" w:eastAsia="EA" w:hint="eastAsia"/>
+              <w:lang w:val="en-AE" w:eastAsia="ZH-cn" w:bidi="ae-AR"/></w:rPr><w:t>28-02-2026</w:t></w:r></w:p>"#,
         );
         let run = body
             .iter()
@@ -10965,6 +11009,8 @@ mod rtl_tests {
             Some("ae-ar"),
             "w:lang@w:bidi lower-cased → run.langBidi"
         );
+        assert_eq!(run.font_hint.as_deref(), Some("eastAsia"));
+        assert_eq!(run.lang_east_asia.as_deref(), Some("zh-cn"));
     }
 
     /// Legacy VML text box (ECMA-376 Part 4 §14.1): `<w:pict>` with a

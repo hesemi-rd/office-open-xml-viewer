@@ -104,6 +104,104 @@ describe('production layout service integration', () => {
     expect(ctx.fontKerning).toBe('auto');
   });
 
+  it('keeps hint-protected eastAsia text on non-cs formatting inside an rtl run', () => {
+    const services = createLayoutServices(model(), { measureContext: measureContext() });
+    const run = textRun('A国', {
+      fontFamily: 'Latin Face',
+      fontFamilyEastAsia: 'EA Face',
+      fontFamilyCs: 'CS Face',
+      fontHint: 'eastAsia',
+      langEastAsia: 'zh-cn',
+      rtl: true,
+      cs: true,
+      fontSize: 10,
+      fontSizeCs: 20,
+      bold: false,
+      boldCs: true,
+    });
+    const segments = buildSegments([run], { pageIndex: 0, totalPages: 1, layoutServices: services });
+    const textSegments = segments.filter((segment) => 'text' in segment && segment.text.length > 0);
+
+    expect(textSegments.map((segment) => 'text' in segment ? {
+      text: segment.text,
+      fontFamily: segment.fontFamily,
+      fontSize: segment.fontSize,
+      bold: segment.bold,
+    } : null)).toEqual([
+      { text: 'A', fontFamily: 'sans-serif', fontSize: 20, bold: true },
+      { text: '国', fontFamily: 'sans-serif', fontSize: 10, bold: false },
+    ]);
+    expect(textSegments.map((segment) => 'text' in segment
+      ? segment.textShapeRequest?.fonts.complexScript === 'CS Face' && segment.textShapeRequest?.complexScript
+      : false)).toEqual([true, false]);
+  });
+
+  it('keeps a single pure-CJK hint-protected rtl span on non-cs formatting', () => {
+    const services = createLayoutServices(model(), { measureContext: measureContext() });
+    const [segment] = buildSegments([textRun('国', {
+      fontFamily: 'Latin Face', fontFamilyEastAsia: 'EA Face', fontFamilyCs: 'CS Face',
+      fontHint: 'eastAsia', langEastAsia: 'zh-cn', rtl: true, cs: true,
+      fontSize: 10, fontSizeCs: 20, bold: false, boldCs: true,
+    })], { pageIndex: 0, totalPages: 1, layoutServices: services });
+
+    expect(segment).toMatchObject({ text: '国', fontSize: 10, bold: false, fontFamily: 'sans-serif' });
+    expect('text' in segment && segment.textShapeRequest?.complexScript).toBe(false);
+  });
+
+  it('plumbs the selected eastAsia font charset from fontTable into slot selection', () => {
+    const doc = model() as DocxDocumentModel & { fontFamilyCharsets: Record<string, string> };
+    doc.fontFamilyCharsets = { 'EA Face': '86' };
+    const services = createLayoutServices(doc, { measureContext: measureContext() });
+    const shaped = services.text.shape({
+      text: '\u0100',
+      fontSizePt: 10,
+      fontHint: 'eastAsia',
+      eastAsiaLanguage: 'ja-jp',
+      fonts: { ascii: 'Latin Face', highAnsi: 'Latin Face', eastAsia: 'EA Face' },
+    });
+
+    expect(shaped.spans[0]?.script).toBe('eastAsia');
+  });
+
+  it('makes local availability, geometry, diagnostics, and fingerprints truthful and worker-stable', () => {
+    const fonts: string[] = [];
+    const ctx = {
+      ...measureContext(),
+      get font() { return fonts.at(-1) ?? ''; },
+      set font(value: string) { fonts.push(value); },
+      measureText(text: string) {
+        const width = (fonts.at(-1) ?? '').includes('__local_times_bi') ? 17 : 5;
+        return {
+          width: text.length * width,
+          actualBoundingBoxAscent: 8,
+          actualBoundingBoxDescent: 2,
+          fontBoundingBoxAscent: 8,
+          fontBoundingBoxDescent: 2,
+        } as TextMetrics;
+      },
+    } as CanvasRenderingContext2D;
+    const localMetrics = {
+      'times new roman:700:italic': {
+        family: '__local_times_bi', lineHeightRatio: 1.2,
+        requestedFamily: 'Times New Roman', weight: 700, style: 'italic' as const,
+      },
+    };
+    const shape = (services: ReturnType<typeof createLayoutServices>) => services.text.shape({
+      text: 'AV', fontSizePt: 10, weight: 700, style: 'italic',
+      fonts: { ascii: 'Times New Roman' },
+    });
+    const present = createLayoutServices(model(), { measureContext: ctx, localMetrics });
+    const worker = createLayoutServices(model(), { measureContext: ctx, localMetrics });
+    const absent = createLayoutServices(model(), { measureContext: ctx, localMetrics: {} });
+
+    expect(shape(present).spans[0]?.font).toMatchObject({ source: 'local', resolvedFamily: '__local_times_bi' });
+    expect(shape(present).advancePt).toBe(34);
+    expect(shape(absent).spans[0]?.font).toMatchObject({ source: 'generic', resolvedFamily: 'sans-serif' });
+    expect(shape(absent).advancePt).toBe(10);
+    expect(present.text.fingerprint).toBe(worker.text.fingerprint);
+    expect(present.text.fingerprint).not.toBe(absent.text.fingerprint);
+  });
+
   it('inventories only successfully registered faces and labels Office replacements as substitutions', () => {
     const doc = model({
       majorFont: 'Calibri',

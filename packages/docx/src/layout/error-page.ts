@@ -36,32 +36,63 @@ function wrapWords(
     fonts: { ascii: 'sans-serif', highAnsi: 'sans-serif', eastAsia: 'sans-serif', complexScript: 'sans-serif' },
     genericFamily: 'sans-serif',
   }).advancePt;
-  const pushOverlong = (word: string): void => {
+  const ellipsize = (value: string): string => {
+    const ellipsis = '…';
+    const offsets = [0, ...graphemeClusterOffsets(value), value.length]
+      .filter((offset, index, values) => index === 0 || offset !== values[index - 1]);
+    let end = offsets.length - 1;
+    while (end > 0 && widthOf(`${value.slice(0, offsets[end])}${ellipsis}`) > maxWidthPt) end -= 1;
+    return `${value.slice(0, offsets[end] ?? 0)}${ellipsis}`;
+  };
+  const truncateLast = (): void => {
+    if (lines.length === 0) lines.push(ellipsize(''));
+    else lines[lines.length - 1] = ellipsize(lines[lines.length - 1]);
+  };
+  const pushOverlong = (word: string): boolean => {
     const offsets = [0, ...graphemeClusterOffsets(word), word.length]
       .filter((offset, index, values) => index === 0 || offset !== values[index - 1]);
     let start = 0;
     while (start < offsets.length - 1) {
+      if (lines.length >= maxLines) {
+        truncateLast();
+        return true;
+      }
       let end = start + 1;
       while (end < offsets.length && widthOf(word.slice(offsets[start], offsets[end])) <= maxWidthPt) end += 1;
       const fittingEnd = Math.max(start + 1, end - 1);
-      lines.push(word.slice(offsets[start], offsets[fittingEnd]));
+      const chunk = word.slice(offsets[start], offsets[fittingEnd]);
+      if (lines.length >= maxLines - 1 && fittingEnd < offsets.length - 1) {
+        lines.push(ellipsize(chunk));
+        return true;
+      }
+      lines.push(chunk);
       start = fittingEnd;
     }
+    return false;
   };
-  for (const word of words) {
+  for (let wordIndex = 0; wordIndex < words.length; wordIndex += 1) {
+    const word = words[wordIndex];
     const candidate = line ? `${line} ${word}` : word;
     const candidateWidth = widthOf(candidate);
     if (line && candidateWidth > maxWidthPt) {
       lines.push(line);
       line = '';
-      if (lines.length === maxLines) break;
-      if (widthOf(word) > maxWidthPt) pushOverlong(word);
+      if (lines.length >= maxLines) {
+        truncateLast();
+        break;
+      }
+      if (widthOf(word) > maxWidthPt) {
+        if (pushOverlong(word)) break;
+      }
       else line = word;
     } else if (!line && candidateWidth > maxWidthPt) {
-      pushOverlong(word);
-      if (lines.length === maxLines) break;
+      if (pushOverlong(word)) break;
     } else {
       line = candidate;
+    }
+    if (wordIndex < words.length - 1 && lines.length >= maxLines && !line) {
+      truncateLast();
+      break;
     }
   }
   if (line && lines.length < maxLines) lines.push(line);

@@ -26,7 +26,7 @@ describe('font layout services', () => {
     expect(resolver.resolve({ requestedFamily: 'Meiryo' }))
       .toMatchObject({ source: 'local', resolvedFamily: '__ooxml_local_meiryo' });
     expect(resolver.resolve({ requestedFamily: 'Meiryo', weight: 700 }))
-      .toMatchObject({ source: 'generic', resolvedFamily: 'Meiryo', genericFamily: 'sans-serif' });
+      .toMatchObject({ source: 'generic', resolvedFamily: 'sans-serif', genericFamily: 'sans-serif' });
     expect(resolver.resolve({ requestedFamily: 'Calibri' }))
       .toMatchObject({ source: 'google', resolvedFamily: 'Carlito' });
 
@@ -35,7 +35,7 @@ describe('font layout services', () => {
     expect(substituted.diagnostics[0]?.message).toMatch(/implementation-dependent font substitution/i);
 
     const missing = resolver.resolve({ requestedFamily: 'Missing Face', genericFamily: 'serif' });
-    expect(missing).toMatchObject({ source: 'generic', resolvedFamily: 'Missing Face', genericFamily: 'serif' });
+    expect(missing).toMatchObject({ source: 'generic', resolvedFamily: 'serif', genericFamily: 'serif' });
     expect(missing.diagnostics[0]?.message).toContain('Missing Face');
   });
 
@@ -70,14 +70,14 @@ describe('font layout services', () => {
     expect(result.spans.map((span) => [span.text, span.font.source, span.font.resolvedFamily]))
       .toEqual([
         ['A', 'embedded', 'Embedded Sans'],
-        ['国', 'generic', 'Meiryo'],
+        ['国', 'generic', 'sans-serif'],
         ['ش', 'embedded', 'Embedded Sans'],
       ]);
     expect(result.advancePt).toBe(30);
     expect(measured.map(({ resolvedFamily, weight, style }) => [resolvedFamily, weight, style]))
       .toEqual([
         ['Embedded Sans', 700, 'italic'],
-        ['Meiryo', 700, 'italic'],
+        ['sans-serif', 700, 'italic'],
         ['Embedded Sans', 700, 'italic'],
       ]);
 
@@ -202,6 +202,58 @@ describe('font layout services', () => {
     }
     expect(slot('\u05D0', true)).toEqual(['complexScript']);
     expect(slot('\u0627', true)).toEqual(['complexScript']);
+  });
+
+  it('implements the conditional eastAsia hint, language, charset, and cs precedence rows', () => {
+    const service = createTextLayoutService({
+      fonts: createFontResolver(faces),
+      measurer: {
+        fingerprint: 'conditional-script-slot-table-v1',
+        measure: (request) => ({ advancePt: [...request.text].length, ascentPt: 1, descentPt: 0 }),
+      },
+    });
+    const slot = (
+      text: string,
+      options: {
+        hint?: 'default' | 'eastAsia' | 'cs';
+        eastAsiaLanguage?: string;
+        eastAsiaFontCharset?: string;
+        complexScript?: boolean;
+      } = {},
+    ) => service.shape({
+      text,
+      fontSizePt: 10,
+      fontHint: options.hint,
+      eastAsiaLanguage: options.eastAsiaLanguage,
+      eastAsiaFontCharset: options.eastAsiaFontCharset,
+      complexScript: options.complexScript,
+      fonts: {
+        ascii: 'Embedded Sans',
+        highAnsi: 'Theme Serif',
+        eastAsia: 'Meiryo',
+        complexScript: 'Legacy Arabic',
+      },
+    }).spans[0]?.script;
+
+    const eastAsia = { hint: 'eastAsia' as const };
+    expect(slot('\u00a1', eastAsia)).toBe('eastAsia');
+    expect(slot('\u00e0', { ...eastAsia, eastAsiaLanguage: 'zh-CN' })).toBe('eastAsia');
+    expect(slot('\u00e0', { ...eastAsia, eastAsiaLanguage: 'ja-JP' })).toBe('highAnsi');
+    expect(slot('\u0100', { ...eastAsia, eastAsiaLanguage: 'zh-TW' })).toBe('eastAsia');
+    expect(slot('\u0180', { ...eastAsia, eastAsiaFontCharset: '88' })).toBe('eastAsia');
+    expect(slot('\u0250', { ...eastAsia, eastAsiaFontCharset: '86' })).toBe('eastAsia');
+    expect(slot('\u0100', { ...eastAsia, eastAsiaFontCharset: '80' })).toBe('highAnsi');
+    for (const scalar of ['\u02b0', '\u0300', '\u0370', '\u0400', '\u2000', '\u20a0', '\u2100', '\u2190', '\u2200', '\u2300', '\u2400', '\u2500', '\u2600', '\u2700', '\ue000', '\ufb00']) {
+      expect(slot(scalar, eastAsia), scalar).toBe('eastAsia');
+      expect(slot(scalar), scalar).toBe('highAnsi');
+    }
+    expect(slot('\u1e00', { ...eastAsia, eastAsiaLanguage: 'zh-Hans' })).toBe('eastAsia');
+    expect(slot('\u1e00', { ...eastAsia, eastAsiaLanguage: 'ko-KR' })).toBe('highAnsi');
+
+    // Step 2: cs/rtl wins unless step 1 selected eastAsia while hint=eastAsia.
+    expect(slot('\u4e00', { complexScript: true })).toBe('complexScript');
+    expect(slot('\u4e00', { ...eastAsia, complexScript: true })).toBe('eastAsia');
+    expect(slot('A', { ...eastAsia, complexScript: true })).toBe('complexScript');
   });
 
   it('includes immutable local geometry metrics in the text fingerprint', () => {

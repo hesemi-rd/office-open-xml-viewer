@@ -111,7 +111,9 @@ export function createFontResolver(inventory: readonly FontInventoryFace[]): Fon
       const generic = request.genericFamily ?? 'sans-serif';
       return freezeResolution({
         requestedFamily,
-        resolvedFamily: requestedFamily,
+        // Never leave an uninventoried authored family in Canvas's font list:
+        // that would silently pick a host-local face outside this snapshot.
+        resolvedFamily: generic,
         source: 'generic',
         weight,
         style,

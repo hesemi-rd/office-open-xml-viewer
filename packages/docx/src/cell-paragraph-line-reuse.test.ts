@@ -2,9 +2,11 @@ import { describe, it, expect } from 'vitest';
 import {
   renderDocumentToCanvas,
   paginateDocument,
+  createLayoutServices,
   __test_setFragmentPaintEnabled,
   __test_setLineReuseEnabled,
 } from './renderer.js';
+import { testFontSnapshot } from './layout/test-font-snapshot.js';
 import type { BodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, DocxDocumentModel, SectionProps, PaginatedBodyElement } from './types';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -211,7 +213,10 @@ async function renderAll(model: DocxDocumentModel, pages: PaginatedBodyElement[]
   let measures = 0;
   for (let p = 0; p < pages.length; p++) {
     const rec = makeRecordingCanvas();
-    await renderDocumentToCanvas(model, rec.canvas, p, { dpr: 1, width, prebuiltPages: pages });
+    const services = createLayoutServices(model, {
+      localMetrics: testFontSnapshot(model), measureContext: rec.canvas.getContext('2d'),
+    });
+    await renderDocumentToCanvas(model, rec.canvas, p, { dpr: 1, width, prebuiltPages: pages, layoutServices: services });
     perPage.push(rec.calls);
     measures += rec.measures();
   }
@@ -223,7 +228,7 @@ async function renderAll(model: DocxDocumentModel, pages: PaginatedBodyElement[]
 async function reuseVsRecompute(model: DocxDocumentModel, width = 300): Promise<{ pages: number; drawn: number; on: number; off: number; streams: Call[][] }> {
   const prevFragmentPaint = __test_setFragmentPaintEnabled(false);
   try {
-    const pages = paginateDocument(model);
+    const pages = paginateDocument(model, createLayoutServices(model, { localMetrics: testFontSnapshot(model) }));
     const prev = __test_setLineReuseEnabled(false);
     let off: { perPage: Call[][]; measures: number };
     try { off = await renderAll(model, pages, width); } finally { __test_setLineReuseEnabled(prev); }
@@ -241,7 +246,8 @@ async function reuseVsRecompute(model: DocxDocumentModel, width = 300): Promise<
 }
 
 function tableMeasurementGeometry() {
-  const pages = paginateDocument(doc([wrapTable(8) as unknown as BodyElement]));
+  const model = doc([wrapTable(8) as unknown as BodyElement]);
+  const pages = paginateDocument(model, createLayoutServices(model, { localMetrics: testFontSnapshot(model) }));
   const tables = pages.flatMap((page) => page.filter((el) => el.type === 'table'));
   return {
     pageCount: pages.length,
@@ -290,7 +296,7 @@ describe('table-cell paragraph line reuse — B2 T2', () => {
     // recompute the partition — measures rise back to the recompute count, and the
     // paint stream stays identical to a from-scratch recompute.
     const model = doc([wrapTable(16) as unknown as BodyElement]);
-    const pages = paginateDocument(model);
+    const pages = paginateDocument(model, createLayoutServices(model, { localMetrics: testFontSnapshot(model) }));
 
     const poison = (pg: PaginatedBodyElement[][]) => {
       for (const page of pg) for (const el of page) {
@@ -316,7 +322,7 @@ describe('table-cell paragraph line reuse — B2 T2', () => {
 
   it('(c) wrap partition is zoom-invariant: scale 1 and scale 0.75 break each cell paragraph identically', async () => {
     const model = doc([wrapTable(10) as unknown as BodyElement]);
-    const pages = paginateDocument(model);
+    const pages = paginateDocument(model, createLayoutServices(model, { localMetrics: testFontSnapshot(model) }));
     // Same paint text at two scales; the fillText SEQUENCE (line partition) must be
     // identical — only the x/y coordinates scale. Compare the per-line text runs.
     const at1 = await renderAll(model, pages, 300);   // scale 1
@@ -360,7 +366,7 @@ describe('table-cell paragraph line reuse — B2 T2', () => {
 
   it('(e) same page painted twice is identical (shared stamped array never mutated by draw)', async () => {
     const model = doc([wrapTable(16) as unknown as BodyElement]);
-    const pages = paginateDocument(model);
+    const pages = paginateDocument(model, createLayoutServices(model, { localMetrics: testFontSnapshot(model) }));
     const first = await renderAll(model, pages, 300);
     const second = await renderAll(model, pages, 300);
     for (let p = 0; p < first.perPage.length; p++) expect(second.perPage[p]).toEqual(first.perPage[p]);

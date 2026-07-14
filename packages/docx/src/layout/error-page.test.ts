@@ -70,7 +70,7 @@ describe('parse-error page layout', () => {
         }),
       },
     });
-    const token = 'word/' + 'a\u0301'.repeat(24) + '.xml';
+    const token = 'word/' + 'a\u0301'.repeat(12) + '.xml';
     const layout = layoutParseErrorPage(token, { widthPt: 180, heightPt: 300 }, text);
     const lines = layout.pages[0]?.layers.body.flatMap((node) =>
       node.kind === 'drawing'
@@ -81,5 +81,31 @@ describe('parse-error page layout', () => {
     expect(lines.length).toBeGreaterThan(1);
     expect(lines.map((line) => line.kind === 'text' ? line.text : '').join('')).toBe(token);
     expect(lines.every((line) => line.kind !== 'text' || !line.text.startsWith('\u0301'))).toBe(true);
+  });
+
+  it('caps five-plus emergency chunks at maxLines with a grapheme-safe ellipsis', () => {
+    const text = createTextLayoutService({
+      fonts: createFontResolver([]),
+      measurer: {
+        fingerprint: 'fixed-graphemes-v1',
+        measure: (request) => ({
+          advancePt: [...request.text].length * 10,
+          ascentPt: 8,
+          descentPt: 2,
+        }),
+      },
+    });
+    const token = 'a\u0301'.repeat(80);
+    const layout = layoutParseErrorPage(token, { widthPt: 180, heightPt: 300 }, text);
+    const lines = layout.pages[0]?.layers.body.flatMap((node) =>
+      node.kind === 'drawing'
+        ? node.commands.filter((command) => command.kind === 'text').slice(2)
+        : [],
+    ) ?? [];
+    const values = lines.map((line) => line.kind === 'text' ? line.text : '');
+
+    expect(values).toHaveLength(4);
+    expect(values.at(-1)).toMatch(/…$/u);
+    expect(values.every((line) => !line.startsWith('\u0301'))).toBe(true);
   });
 });

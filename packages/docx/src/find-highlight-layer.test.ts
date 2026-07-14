@@ -62,7 +62,7 @@ describe('buildDocxHighlightLayer', () => {
   it('draws one box per slice, positioned from run x/y + measured extent', () => {
     vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
     const layer = makeEl('div');
-    const runs = [run({ text: 'the quick', x: 100, y: 50, h: 16 })];
+    const runs = [run({ text: 'the quick', x: 100, y: 50, w: 63, h: 16 })];
     // Match "quick" = slice [4, 9).
     const matches: DocxHighlightMatch[] = [
       { slices: [{ runIndex: 0, start: 4, end: 9 }], active: false },
@@ -95,7 +95,7 @@ describe('buildDocxHighlightLayer', () => {
   it('uses the active colour for the active match', () => {
     vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
     const layer = makeEl('div');
-    const runs = [run({ text: 'abc' })];
+    const runs = [run({ text: 'abc', w: 21 })];
     const matches: DocxHighlightMatch[] = [
       { slices: [{ runIndex: 0, start: 0, end: 3 }], active: true },
     ];
@@ -106,7 +106,7 @@ describe('buildDocxHighlightLayer', () => {
   it('draws a box per run for a cross-run match', () => {
     vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
     const layer = makeEl('div');
-    const runs = [run({ text: 'Hel', x: 0 }), run({ text: 'lo', x: 21 })];
+    const runs = [run({ text: 'Hel', x: 0, w: 21 }), run({ text: 'lo', x: 21, w: 14 })];
     const matches: DocxHighlightMatch[] = [
       {
         slices: [
@@ -126,7 +126,7 @@ describe('buildDocxHighlightLayer', () => {
   it('carries the run transform for a vertical (tbRl) page', () => {
     vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
     const layer = makeEl('div');
-    const runs = [run({ text: 'abc', transform: 'rotate(90deg)' })];
+    const runs = [run({ text: 'abc', w: 21, transform: 'rotate(90deg)' })];
     const matches: DocxHighlightMatch[] = [
       { slices: [{ runIndex: 0, start: 0, end: 3 }], active: false },
     ];
@@ -178,18 +178,45 @@ describe('buildDocxHighlightLayer', () => {
     expect(box.style.width).toBe(`${(3.5 / 100) * 100}%`);
   });
 
-  it('leaves a non-eastAsianVert run measured at natural width (unchanged)', () => {
+  it('projects an ordinary run slice onto the retained drawn advance', () => {
     vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
     const layer = makeEl('div');
-    // Same text/w but NOT flagged 縦中横 ⇒ natural 14px extent (byte-identical to
-    // the pre-#836 behaviour). w is irrelevant to the highlight here.
+    // The retained paint geometry says this ordinary run occupies 7px while a
+    // fresh overlay measurement says 14px. Projecting measured prefix extents
+    // onto run.w keeps the overlay inside the glyph advance despite a host
+    // measurer/kerning mismatch.
     const runs = [run({ text: '２９', x: 0, w: 7, fontSize: 7 })];
     const matches: DocxHighlightMatch[] = [
       { slices: [{ runIndex: 0, start: 0, end: 2 }], active: false },
     ];
-    // cssWidth = 100 so the 14px natural extent reads as 14%.
+    // cssWidth = 100 so the 7px retained extent reads as 7%.
     buildDocxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, 100, 100, measureForFont);
-    expect(layer.children[0].style.width).toBe(`${(14 / 100) * 100}%`);
+    expect(layer.children[0].style.width).toBe(`${(7 / 100) * 100}%`);
+  });
+
+  it('normalizes kerning-sensitive prefix slices against the full retained advance', () => {
+    vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
+    const layer = makeEl('div');
+    const runs = [run({ text: 'AV', x: 10, w: 18 })];
+    const matches: DocxHighlightMatch[] = [
+      { slices: [{ runIndex: 0, start: 1, end: 2 }], active: false },
+    ];
+    // A fresh canvas reports A=11 and AV=20, while the renderer retained the
+    // actually drawn full-run advance as 18. The V slice is measured as [11,20)
+    // and projected by 18/20, landing exactly at the retained right edge.
+    const kernedMeasureForFont = () => (s: string) => ({ '': 0, A: 11, AV: 20 }[s] ?? 0);
+    buildDocxHighlightLayer(
+      layer as unknown as HTMLDivElement,
+      runs,
+      matches,
+      100,
+      100,
+      kernedMeasureForFont,
+    );
+    const box = layer.children[0];
+    expect(box.style.left).toBe(`${((10 + 9.9) / 100) * 100}%`);
+    expect(box.style.width).toBe(`${(8.1 / 100) * 100}%`);
+    expect(parseFloat(box.style.left) + parseFloat(box.style.width)).toBeCloseTo(28, 10);
   });
 
   it('clears the layer and skips zero-width slices', () => {

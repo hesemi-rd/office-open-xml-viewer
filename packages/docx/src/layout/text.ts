@@ -24,6 +24,12 @@ export interface TextShapeRequest {
   readonly weight?: number;
   readonly style?: FontStyle;
   readonly complexScript?: boolean;
+  /** ECMA-376 §17.3.2.26 rFonts@hint after style inheritance. */
+  readonly fontHint?: 'default' | 'eastAsia' | 'cs';
+  /** Resolved w:lang@eastAsia, normalized to lower case. */
+  readonly eastAsiaLanguage?: string;
+  /** fontTable w:charset for the selected eastAsia face (hex byte). */
+  readonly eastAsiaFontCharset?: string;
   readonly genericFamily?: 'serif' | 'sans-serif' | 'monospace';
   readonly letterSpacingPt?: number;
   /** Resolved §17.3.2.19 w:kern state at this run size. Absent preserves the
@@ -78,19 +84,49 @@ export interface TextLayoutServiceInput {
   readonly fonts: FontResolver;
   readonly measurer: GlyphMeasurer;
   readonly localMetrics?: Readonly<Record<string, Readonly<ResolvedLocalFontMetric>>>;
+  readonly eastAsiaFontCharsets?: Readonly<Record<string, string>>;
 }
 
-function scriptSlot(codePoint: number, forceComplex: boolean): FontScriptSlot {
-  if (forceComplex) return 'complexScript';
+const LATIN1_EAST_ASIA = new Set([
+  0x00a1, 0x00a4, 0x00a7, 0x00a8, 0x00aa, 0x00ad, 0x00af,
+  0x00b0, 0x00b1, 0x00b2, 0x00b3, 0x00b4, 0x00b6, 0x00b7,
+  0x00b8, 0x00b9, 0x00ba, 0x00bc, 0x00bd, 0x00be, 0x00bf, 0x00d7, 0x00f7,
+]);
+const LATIN1_CHINESE_EAST_ASIA = new Set([
+  0x00e0, 0x00e1, 0x00e8, 0x00e9, 0x00ea, 0x00ec, 0x00ed,
+  0x00f2, 0x00f3, 0x00f9, 0x00fa, 0x00fc,
+]);
+
+function scriptSlot(
+  codePoint: number,
+  forceComplex: boolean,
+  hint: TextShapeRequest['fontHint'],
+  eastAsiaLanguage: string | undefined,
+  eastAsiaFontCharset: string | undefined,
+): FontScriptSlot {
+  const hintedEastAsia = hint === 'eastAsia';
+  const chinese = eastAsiaLanguage?.split(/[-_]/, 1)[0]?.toLowerCase() === 'zh';
+  const chineseCharset = /^(?:86|88)$/i.test(eastAsiaFontCharset?.trim() ?? '');
+  let tableSlot: Exclude<FontScriptSlot, 'complexScript'> = 'highAnsi';
   // ECMA-376 §17.3.2.26 assigns the Hebrew/Arabic-family ranges to the ASCII
   // slot unless the run is explicitly complex-script (`w:cs` / `w:rtl`). They
   // must not fall through to highAnsi merely because their scalar is > 0x7f.
-  if (
+  if (codePoint <= 0x007f) tableSlot = 'ascii';
+  else if (codePoint <= 0x00ff) {
+    tableSlot = hintedEastAsia && (
+      LATIN1_EAST_ASIA.has(codePoint)
+      || (chinese && LATIN1_CHINESE_EAST_ASIA.has(codePoint))
+    ) ? 'eastAsia' : 'highAnsi';
+  } else if (codePoint >= 0x0100 && codePoint <= 0x02af) {
+    tableSlot = hintedEastAsia && (chinese || chineseCharset) ? 'eastAsia' : 'highAnsi';
+  } else if (codePoint >= 0x02b0 && codePoint <= 0x04ff) {
+    tableSlot = hintedEastAsia ? 'eastAsia' : 'highAnsi';
+  } else if (
     (codePoint >= 0x0590 && codePoint <= 0x07bf)
     || (codePoint >= 0xfb1d && codePoint <= 0xfdff)
     || (codePoint >= 0xfe70 && codePoint <= 0xfeff)
-  ) return 'ascii';
-  if (
+  ) tableSlot = 'ascii';
+  else if (
     (codePoint >= 0x1100 && codePoint <= 0x11ff)
     || (codePoint >= 0x2e80 && codePoint <= 0x9fff)
     || (codePoint >= 0xa000 && codePoint <= 0xa4cf)
@@ -99,8 +135,20 @@ function scriptSlot(codePoint: number, forceComplex: boolean): FontScriptSlot {
     || (codePoint >= 0xfe30 && codePoint <= 0xfe6f)
     || (codePoint >= 0xff00 && codePoint <= 0xffef)
     || (codePoint >= 0x20000 && codePoint <= 0x2fa1f)
-  ) return 'eastAsia';
-  return codePoint <= 0x7f ? 'ascii' : 'highAnsi';
+  ) tableSlot = 'eastAsia';
+  else if (codePoint >= 0x1e00 && codePoint <= 0x1eff) {
+    tableSlot = hintedEastAsia && chinese ? 'eastAsia' : 'highAnsi';
+  } else if (
+    (codePoint >= 0x2000 && codePoint <= 0x27bf)
+    || (codePoint >= 0xe000 && codePoint <= 0xf8ff)
+    || (codePoint >= 0xfb00 && codePoint <= 0xfb1c)
+  ) tableSlot = hintedEastAsia ? 'eastAsia' : 'highAnsi';
+
+  // §17.3.2.26 step 2: an eastAsia table result is protected from w:cs/w:rtl
+  // only when rFonts@hint explicitly selects eastAsia. Otherwise cs wins.
+  if (tableSlot === 'eastAsia' && hintedEastAsia) return tableSlot;
+  if (forceComplex) return 'complexScript';
+  return tableSlot;
 }
 
 function requestedFamily(request: Readonly<TextShapeRequest>, slot: FontScriptSlot): string | null | undefined {
@@ -125,6 +173,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
     fonts: input.fonts.fingerprint,
     measurer: input.measurer.fingerprint,
     localMetrics,
+    eastAsiaFontCharsets: input.eastAsiaFontCharsets ?? {},
   });
   return Object.freeze({
     fingerprint,
@@ -140,7 +189,18 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
         const start = boundaries[index];
         const end = boundaries[index + 1];
         const character = request.text.slice(start, end);
-        const script = scriptSlot(character.codePointAt(0) ?? 0, request.complexScript ?? false);
+        const eastAsiaFamily = requestedFamily(request, 'eastAsia');
+        const eastAsiaCharset = request.eastAsiaFontCharset
+          ?? (eastAsiaFamily
+            ? input.eastAsiaFontCharsets?.[eastAsiaFamily.trim().toLowerCase()]
+            : undefined);
+        const script = scriptSlot(
+          character.codePointAt(0) ?? 0,
+          request.complexScript ?? false,
+          request.fontHint,
+          request.eastAsiaLanguage,
+          eastAsiaCharset,
+        );
         const previous = grouped.at(-1);
         if (previous?.script === script) {
           previous.text += character;
