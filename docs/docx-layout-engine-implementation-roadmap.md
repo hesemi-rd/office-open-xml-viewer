@@ -31,7 +31,12 @@ packages/docx/src/layout/
   types.ts         immutable layout result and source-reference types
   diagnostics.ts   diagnostic codes and collector
   context.ts       document/section/story/container resolution
+  flow.ts          block dispatch and recursive container coordination
   text.ts          font selection, shaping, and measured glyph contracts
+  resources.ts     image/math metadata and stable resource keys
+  convergence.ts   fingerprint/cycle/limit convergence primitive
+  compatibility.ts evidenced Office-specific behavior only
+  error-page.ts    parse-error page layout through the text service
   paragraph.ts     paragraph line layout and decoration geometry
   table.ts         columns, rows, cells, continuations, and border segments
   floats.ts        wrap constraints, placement, and convergence
@@ -50,6 +55,11 @@ Existing shared DrawingML, color, image, and font primitives remain in
 `packages/core`; DOCX page flow stays in `packages/docx`. `renderer.ts` becomes a
 resource-preparation adapter and exports compatibility entry points only.
 
+A1 records an explicit inventory of `packages/core` and
+`packages/ooxml-common` before introducing geometry, transform, clip, image,
+font, diagnostic, or Canvas contracts. Shared format-neutral primitives are
+reused there; WordprocessingML flow contracts remain DOCX-local.
+
 ## Stable internal interfaces
 
 Series work must converge on these exact contracts; later plans consume these
@@ -59,13 +69,36 @@ names rather than inventing parallel representations:
 export type LayoutNodeId = string;
 export type SourceRef = Readonly<{
   story: 'body' | 'header' | 'footer' | 'footnote' | 'endnote' | 'textbox';
+  storyInstance: string;
   path: readonly number[];
 }>;
+
+export type DeepReadonly<T> =
+  T extends (...args: never[]) => unknown ? T
+  : T extends readonly (infer U)[] ? readonly DeepReadonly<U>[]
+  : T extends object ? { readonly [K in keyof T]: DeepReadonly<T[K]> }
+  : T;
+
+export interface Matrix2DData {
+  readonly a: number; readonly b: number; readonly c: number;
+  readonly d: number; readonly e: number; readonly f: number;
+}
+export type ClipPathData =
+  | Readonly<{ kind: 'rect'; rect: LayoutRect }>
+  | Readonly<{ kind: 'polygon'; points: readonly PointPt[] }>;
 
 export interface LayoutServices {
   readonly text: TextLayoutService;
   readonly images: ImageMetadataService;
 }
+
+export interface LayoutOptions {
+  readonly currentDateMs: number;
+  readonly textEnvironmentFingerprint: string;
+  readonly mathEnvironmentFingerprint: string;
+}
+
+export function layoutOptionsKey(options: LayoutOptions): string;
 
 export interface DocumentLayout {
   readonly pages: readonly LayoutPage[];
@@ -81,6 +114,7 @@ export interface LayoutPage {
 }
 
 export interface PageLayers {
+  readonly paintOrder: readonly PagePaintEntry[];
   readonly background: readonly PaintNode[];
   readonly behindText: readonly PaintNode[];
   readonly header: readonly PaintNode[];
@@ -90,9 +124,13 @@ export interface PageLayers {
   readonly footer: readonly PaintNode[];
 }
 
+export type PageLayerId = 'background' | 'behindText' | 'header' | 'body' | 'notes' | 'front' | 'footer';
+export interface PagePaintEntry { readonly layer: PageLayerId; readonly nodeId: LayoutNodeId }
+
 export function layoutDocument(
   document: Readonly<DocxDocumentModel>,
   services: LayoutServices,
+  options: LayoutOptions,
 ): DocumentLayout;
 
 export async function paintLayoutPage(
@@ -104,28 +142,40 @@ export async function paintLayoutPage(
 ```
 
 `PaintNode` is the union of `ParagraphLayout`, `TableLayout`, `DrawingLayout`,
-`TextBoxLayout`, and `NoteLayout`. Each node contains all text, resolved font,
-color, border, transform, clipping, and resource-key data needed by paint; paint
-never dereferences parser objects.
+`TextBoxLayout`, and `NoteLayout`. Every flow node distinguishes `flowBounds`
+(pagination ownership), `inkBounds` (glyph/border overhang), optional
+`clipBounds`, and `advancePt`. Overlap and bottom-margin invariants apply to
+ordinary in-flow `flowBounds`, never to allowed floating overlap, negative
+spacing ink, frames, or clipped overhang. Each node contains all text, resolved
+font, color, border, transform, clipping, and resource-key data needed by paint;
+paint never dereferences parser objects.
+
+`LayoutOptions.currentDateMs` is normalized once. Main and worker retain layouts
+by `layoutOptionsKey`; `NUMPAGES` is solved inside convergence, not supplied as a
+paint option. The load-time default option key determines the synchronous
+`pageCount`/`pageSize` getters. A per-call `currentDate` selects or lazily builds
+a keyed layout variant for that render/collection request and validates its
+requested page against that variant; it does not mutate the default metadata or
+public API. Contract tests document this existing getter limitation explicitly.
 
 ## Pull request sequence
 
 | PR | Deliverable | Deletes in the same PR | Depends on |
 |---|---|---|---|
 | Plan | Approved design and executable plans | None | Issue #1037 |
-| A1 | Layout result, invariants, diagnostics, and transitive paint-purity gates | Transitional `fragment-paint.ts` boundary rule | Plan |
-| A2 | All body paragraphs use self-contained `ParagraphLayout` | paragraph line stamps, reuse flags, paragraph fragment gates | A1 |
-| A3 | One measurement builds in-flow and nested `TableLayout` | table width/height stamps and second cell measurement for this class | A2 |
-| A4 | Floating and split tables use the same table result | `tableRequiresLegacyPaint`, legacy table gate, remaining table flags | A3 |
-| A5 | Explicit page/column state machine and main/worker fingerprint parity | page/section stamps on `PaginatedBodyElement`, page-flow closures | A4 |
-| B1 | Headers, footers, footnotes, and endnotes use shared story layout | story dry-run measurement and note paint relayout | A5 |
-| B2 | Parser preserves complete `txbxContent`; text boxes use shared block layout | paragraph-only text-box model and text-box-specific paragraph engine | B1 |
+| A1 | Layout result, deep-readonly/plain-data types, shared-primitives audit, invariants, and enforceable boundary gates | None; the transitional fragment rule remains until A3 | Plan |
+| A2 | Stable font/text/image/math services, layout options/cache keys, convergence, and parse-error layout | global font state and parse-error paint measurement | A1 |
+| A3 | All body paragraphs and every `DocRun` variant use self-contained layout nodes | paragraph line stamps, reuse flags, paragraph fragment gates, transitional fragment rule/test | A2 |
+| A4 | One measurement builds in-flow and nested `TableLayout` | table width/height stamps and second cell measurement for this class | A3 |
+| A5 | Floating and split tables use the same table result | `tableRequiresLegacyPaint`, legacy table gate, remaining table flags | A4 |
+| A6 | Explicit page/column state machine, keyed layout cache, and main/worker fingerprint parity | page/section stamps on `PaginatedBodyElement`, page-flow closures | A5 |
+| B1 | Headers, footers, footnotes, and endnotes use shared story layout and A2 convergence | story dry-run measurement and note paint relayout | A6 |
+| B2 | Parser preserves complete `txbxContent` on an internal wire model; text boxes use shared block layout | text-box-specific paragraph engine; exported `textBlocks` remains as a compatibility projection | B1 |
 | B3 | `PageLayers` owns drawing order | `deferFront` callback side channel | B2 |
 | B4 | Search/selection geometry projects from layout | `onTextRun` paint callbacks and `collectRuns` dry render | B3 |
-| C1 | Float solver uses explicit constraints and convergence | hidden float retry/placement mutation | B4 |
-| C2 | Main and worker share one font resolution/shaping service | duplicated environment-specific font choice and paint-scale remeasurement | C1 |
-| C3 | Parser/layout diagnostics and synthetic conformance corpus | silent unsupported-feature omission | C2 |
-| C4 | Thin renderer adapter and architecture audit | all remaining layout code, stamps, flags, and fallback gates in `renderer.ts` | C3 |
+| C1 | Float solver uses explicit constraints and the A2 convergence primitive; compatibility rules are isolated | hidden float retry/placement mutation | B4 |
+| C2 | Parser/layout diagnostics and synthetic conformance corpus | silent unsupported-feature omission | C1 |
+| C3 | Thin renderer adapter, public declaration compatibility, and transitive architecture audit | all remaining layout code, stamps, flags, and fallback gates in `renderer.ts` | C2 |
 
 The executable Red/Green/deletion steps are in:
 
@@ -141,8 +191,10 @@ After the implementation and local verification of every PR:
 
 Use a repository-style English commit subject and a body containing the root
 cause, normative section or observed compatibility boundary, and verification.
-Append `Co-Authored-By: Codex GPT-5 <noreply@openai.com>` for this implementation
-agent.
+Append the repository-required co-author trailer using the actual implementing
+model. If orchestration or implementation used multiple model providers, include
+the actual matching trailer for each contributor; never copy a hard-coded model
+name from this roadmap.
 
 - [ ] **Step 2: Run broad verification**
 
@@ -151,8 +203,13 @@ Run:
 ```bash
 pnpm test
 pnpm typecheck
+pnpm lint
+pnpm lint:test
+node scripts/check-docx-layout-boundaries.mjs
+pnpm --filter @silurus/ooxml-docx build
+node scripts/check-docx-public-api.mjs
 pnpm build-storybook
-git diff --check HEAD~1
+git diff --check origin/main...HEAD
 ```
 
 Expected: all commands exit 0. Parser PRs additionally run
@@ -178,9 +235,10 @@ findings” statement for categories without findings.
 
 - [ ] **Step 4: Resolve every valid finding and repeat verification**
 
-Apply fixes with TDD, rerun the focused failing test plus all commands from Step
-2, and ask the independent agent to re-review when a fix changes an interface or
-algorithm. Expected: no unresolved valid findings.
+Apply fixes with TDD, commit the review-fix source and tests, rerun the focused
+failing test plus all commands from Step 2, and ask the independent agent to
+re-review when a fix changes an interface or algorithm. Expected: no unresolved
+valid findings and no uncommitted PR changes.
 
 - [ ] **Step 5: Publish and merge**
 

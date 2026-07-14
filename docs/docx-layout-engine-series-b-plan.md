@@ -38,9 +38,16 @@
 - Consumes: `layoutParagraph`, `layoutTable`, `LayoutPage`, and `PageLayers` from Series A.
 - Produces: `StoryLayoutInput`, `StoryLayout`, `NoteLayout`, `layoutStory`, and converged note reservation.
 
+**Specification evidence:** ECMA-376 §17.10 header/footer references and
+selection (`w:headerReference`, `w:footerReference`, `w:titlePg`, even/odd
+settings) and §17.11 footnote/endnote references, numbering, separators, and
+placement define story ownership. This PR adds no observation-only reserve
+heuristic; behavior not determined by those facts emits a diagnostic and requires
+a separately evidenced compatibility rule.
+
 ```ts
-export interface StoryLayout { readonly story: SourceRef['story']; readonly bounds: LayoutRect; readonly blocks: readonly PaintNode[]; readonly advancePt: number }
-export interface NoteLayout { readonly kind: 'note'; readonly id: LayoutNodeId; readonly source: SourceRef; readonly bounds: LayoutRect; readonly separator: readonly BorderSegment[]; readonly story: StoryLayout }
+export interface StoryLayout { readonly story: SourceRef['story']; readonly flowBounds: LayoutRect; readonly inkBounds: LayoutRect; readonly clipBounds?: LayoutRect; readonly blocks: readonly PaintNode[]; readonly advancePt: number }
+export interface NoteLayout { readonly kind: 'note'; readonly id: LayoutNodeId; readonly source: SourceRef; readonly flowBounds: LayoutRect; readonly inkBounds: LayoutRect; readonly separator: readonly BorderSegment[]; readonly story: StoryLayout }
 export function layoutStory(input: StoryLayoutInput, services: LayoutServices): StoryLayout;
 ```
 
@@ -68,8 +75,9 @@ measure story height.
 Resolve the active header/footer references from `LayoutPage.section`, lay out
 their blocks through `layoutStory`, and place them into header/footer layers.
 Collect note references from retained node metadata, lay out note stories, reduce
-the body band, and repeat until the page fingerprint is unchanged. Store note
-separator geometry on `NoteLayout`.
+the body band, and call A2 `convergeLayout` until the relevant page fingerprint is
+unchanged. Store note separator geometry on `NoteLayout`; do not create a second
+note-specific convergence loop.
 
 Delete `renderHeaderFooter`, `measureFootnoteHeight`, note dry-run render states,
 and note paint-time block layout. No story paint path may call body layout.
@@ -97,7 +105,8 @@ Use the roadmap review gate.
 
 - Modify: `packages/docx/parser/src/types.rs`
 - Modify: `packages/docx/parser/src/parser.rs`
-- Modify: `packages/docx/src/types.ts`
+- Create: `packages/docx/src/parser-model.ts`
+- Create: `packages/docx/src/parser-model.test.ts`
 - Create: `packages/docx/src/layout/textbox.test.ts`
 - Modify: `packages/docx/src/layout/stories.ts`
 - Modify: `packages/docx/src/layout/types.ts`
@@ -110,18 +119,25 @@ Use the roadmap review gate.
 **Interfaces:**
 
 - Consumes: parser `BodyElement`, shared `layoutStory`, and DrawingML shape geometry.
-- Produces: `ShapeTextBody.blocks: Vec<BodyElement>` / `ShapeTextBody.blocks: BodyElement[]` and `TextBoxLayout`.
+- Produces: Rust wire-only `ShapeRun.text_box_content: Vec<BodyElement>`, internal `ParsedShapeRun.textBoxContent?: BodyElement[]`, the unchanged public `ShapeRun.textBlocks?: ShapeText[]`, and `TextBoxLayout`.
+
+**Specification evidence:** ECMA-376 `wps:txbx/w:txbxContent` and
+`wps:bodyPr`, ECMA-376 §20.4.2.38 (`w:txbxContent`), and
+DrawingML §21.1.2.1.1 body insets/autofit define preserved block order and text
+container geometry. Unsupported block kinds emit diagnostics; they are not
+flattened silently.
 
 ```ts
-export interface TextBoxLayout { readonly kind: 'textbox'; readonly id: LayoutNodeId; readonly source: SourceRef; readonly bounds: LayoutRect; readonly transform: Matrix2D; readonly clip: ClipPath; readonly story: StoryLayout }
+export interface TextBoxLayout { readonly kind: 'textbox'; readonly id: LayoutNodeId; readonly source: SourceRef; readonly flowBounds: LayoutRect; readonly inkBounds: LayoutRect; readonly clip: ClipPathData; readonly transform: Matrix2DData; readonly story: StoryLayout }
 ```
 
 - [ ] **Step 1: Add failing parser and layout tests**
 
 Build minimal OOXML containing `wps:wsp/wps:txbx/w:txbxContent` with paragraph,
 table, nested table, image-bearing paragraph, and trailing paragraph. Assert the
-Rust JSON preserves block order and the TypeScript layout places all blocks within
-text-box insets for horizontal and vertical flow.
+Rust JSON preserves block order in wire-only `textBoxContent`, continues emitting
+the current `textBlocks` compatibility projection, and the TypeScript layout
+places all blocks within text-box insets for horizontal and vertical flow.
 
 - [ ] **Step 2: Run tests to verify Red**
 
@@ -132,20 +148,27 @@ cargo test -p docx-parser textbox -- --nocapture
 pnpm vitest run packages/docx/src/layout/textbox.test.ts packages/docx/src/textbox-main-engine.test.ts packages/docx/src/textbox-vertical-render.test.ts packages/docx/src/renderer.textbox-image.test.ts
 ```
 
-Expected: parser assertions fail because the current shape-text model preserves
-paragraphs rather than the complete block sequence.
+Expected: parser assertions fail because the current `ShapeTextBody` tuple and
+`ShapeRun.text_blocks` preserve only the flattened `ShapeText` projection.
 
 - [ ] **Step 3: Preserve blocks and delegate to `layoutStory`**
 
-Change the serialized shape-text body to `blocks`, parse every permitted
-`txbxContent` block in document order through existing body-element parsers, and
-keep a backward-compatible TypeScript reader for old cached `paragraphs` data at
-the parser boundary only. Create a text-box container context containing insets,
-autofit, vertical direction, clipping, and transform, then call `layoutStory`.
-Paint the nested story from stored geometry.
+Replace the private Rust tuple alias with a named `ShapeTextBody` struct carrying
+both `legacy_blocks: Vec<ShapeText>` and `content: Vec<BodyElement>`. Add a
+`#[serde(skip_serializing_if = "Vec::is_empty")] text_box_content:
+Vec<BodyElement>` wire field to Rust `ShapeRun` while retaining and populating
+`text_blocks` exactly as today. Do not add, remove, or rename any exported
+TypeScript declaration. `parser-model.ts` defines non-exported
+`ParsedShapeRun = ShapeRun & { textBoxContent?: BodyElement[] }` and reads the
+wire field; externally constructed models without it fall back to the existing
+`textBlocks` compatibility projection.
 
-Delete `ShapeTextParagraph`, text-box-specific paragraph measurement, and
-`renderShapeText` layout calculations after all consumers use `TextBoxLayout`.
+Parse every permitted `txbxContent` block in document order through existing
+body-element parsers. Create a text-box container context containing insets,
+autofit, vertical direction, clipping, and plain-data transform, then call
+`layoutStory`. Paint the nested story from stored geometry. Delete only
+text-box-specific paragraph measurement and `renderShapeText` layout
+calculations; retain the exported `ShapeText` and `ShapeTextRun` contracts.
 
 - [ ] **Step 4: Rebuild and verify Green**
 
@@ -155,11 +178,12 @@ Run:
 pnpm build:wasm
 cargo test -p docx-parser
 pnpm vitest run packages/docx/src/layout/textbox.test.ts packages/docx/src/textbox-*.test.ts packages/docx/src/anchored-textbox-render.test.ts packages/docx/src/renderer.textbox-image.test.ts
-rg -n 'ShapeTextParagraph|renderShapeText' packages/docx/src packages/docx/parser/src
+rg -n 'renderShapeText|type ShapeTextBody = \(' packages/docx/src packages/docx/parser/src
 pnpm typecheck
 ```
 
-Expected: all checks pass and `rg` has no production matches.
+Expected: all checks pass, the public declaration baseline from A1 is unchanged,
+`textBlocks` remains serialized, and `rg` has no production matches.
 
 - [ ] **Step 5: Commit, independently review, fix, and merge PR B2**
 
@@ -172,7 +196,7 @@ Use the roadmap review gate.
 
 - Modify: `packages/docx/src/layout/types.ts`
 - Create: `packages/docx/src/layout/page-layers.test.ts`
-- Create: `packages/docx/src/paint/canvas-page.ts`
+- Modify: `packages/docx/src/paint/canvas-page.ts`
 - Modify: `packages/docx/src/paint/canvas-drawing.ts`
 - Modify: `packages/docx/src/renderer.ts`
 - Modify: `packages/docx/src/front-float-zorder.test.ts`
@@ -183,6 +207,15 @@ Use the roadmap review gate.
 - Consumes: all self-contained paint nodes from A/B1/B2.
 - Produces: `buildPageLayers` and final `paintLayoutPage` ordering.
 
+**Specification evidence:** ECMA-376 §20.4.2.3 specifies that
+`wp:anchor/@relativeHeight` orders objects with the same `behindDoc` value and
+that every `behindDoc=false` object is above every `behindDoc=true` object. A
+committed decision table distinguishes
+body-, header-, footer-, note-, and text-box-owned anchors; where those sources
+do not specify cross-story ordering, a reproducible synthetic Office observation
+is marked as
+compatibility evidence rather than presented as normative.
+
 ```ts
 export function buildPageLayers(nodes: readonly PlacedLayoutNode[]): PageLayers;
 export async function paintLayoutPage(layout: DocumentLayout, pageIndex: number, target: HTMLCanvasElement | OffscreenCanvas, options: PaintPageOptions): Promise<void>;
@@ -191,9 +224,11 @@ export async function paintLayoutPage(layout: DocumentLayout, pageIndex: number,
 - [ ] **Step 1: Add failing layer-order tests**
 
 Create interleaved behind-text and front drawings anchored in body, header,
-footer, and text boxes. Record Canvas operations and assert the exact layer order
-`background, behindText, header, body, notes, front, footer`, stable relative
-z-order within each layer, and one paint per node.
+footer, notes, and text boxes. Derive each expected `paintOrder` from the committed
+normative/compatibility decision table, record Canvas operations, and assert
+cross-story order, stable relative-height/document order within an equivalent
+stacking context, and one paint per node. Do not encode one assumed global order
+before the evidence table is complete.
 
 - [ ] **Step 2: Run tests to verify Red**
 
@@ -208,10 +243,12 @@ be inspected as layout data.
 
 - [ ] **Step 3: Classify drawings during layout and paint fixed layers**
 
-Use OOXML `behindDoc`, relative height/z-order, and story ownership to assign each
-placed drawing once. Sort by stable document order and relative height. Make
-`canvas-page.ts` traverse the seven readonly arrays and dispatch by node kind.
-Delete `RenderState.deferFront`, callback queues, and callback re-entry guards.
+Use OOXML `behindDoc`, relative height/z-order, story ownership, and the decision
+table to assign each placed drawing once. Materialize both semantic arrays and a
+`PageLayers.paintOrder: readonly PagePaintEntry[]` sequence. Make
+`canvas-page.ts` traverse that stored
+sequence and dispatch by node kind. Delete `RenderState.deferFront`, callback
+queues, and callback re-entry guards.
 
 - [ ] **Step 4: Verify Green and callback deletion**
 
@@ -245,8 +282,14 @@ Use the roadmap review gate.
 
 **Interfaces:**
 
-- Consumes: `TextPlacement` metadata retained by A2 and worker-retained `DocumentLayout` from A5.
+- Consumes: `TextPlacement` metadata retained by A3 and worker-retained keyed `DocumentLayout` from A6.
 - Produces: `textRunsForPage` returning the existing public `DocxTextRunInfo[]` shape.
+
+**Specification evidence:** ECMA-376 §17.13.6.2 bookmarks,
+§17.16.22 hyperlinks, bidirectional/vertical run properties, and the
+stored glyph-cluster mapping determine reading ranges and transformed hit
+geometry. Selection rectangles are viewer projections, not OOXML layout rules;
+tests therefore derive them from retained clusters without re-shaping.
 
 ```ts
 export function textRunsForPage(layout: DocumentLayout, pageIndex: number, options: Readonly<{ scale: number }>): DocxTextRunInfo[];

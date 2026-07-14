@@ -124,6 +124,13 @@ The layout engine receives resolved contexts plus explicit services:
 export interface LayoutServices {
   readonly text: TextLayoutService;
   readonly images: ImageMetadataService;
+  readonly math: MathMetadataService;
+}
+
+export interface LayoutOptions {
+  readonly currentDateMs: number;
+  readonly textEnvironmentFingerprint: string;
+  readonly mathEnvironmentFingerprint: string;
 }
 ```
 
@@ -134,7 +141,9 @@ result.
 
 Layout uses points at scale 1. It owns line selection, row sizing, page and column
 placement, float exclusion, note reservation, story placement, and page-dependent
-field convergence.
+field convergence. Geometry-affecting render options are normalized before layout
+and participate in a stable layout cache key; paint-only width, DPR, and color do
+not.
 
 ### Document layout
 
@@ -155,7 +164,9 @@ export interface LayoutPage {
 ```
 
 Page layers explicitly own background, behind-text drawings, header, body, notes,
-front drawings, and footer content. Paint order is a layout result rather than a
+front drawings, and footer content. Their `paintOrder` is derived from normative
+anchor/story stacking rules and isolated Office compatibility evidence, then
+stored as a layout result rather than assumed by paint or implemented as a
 mutable callback side channel.
 
 The primary node kinds are:
@@ -172,6 +183,12 @@ Nodes retain only an opaque source reference for diagnostics, search, selection,
 and navigation. Paint does not read `DocParagraph`, `DocTable`, or other parser
 objects. Text, font descriptors, styles, coordinates, borders, and resource keys
 needed by paint are already resolved.
+
+Flow nodes store `flowBounds`, `inkBounds`, optional `clipBounds`, and
+`advancePt` separately. Ordinary-flow allocation ownership is constrained by
+page margins and non-overlap. Negative-spacing ink, frames, clipped overhang,
+and explicitly allowed floating overlap are not incorrectly rejected as flow
+ownership violations.
 
 ### Paint
 
@@ -195,7 +212,12 @@ The final implementation is organized by responsibility:
 ```text
 packages/docx/src/layout/
   context.ts
+  flow.ts
   text.ts
+  resources.ts
+  convergence.ts
+  compatibility.ts
+  error-page.ts
   paragraph.ts
   table.ts
   floats.ts
@@ -252,9 +274,19 @@ numbers, strings, booleans, and resource keys. It does not contain Canvas
 contexts, functions, `WeakMap`, DOM nodes, `FontFace`, `ImageBitmap`, or live
 archive handles.
 
+Transforms and clips use numeric/discriminated plain-data records, construction
+deep-freezes the result in development/tests, and clone tests cover every node
+kind. Source references include a stable story-instance key (body, header/footer
+part, note ID, or enclosing text-box path) plus the block path.
+
 Search and selection geometry is projected from layout rather than collected by a
 second dry render. Main and worker modes must produce the same normalized layout
 fingerprint for the same resolved font environment.
+
+The worker retains layouts by a structured-clone-safe `LayoutOptions` key. The
+load-time default key backs synchronous page metadata. A per-call `currentDate`
+selects a keyed variant without mutating the default metadata or changing public
+method signatures; NUMPAGES is converged within that variant.
 
 The current worker limitation for the optional DOM-dependent math engine is not
 expanded by this work. The layout service boundary permits a future worker-safe
@@ -285,6 +317,8 @@ the pull request that removes its remaining consumer.
 ### Series A: Body, tables, and page flow
 
 - establish invariant and paint-purity CI;
+- establish final font/text/image/math services, layout option keys, and one
+  convergence primitive before feature migration;
 - migrate numbered, vertical, floating-wrap, and state-dependent body paragraphs;
 - remove paragraph line stamps and fragment paint gates;
 - derive row sizing and cell blocks from one table measurement;
@@ -304,8 +338,8 @@ the pull request that removes its remaining consumer.
 
 ### Series C: Compatibility infrastructure and final consolidation
 
-- express float placement as explicit constraints and convergence;
-- unify font resolution and shaping contracts across main and worker modes;
+- express float placement as explicit constraints using the shared convergence
+  primitive;
 - isolate Office-observed compatibility rules;
 - propagate unsupported-feature diagnostics from parser to layout;
 - add a redistributable synthetic conformance corpus and browser geometry CI;
@@ -329,8 +363,9 @@ layout fidelity gate; pixel tests are supplementary.
 
 Required invariants include:
 
-1. ordinary flow does not enter the bottom margin;
-2. flow fragments on different pages cannot own the same page region;
+1. ordinary in-flow allocation bounds do not enter the bottom margin;
+2. ordinary flow fragments on different pages cannot own the same allocation
+   region; explicitly overlapping floats and ink overhang are modeled separately;
 3. paginator cursor advancement equals fragment advance ownership;
 4. measured and painted line partitions are identical;
 5. measured and painted table row heights are identical;
@@ -361,8 +396,10 @@ commit, pull-request, or issue text.
 
 Paint tests use a Canvas stub whose `measureText` throws. Static analysis rejects:
 
-- measurement or layout imports in paint modules;
-- scale or DPR reads in layout modules;
+- measurement/layout algorithm imports in paint modules while allowing type-only
+  imports from the plain layout result contract;
+- display-scale/DPR state in layout modules without rejecting authored OOXML text
+  scale properties;
 - runtime layout stamps on parser model types;
 - duplicate OOXML property merge implementations;
 - new production migration flags or legacy layout fallbacks.
@@ -371,8 +408,11 @@ Paint tests use a Canvas stub whose `measureText` throws. Static analysis reject
 
 Node/Skia geometry tests are the deterministic primary gate. Chrome, Firefox, and
 WebKit verify browser execution and main/worker parity. Visual regression tests
-remain supplementary. Behavior-preserving migration pull requests require no
-intentional visual difference.
+remain supplementary. Native Canvas shaping may differ across browser engines,
+so cross-browser checks use semantic invariants and explicit per-primitive
+tolerances unless a deterministic shaping engine and font corpus are supplied;
+main/worker parity within one browser remains exact. Behavior-preserving
+migration pull requests require no intentional visual difference.
 
 ## Pull Request Review Gate
 
@@ -407,6 +447,12 @@ confirms:
 6. main/worker parity and required invariants pass in CI;
 7. public APIs remain backward compatible;
 8. every series and its independent review are complete.
+
+Public compatibility is proved by comparing the generated package declaration
+surface with the baseline captured before migration, not by manually inspecting
+a subset of source files. A transitive import-graph check proves that no paint
+entry reaches measurement/layout/style-resolution code and that layout/pagination
+algorithms exist only in the focused allowlisted modules.
 
 ## Acceptance Criteria
 
