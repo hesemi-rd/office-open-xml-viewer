@@ -276,6 +276,125 @@ describe('vertical outer floating tables retain the canonical logical paint doma
     expect(parentBorderPaint).toBeGreaterThan(childPaint);
   });
 
+  it('derives an auto-height parent exclusion from the child-reflowed fitting fragment', () => {
+    const outer = floatingTable([{ text: 'unused', heightPt: 20 }]);
+    outer.layout = 'fixed';
+    outer.rows[0]!.rowHeight = null;
+    outer.rows[0]!.rowHeightRule = 'auto';
+    const nestedTable = floatingTable([{ text: 'N', heightPt: 20 }]);
+    nestedTable.layout = 'fixed';
+    nestedTable.colWidths = [40];
+    nestedTable.rows[0]!.cells[0]!.widthPt = 40;
+    nestedTable.tblpPr = {
+      ...nestedTable.tblpPr!,
+      horzAnchor: 'page',
+      vertAnchor: 'page',
+      tblpX: 20,
+      tblpY: 30,
+    };
+    outer.rows[0]!.cells[0]!.content = [
+      { type: 'table', ...nestedTable },
+      { type: 'paragraph', ...paragraph('x'.repeat(20)) },
+    ] as unknown as DocTableCell['content'];
+    const doc = documentWith(outer);
+    doc.body.push({ type: 'paragraph', ...paragraph('FOLLOWING') } as unknown as BodyElement);
+    const measure = recordingCanvas();
+    const pages = computePages(
+      doc.body,
+      __test_verticalLayoutSection(PHYSICAL_SECTION),
+      measure.canvas.getContext('2d') as CanvasRenderingContext2D,
+      doc.fontFamilyClasses,
+    );
+    const tableElement = pages.flat().find((element) => element.type === 'table');
+    const followingElement = pages.flat().find((element) => element.type === 'paragraph');
+    const retainedTable = tableElement ? bodyFragmentFor(tableElement) : undefined;
+    const retainedFollowing = followingElement ? bodyFragmentFor(followingElement) : undefined;
+    if (retainedTable?.fragment.kind !== 'table'
+      || !('resolvedFloatingTables' in retainedTable.fragment)
+      || retainedFollowing?.fragment.kind !== 'paragraph') {
+      throw new Error('expected retained auto-height outer table and following paragraph');
+    }
+    const parentExclusion = retainedFollowing.fragment.exclusions.find(
+      (exclusion) => Math.abs(exclusion.bounds.widthPt - retainedTable.widthPt) < 0.001,
+    );
+    if (!parentExclusion) throw new Error('expected the registered parent exclusion');
+
+    expect(retainedTable.fragment.resolvedFloatingTables).toHaveLength(1);
+    expect(parentExclusion.bounds.heightPt).toBeCloseTo(retainedTable.fragment.advancePt, 6);
+  });
+
+  it('finalizes a deferred fitting outer float with its destination page identity', async () => {
+    const blocker = floatingTable([{ text: 'BLOCKER', heightPt: 30 }]);
+    blocker.tblpPr = {
+      ...blocker.tblpPr!,
+      horzAnchor: 'page',
+      vertAnchor: 'page',
+      tblpX: 20,
+      tblpY: 30,
+    };
+    const relocated = floatingTable([{ text: 'unused', heightPt: 70 }]);
+    relocated.tblpPr = { ...blocker.tblpPr! };
+    const nestedTable = floatingTable([{ text: 'LATER-NESTED', heightPt: 20 }]);
+    nestedTable.tblpPr = {
+      ...nestedTable.tblpPr!,
+      horzAnchor: 'page',
+      vertAnchor: 'page',
+      tblpX: 100,
+      tblpY: 30,
+    };
+    const pageAnchor = paragraph('');
+    (pageAnchor.runs as unknown[]).push({
+      type: 'field', fieldType: 'page', instruction: 'PAGE', fallbackText: '?',
+      bold: false, italic: false, underline: false, strikethrough: false,
+      fontSize: 10, color: null, fontFamily: 'Times New Roman', background: null,
+    });
+    relocated.rows[0]!.cells[0]!.content = [
+      { type: 'table', ...nestedTable },
+      { type: 'paragraph', ...pageAnchor },
+    ] as unknown as DocTableCell['content'];
+    const doc = documentWith(blocker);
+    doc.body.push({ type: 'table', ...relocated } as unknown as BodyElement);
+    const measure = recordingCanvas();
+    const pages = computePages(
+      doc.body,
+      __test_verticalLayoutSection(PHYSICAL_SECTION),
+      measure.canvas.getContext('2d') as CanvasRenderingContext2D,
+      doc.fontFamilyClasses,
+    );
+    const destinationTable = pages[1]?.find((element) => element.type === 'table');
+    const retained = destinationTable ? bodyFragmentFor(destinationTable) : undefined;
+    if (retained?.fragment.kind !== 'table'
+      || !('resolvedFloatingTables' in retained.fragment)) {
+      throw new Error('expected the deferred fitting outer fragment');
+    }
+    const fragment = retained.fragment as TableFragmentLayout;
+    const [nested] = fragment.resolvedFloatingTables;
+
+    expect(pages).toHaveLength(2);
+    expect(fragment.floatingTableCoordinateSpace).toBe('logical-page-points');
+    expect(nested?.source.physicalPageIndex).toBe(1);
+    expect(nested?.source.displayPageNumber).toBe(2);
+    expect(nested?.occurrenceId).toContain(':fitting-outer:1:');
+    expect(nested?.bounds).toEqual({
+      xPt: 100,
+      yPt: 30,
+      widthPt: nested.child.columnWidthsPt.reduce((sum, width) => sum + width, 0),
+      heightPt: 20,
+    });
+
+    const paint = recordingCanvas();
+    const runs: DocxTextRunInfo[] = [];
+    await renderDocumentToCanvas(doc, paint.canvas, 1, {
+      dpr: 1,
+      width: PHYSICAL_SECTION.pageWidth,
+      prebuiltPages: pages,
+      onTextRun: (run) => runs.push(run),
+    });
+    expect(paint.measureCalls()).toBe(0);
+    expect(runs.some((run) => run.text === '2')).toBe(true);
+    expect(runs.filter((run) => run.text === 'LATER-NESTED')).toHaveLength(1);
+  });
+
   it('keeps every split outer tblpPr slice in the logical domain and paints each row once', async () => {
     const doc = documentWith(floatingTable([
       { text: 'OUTER-SLICE-1', heightPt: 90 },

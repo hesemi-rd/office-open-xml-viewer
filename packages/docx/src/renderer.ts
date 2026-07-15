@@ -100,6 +100,7 @@ import {
   pushFloatRect,
 } from './frame-geometry.js';
 import {
+  type FloatTableBox,
   computeFloatTableBox,
   registerTableFloat,
   floatTableWrapSide,
@@ -4183,14 +4184,58 @@ export function computePages(
           withColumnBand(() => {
             const cW = colW() * measureState.scale;
             const layout = computeTableLayout(tbl, cW, measureState);
-            const tableH = layout.rowHeights.reduce((s, x) => s + x, 0);
-            const box = computeFloatTableBox(tp, measureState, measureState.y, layout.tableW, tableH);
-            // RAW (pre-clamp) box: for a page/margin anchor computeFloatTableBox
-            // shifts a too-tall box UP to the container bottom, which would hide the
-            // overflow; skipVClamp keeps its absolute tblpY top so the split below
-            // can find where the table crosses the text region (sample-28 p.15).
-            const rawBox = computeFloatTableBox(tp, measureState, measureState.y, layout.tableW, tableH, true);
-            return { box, rawBox, layout, contentWPt: cW / measureState.scale };
+            const physicalPageIndex = pages.length - 1;
+            const pageContext = measureState.layoutServices
+              ? fieldAcquisitionContextOf(measureState.layoutServices)
+                .resolveDestinationPage?.(physicalPageIndex)
+              : undefined;
+            const finalState: RenderState = {
+              ...measureState,
+              pageIndex: physicalPageIndex,
+              displayPageNumber: pageContext?.displayPageNumber ?? physicalPageIndex + 1,
+              pageNumberFormat: pageContext?.pageNumberFormat ?? measureState.pageNumberFormat,
+            };
+            let finalHeightPt = layout.rowHeights.reduce((sum, height) => sum + height, 0);
+            let box = computeFloatTableBox(
+              tp, finalState, finalState.y, layout.tableW, finalHeightPt,
+            );
+            for (let pass = 0; pass < 4; pass += 1) {
+              const prepared = bodyFlowFragments.sourceIndices.retainedTableMeasureBySource
+                .prepareFittingOuterFragment(tbl, finalState, box);
+              if (!prepared.fragment) {
+                const rawBox = computeFloatTableBox(
+                  tp, finalState, finalState.y, layout.tableW, finalHeightPt, true,
+                );
+                return {
+                  box,
+                  rawBox,
+                  layout,
+                  requiresCanonicalSplit: true as const,
+                  contentWPt: cW / finalState.scale,
+                };
+              }
+              const nextHeightPt = prepared.fragment.advancePt;
+              const nextBox = computeFloatTableBox(
+                tp, finalState, finalState.y, layout.tableW, nextHeightPt,
+              );
+              const rawBox = computeFloatTableBox(
+                tp, finalState, finalState.y, layout.tableW, nextHeightPt, true,
+              );
+              if (nextHeightPt === finalHeightPt
+                && nextBox.x === box.x && nextBox.y === box.y) {
+                return {
+                  box: nextBox,
+                  rawBox,
+                  layout,
+                  prepared,
+                  requiresCanonicalSplit: false as const,
+                  contentWPt: cW / finalState.scale,
+                };
+              }
+              finalHeightPt = nextHeightPt;
+              box = nextBox;
+            }
+            throw new Error('Fitting outer table final-frame probe did not converge');
           });
         let first = measureFloat();
         const isTextAnchored = tp.vertAnchor !== 'page' && tp.vertAnchor !== 'margin';
@@ -4281,7 +4326,9 @@ export function computePages(
         const pageAnchoredOverflows =
           !isTextAnchored && first.rawBox.h > fullContentH();
 
-        if ((isTextAnchored && tableOverflowsHere) || pageAnchoredOverflows) {
+        if (first.requiresCanonicalSplit
+          || (isTextAnchored && tableOverflowsHere)
+          || pageAnchoredOverflows) {
           // ── Row-split across pages (Word ground truth, issue #674 + sample-28) ──
           // Greedy-fit the rows from the slice-1 top down to the body bottom, spilling
           // the remainder onto continuation pages. Registers one wrap FloatRect per
@@ -4357,12 +4404,26 @@ export function computePages(
         // Finalize selected nested floats against the pre-parent registry.
         // stampTableLayout commits that exact child delta before the parent
         // exclusion below receives the next paragraph id.
+        if (!first.prepared) {
+          throw new Error('Fitting outer table acceptance requires a whole prepared fragment');
+        }
+        const acceptedFragment = first.prepared.fragment;
+        if (!acceptedFragment) {
+          throw new Error('Fitting outer table acceptance requires a whole prepared fragment');
+        }
+        const acceptedPrepared = {
+          ...first.prepared,
+          fragment: acceptedFragment,
+          box: first.box,
+        };
         withColumnBand(() => {
           stampTableLayout(
             el as PaginatedBodyElement,
             first.layout.colWidths,
             first.layout.rowHeights,
             first.contentWPt,
+            undefined,
+            acceptedPrepared,
           );
           const side = floatTableWrapSide(first.box, measureState);
           registerTableFloat(first.box, tp, measureState, side, tbl.overlap !== 'never');
@@ -5799,6 +5860,17 @@ const bodyFlowFragments = Object.freeze(Object.assign(new WeakMap<object, Placed
         coordinateSpace: 'logical-page-points',
         flowDomainId: string,
       ): void;
+      prepareFittingOuterFragment(
+        table: DocTable,
+        finalState: RenderState,
+        outerBox: FloatTableBox,
+      ): Readonly<{
+        fragment?: TableFragmentLayout;
+        floatingTableRegistryDelta?: FloatRegistryDeltaPt;
+        physicalPageIndex: number;
+        displayPageNumber: number;
+        occurrenceId: string;
+      }>;
       reacquirePageBlock(
         table: DocTable,
         sourceIndex: number,
@@ -6102,6 +6174,156 @@ Object.assign(
         drawn: true,
       })));
       state.floatParaSeq = delta.nextParagraphId;
+    },
+    prepareFittingOuterFragment(
+      table: DocTable,
+      finalState: RenderState,
+      outerBox: FloatTableBox,
+    ): Readonly<{
+      fragment?: TableFragmentLayout;
+      floatingTableRegistryDelta?: FloatRegistryDeltaPt;
+      physicalPageIndex: number;
+      displayPageNumber: number;
+      occurrenceId: string;
+    }> {
+      const retained = bodyFlowFragments.sourceIndices.retainedTableMeasureBySource
+        .forTable(table);
+      const sourceIndex = bodySourceIndexFor(table);
+      const services = finalState.layoutServices;
+      if (!retained || sourceIndex === undefined || !services) {
+        throw new Error('Fitting outer table preparation requires retained acquisition');
+      }
+      const pageHeightPt = finalState.pageH / finalState.scale;
+      const physicalPageIndex = finalState.pageIndex;
+      const displayPageNumber = finalState.displayPageNumber ?? physicalPageIndex + 1;
+      const occurrenceId = `${retained.acquisition.input.id}:fitting-outer:${physicalPageIndex}`;
+      const anchoredToPhysicalPage = table.tblpPr?.vertAnchor === 'page';
+      const containerBottomPt = anchoredToPhysicalPage
+        ? pageHeightPt
+        : pageHeightPt - finalState.marginBottom;
+      const outerTopPt = outerBox.y / finalState.scale;
+      const availableHeightPt = Math.max(0, containerBottomPt - outerTopPt);
+      const freshPageHeightPt = anchoredToPhysicalPage
+        ? pageHeightPt
+        : Math.max(0, pageHeightPt - finalState.marginTop - finalState.marginBottom);
+      const result = takeTableFragment(
+        retained.acquisition,
+        startTableFragmentCursor(),
+        {
+          availableHeightPt,
+          freshPageHeightPt,
+          placement: {
+            container: {
+              id: `logical-page:${physicalPageIndex}:fitting-outer-probe`,
+              kind: 'body',
+              bounds: {
+                xPt: 0,
+                yPt: 0,
+                widthPt: outerBox.w,
+                heightPt: availableHeightPt,
+              },
+            },
+            cursor: { xPt: 0, yPt: 0 },
+            availableBounds: {
+              xPt: 0,
+              yPt: 0,
+              widthPt: outerBox.w,
+              heightPt: availableHeightPt,
+            },
+          },
+          services,
+          compatibility: 'word',
+          oversizedRowPolicy: 'atomic',
+          page: {
+            physicalPageIndex,
+            displayPageNumber,
+            occurrenceId,
+          },
+          floatingTableFrames: {
+            page: {
+              xPt: 0,
+              yPt: 0,
+              widthPt: finalState.pageWidth,
+              heightPt: pageHeightPt,
+            },
+            margin: {
+              xPt: finalState.marginLeft,
+              yPt: finalState.marginTop,
+              widthPt: Math.max(
+                0,
+                finalState.pageWidth - finalState.marginLeft - finalState.marginRight,
+              ),
+              heightPt: Math.max(
+                0,
+                pageHeightPt - finalState.marginTop - finalState.marginBottom,
+              ),
+            },
+            column: {
+              xPt: finalState.contentX / finalState.scale,
+              yPt: finalState.marginTop,
+              widthPt: finalState.contentW / finalState.scale,
+              heightPt: Math.max(
+                0,
+                pageHeightPt - finalState.marginTop - finalState.marginBottom,
+              ),
+            },
+          },
+          floatingTableRegistry: {
+            coordinateSpace: 'logical-page-points',
+            flowDomainId: `logical-page:${physicalPageIndex}`,
+            entries: Object.freeze(finalState.floats.map((float, index) => Object.freeze({
+              kind: float.kind,
+              occurrenceId: float.imageKey || `page-float:${index}`,
+              paragraphId: float.paraId,
+              bounds: Object.freeze({
+                xPt: float.imageX / finalState.scale,
+                yPt: float.imageY / finalState.scale,
+                widthPt: float.imageW / finalState.scale,
+                heightPt: float.imageH / finalState.scale,
+              }),
+              exclusionBounds: Object.freeze({
+                xPt: float.xLeft / finalState.scale,
+                yPt: float.yTop / finalState.scale,
+                widthPt: (float.xRight - float.xLeft) / finalState.scale,
+                heightPt: (float.yBottom - float.yTop) / finalState.scale,
+              }),
+            }))),
+            nextParagraphId: finalState.floatParaSeq,
+          },
+          finalPlacementTranslationPt: {
+            xPt: outerBox.x / finalState.scale,
+            yPt: outerBox.y / finalState.scale,
+          },
+          reacquirePageDependentBlock: (request) => bodyFlowFragments.sourceIndices
+            .retainedTableMeasureBySource.reacquirePageBlock(
+              table,
+              sourceIndex,
+              retained.acquisition,
+              finalState,
+              services,
+              request,
+            ),
+        },
+      );
+      if (result.nextCursor) {
+        return Object.freeze({
+          physicalPageIndex,
+          displayPageNumber,
+          occurrenceId,
+        });
+      }
+      if (!result.fragment) {
+        throw new Error('Fitting outer table pure preparation must produce a fragment');
+      }
+      return Object.freeze({
+        fragment: result.fragment,
+        ...(result.floatingTableRegistryDelta ? {
+          floatingTableRegistryDelta: result.floatingTableRegistryDelta,
+        } : {}),
+        physicalPageIndex,
+        displayPageNumber,
+        occurrenceId,
+      });
     },
     reacquirePageBlock(
       table: DocTable,
@@ -6995,6 +7217,14 @@ function stampTableLayout(
   _rowHeightsPt: number[],
   _contentWPt: number,
   finalState?: RenderState,
+  preparedOuter?: Readonly<{
+    fragment: TableFragmentLayout;
+    floatingTableRegistryDelta?: FloatRegistryDeltaPt;
+    physicalPageIndex: number;
+    displayPageNumber: number;
+    occurrenceId: string;
+    box: FloatTableBox;
+  }>,
 ): void {
   const table = el as unknown as DocTable;
   const retained = bodyFlowFragments.sourceIndices.retainedTableMeasureBySource.forTable(table);
@@ -7004,7 +7234,7 @@ function stampTableLayout(
   }
   let layout: TableLayout | TableFragmentLayout = retained.acquisition.layout;
   const tableWidthPt = layout.columnWidthsPt.reduce((sum, width) => sum + width, 0);
-  const box = table.tblpPr
+  const box = preparedOuter?.box ?? (table.tblpPr
     ? computeFloatTableBox(
       table.tblpPr,
       retained.state,
@@ -7012,7 +7242,7 @@ function stampTableLayout(
       tableWidthPt,
       layout.advancePt,
     )
-    : undefined;
+    : undefined);
   const xPt = box?.x === undefined
     ? retained.state.contentX / retained.state.scale
     : box.x / retained.state.scale;
@@ -7022,119 +7252,19 @@ function stampTableLayout(
   const placementState = finalState ?? retained.state;
   const physical = table.tblpPr ? undefined : placementState.verticalPhys;
   const services = placementState.layoutServices;
-  if (table.tblpPr && services) {
-    const pageHeightPt = placementState.pageH / placementState.scale;
-    const pageIndex = placementState.pageIndex;
-    const logicalBandHeightPt = Math.max(
-      retained.acquisition.layout.advancePt,
-      pageHeightPt - placementState.marginTop - placementState.marginBottom,
-    );
-    const logicalFragment = takeTableFragment(
-      retained.acquisition,
-      startTableFragmentCursor(),
-      {
-        availableHeightPt: logicalBandHeightPt,
-        freshPageHeightPt: logicalBandHeightPt,
-        placement: {
-          container: {
-            id: `logical-page:${pageIndex}:fitting-outer`,
-            kind: 'body',
-            bounds: {
-              xPt: 0,
-              yPt: 0,
-              widthPt: tableWidthPt,
-              heightPt: logicalBandHeightPt,
-            },
-          },
-          cursor: { xPt: 0, yPt: 0 },
-          availableBounds: {
-            xPt: 0,
-            yPt: 0,
-            widthPt: tableWidthPt,
-            heightPt: logicalBandHeightPt,
-          },
-        },
-        services,
-        compatibility: 'word',
-        oversizedRowPolicy: 'atomic',
-        page: {
-          physicalPageIndex: pageIndex,
-          displayPageNumber: placementState.displayPageNumber ?? pageIndex + 1,
-          occurrenceId: `${retained.acquisition.input.id}:fitting-outer:${pageIndex}`,
-        },
-        floatingTableFrames: {
-          page: {
-            xPt: 0,
-            yPt: 0,
-            widthPt: placementState.pageWidth,
-            heightPt: pageHeightPt,
-          },
-          margin: {
-            xPt: placementState.marginLeft,
-            yPt: placementState.marginTop,
-            widthPt: Math.max(
-              0,
-              placementState.pageWidth
-                - placementState.marginLeft - placementState.marginRight,
-            ),
-            heightPt: Math.max(
-              0,
-              pageHeightPt - placementState.marginTop - placementState.marginBottom,
-            ),
-          },
-          column: {
-            xPt: placementState.contentX / placementState.scale,
-            yPt: placementState.marginTop,
-            widthPt: placementState.contentW / placementState.scale,
-            heightPt: logicalBandHeightPt,
-          },
-        },
-        floatingTableRegistry: {
-          coordinateSpace: 'logical-page-points',
-          flowDomainId: `logical-page:${pageIndex}`,
-          entries: Object.freeze(placementState.floats.map((float, index) => Object.freeze({
-            kind: float.kind,
-            occurrenceId: float.imageKey || `page-float:${index}`,
-            paragraphId: float.paraId,
-            bounds: Object.freeze({
-              xPt: float.imageX / placementState.scale,
-              yPt: float.imageY / placementState.scale,
-              widthPt: float.imageW / placementState.scale,
-              heightPt: float.imageH / placementState.scale,
-            }),
-            exclusionBounds: Object.freeze({
-              xPt: float.xLeft / placementState.scale,
-              yPt: float.yTop / placementState.scale,
-              widthPt: (float.xRight - float.xLeft) / placementState.scale,
-              heightPt: (float.yBottom - float.yTop) / placementState.scale,
-            }),
-          }))),
-          nextParagraphId: placementState.floatParaSeq,
-        },
-        finalPlacementTranslationPt: { xPt, yPt },
-        reacquirePageDependentBlock: (request) => bodyFlowFragments.sourceIndices
-          .retainedTableMeasureBySource.reacquirePageBlock(
-            table,
-            sourceIndex,
-            retained.acquisition,
-            placementState,
-            services,
-            request,
-          ),
-      },
-    );
-    if (!logicalFragment.fragment || logicalFragment.nextCursor) {
-      throw new Error('Fitting outer table final-frame layout must remain atomic');
+  if (table.tblpPr) {
+    if (!preparedOuter) {
+      throw new Error('Fitting outer table acceptance requires a pure prepared fragment');
     }
-    if (logicalFragment.floatingTableRegistryDelta?.entries.length) {
+    if (preparedOuter.floatingTableRegistryDelta?.entries.length) {
       bodyFlowFragments.sourceIndices.retainedTableMeasureBySource.commitFloatRegistryDelta(
-        placementState,
-        logicalFragment.floatingTableRegistryDelta,
+        retained.state,
+        preparedOuter.floatingTableRegistryDelta,
         'logical-page-points',
-        `logical-page:${pageIndex}`,
+        `logical-page:${preparedOuter.physicalPageIndex}`,
       );
     }
-    layout = logicalFragment.fragment;
+    layout = preparedOuter.fragment;
   } else if (physical && services) {
     const physicalLeftPt = (
       physical.cssWidthPx - placementState.y

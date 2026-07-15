@@ -95,9 +95,61 @@ export function computePages() {
 export function computeTableLayout() { return []; }
 `;
 
+const computePagesUprightIntermediate = `
+export function computePages() {
+  const y = 10, h = 20, tblReservePt = 0, colTopY = 0, i = 0;
+  const tableEl = {}, colWidthsPt = [], rowHeightsPt = [], bandPt = 100;
+  stampTableLayout(tableEl, colWidthsPt, rowHeightsPt, bandPt);
+  if (y + h > effContentH() - tblReservePt && y > colTopY) nextColumnOrPage(i);
+  const sourceIndex = bodySourceIndexFor(tbl);
+  const retained = sourceIndex === undefined
+    ? undefined
+    : measureState.retainedTablesBySourceIndex?.get(sourceIndex);
+  if (sourceIndex === undefined || retained === undefined) {
+    throw new Error('Upright vertical table requires retained physical geometry');
+  }
+  attachRetainedTablePlacement(tableEl, retained.layout, sourceIndex, {
+    xPt: colX(),
+    yPt: measureState.y,
+    widthPt: colW(),
+    flowAdvancePt: h,
+    columnIndex: colIndex,
+  });
+  return [];
+}
+export function computeTableLayout() { return []; }
+`;
+
+const computePagesEnvelopeBaseline = `
+export function computePages() {
+  attachRetainedTableEnvelope(first, firstTable, widths, heights, band, state, firstPlacement);
+  attachRetainedTableEnvelope(second, secondTable, widths, heights, band, state, secondPlacement);
+  return [];
+}
+export function computeTableLayout() { return []; }
+`;
+
+const computePagesEnvelopeMigration = computePagesEnvelopeBaseline
+  .replaceAll('attachRetainedTableEnvelope', 'attachTableFragment');
+
 function initializeComputePagesUprightRepository() {
   const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-upright-finalize-'));
   write(root, 'packages/docx/src/renderer.ts', computePagesUprightBaseline);
+  write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
+  write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
+  git(root, 'init', '-b', 'main');
+  git(root, 'config', 'user.email', 'boundary-test@example.invalid');
+  git(root, 'config', 'user.name', 'Boundary Test');
+  git(root, 'add', '.');
+  git(root, 'commit', '-m', 'base');
+  git(root, 'switch', '-c', 'a1');
+  establishA1Baseline(root);
+  return root;
+}
+
+function initializeComputePagesEnvelopeRepository() {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-envelope-rename-'));
+  write(root, 'packages/docx/src/renderer.ts', computePagesEnvelopeBaseline);
   write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
   write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
   git(root, 'init', '-b', 'main');
@@ -159,6 +211,70 @@ function initializeComputePagesFittingOuterRepository() {
   git(root, 'switch', '-c', 'a1');
   establishA1Baseline(root);
   return root;
+}
+
+function priorFittingOuterProbeSource(current) {
+  const replaceRange = (source, startMarker, endMarker, replacement) => {
+    const start = source.indexOf(startMarker);
+    const end = source.indexOf(endMarker, start);
+    assert.ok(start >= 0 && end > start, `${startMarker}..${endMarker}`);
+    return source.slice(0, start) + replacement + source.slice(end);
+  };
+  let prior = replaceRange(
+    current,
+    '        const measureFloat = () =>\n',
+    '        let first = measureFloat();',
+    `        const measureFloat = () =>
+          withColumnBand(() => {
+            const cW = colW() * measureState.scale;
+            const layout = computeTableLayout(tbl, cW, measureState);
+            const tableH = layout.rowHeights.reduce((s, x) => s + x, 0);
+            const box = computeFloatTableBox(tp, measureState, measureState.y, layout.tableW, tableH);
+            const rawBox = computeFloatTableBox(tp, measureState, measureState.y, layout.tableW, tableH, true);
+            return { box, rawBox, layout, contentWPt: cW / measureState.scale };
+          });
+`,
+  );
+  prior = prior.replace(
+    `        if (first.requiresCanonicalSplit
+          || (isTextAnchored && tableOverflowsHere)
+          || pageAnchoredOverflows) {`,
+    '        if ((isTextAnchored && tableOverflowsHere) || pageAnchoredOverflows) {',
+  );
+  prior = replaceRange(
+    prior,
+    "        if (!first.prepared) {\n          throw new Error('Fitting outer table acceptance requires a whole prepared fragment');\n        }\n",
+    '        pushTagged(el as PaginatedBodyElement);',
+    `        withColumnBand(() => {
+          stampTableLayout(
+            el as PaginatedBodyElement,
+            first.layout.colWidths,
+            first.layout.rowHeights,
+            first.contentWPt,
+          );
+          const side = floatTableWrapSide(first.box, measureState);
+          registerTableFloat(first.box, tp, measureState, side, tbl.overlap !== 'never');
+        });
+`,
+  );
+  return prior;
+}
+
+function initializeComposedFittingOuterProbeRepository() {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-composed-fitting-probe-'));
+  const productionRoot = resolve(import.meta.dirname, '..');
+  const current = readFileSync(join(productionRoot, 'packages/docx/src/renderer.ts'), 'utf8');
+  write(root, 'packages/docx/src/renderer.ts', priorFittingOuterProbeSource(current));
+  write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
+  write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
+  git(root, 'init', '-b', 'main');
+  git(root, 'config', 'user.email', 'boundary-test@example.invalid');
+  git(root, 'config', 'user.name', 'Boundary Test');
+  git(root, 'add', '.');
+  git(root, 'commit', '-m', 'base with earlier A5 transformations');
+  git(root, 'switch', '-c', 'a1');
+  establishA1Baseline(root);
+  return { root, current };
 }
 
 function initializeComputePagesTableStampRepository() {
@@ -1333,6 +1449,64 @@ test('allows only destination-first upright finalization inside computePages', (
   assert.equal(result.status, 0, result.output);
 });
 
+test('normalizes both intermediate and destination-first upright forms to one canonical shape', () => {
+  for (const source of [computePagesUprightIntermediate, computePagesUprightMigration]) {
+    const root = initializeComputePagesUprightRepository();
+    write(root, 'packages/docx/src/renderer.ts', source);
+    const result = runChecker(root, '--base-ref', 'main');
+    assert.equal(result.status, 0, result.output);
+  }
+});
+
+test('rejects partial, duplicated, or adjacent intermediate upright transactions', () => {
+  const variants = [
+    computePagesUprightIntermediate.replace(
+      '  attachRetainedTablePlacement(tableEl, retained.layout, sourceIndex, {',
+      '  attachRetainedTablePlacement(tableEl, retained.layout, sourceIndex + 1, {',
+    ),
+    computePagesUprightIntermediate.replace(
+      '  const sourceIndex = bodySourceIndexFor(tbl);',
+      '  const sourceIndex = bodySourceIndexFor(tbl);\n  const duplicateSourceIndex = bodySourceIndexFor(tbl);',
+    ),
+    computePagesUprightIntermediate.replace(
+      '  const sourceIndex = bodySourceIndexFor(tbl);',
+      '  sideEffect();\n  const sourceIndex = bodySourceIndexFor(tbl);',
+    ),
+  ];
+  for (const source of variants) {
+    const root = initializeComputePagesUprightRepository();
+    write(root, 'packages/docx/src/renderer.ts', source);
+    const result = runChecker(root, '--base-ref', 'main');
+    assert.notEqual(result.status, 0, source);
+    assert.match(result.output, /LEGACY_DECLARATION_CHANGED|BASELINE_EXPANSION/);
+  }
+});
+
+test('allows only the exact two-site retained-envelope callee rename', () => {
+  const root = initializeComputePagesEnvelopeRepository();
+  write(root, 'packages/docx/src/renderer.ts', computePagesEnvelopeMigration);
+  const result = runChecker(root, '--base-ref', 'main');
+  assert.equal(result.status, 0, result.output);
+});
+
+test('rejects one-site, three-site, or argument-changing retained-envelope renames', () => {
+  const variants = [
+    computePagesEnvelopeBaseline.replace('attachRetainedTableEnvelope', 'attachTableFragment'),
+    computePagesEnvelopeMigration.replace(
+      '  return [];',
+      '  attachTableFragment(third, thirdTable, widths, heights, band, state, thirdPlacement);\n  return [];',
+    ),
+    computePagesEnvelopeMigration.replace('secondPlacement', 'firstPlacement'),
+  ];
+  for (const source of variants) {
+    const root = initializeComputePagesEnvelopeRepository();
+    write(root, 'packages/docx/src/renderer.ts', source);
+    const result = runChecker(root, '--base-ref', 'main');
+    assert.notEqual(result.status, 0, source);
+    assert.match(result.output, /LEGACY_DECLARATION_CHANGED|BASELINE_EXPANSION/);
+  }
+});
+
 test('rejects altered or adjacent upright finalization edits inside computePages', () => {
   const variants = [
     computePagesUprightMigration.replace('pages.length - 1', 'pages.length'),
@@ -1376,6 +1550,39 @@ test('rejects altered or adjacent fitting outer-float finalization edits', () =>
     write(root, 'packages/docx/src/renderer.ts', source);
     const result = runChecker(root, '--base-ref', 'main');
     assert.notEqual(result.status, 0, source);
+    assert.match(result.output, /LEGACY_DECLARATION_CHANGED|BASELINE_EXPANSION/);
+  }
+});
+
+test('composes fitting outer probe normalization over an earlier A5 base', () => {
+  const { root, current } = initializeComposedFittingOuterProbeRepository();
+  write(root, 'packages/docx/src/renderer.ts', current);
+
+  const result = runChecker(root, '--base-ref', 'main');
+
+  assert.equal(result.status, 0, result.output);
+});
+
+test('composes all exact A5 computePages normalizers over the production merge-base', () => {
+  const productionRoot = resolve(import.meta.dirname, '..');
+  const result = runChecker(productionRoot, '--base-ref', 'ec4e046');
+
+  assert.equal(result.status, 0, result.output);
+});
+
+test('rejects altered fitting outer probe transactions over an earlier A5 base', () => {
+  const variants = [
+    ['pass < 4', 'pass < 5'],
+    ['pageIndex: physicalPageIndex', 'pageIndex: physicalPageIndex + 1'],
+    ['box: first.box,', 'box: first.rawBox,'],
+    ['first.requiresCanonicalSplit', 'false'],
+  ];
+  for (const [expected, replacement] of variants) {
+    const { root, current } = initializeComposedFittingOuterProbeRepository();
+    assert.match(current, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    write(root, 'packages/docx/src/renderer.ts', current.replace(expected, replacement));
+    const result = runChecker(root, '--base-ref', 'main');
+    assert.notEqual(result.status, 0, `${expected} -> ${replacement}`);
     assert.match(result.output, /LEGACY_DECLARATION_CHANGED|BASELINE_EXPANSION/);
   }
 });

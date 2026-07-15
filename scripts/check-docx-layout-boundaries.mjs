@@ -963,6 +963,178 @@ function normalizedSyntaxHash(node, source) {
 function normalizedComputePagesHash(node, source) {
   const compactText = (current, currentSource) =>
     current.getText(currentSource).replace(/\s+/g, '');
+  const exactFittingOuterProbe = `
+    const measureFloat = () =>
+      withColumnBand(() => {
+        const cW = colW() * measureState.scale;
+        const layout = computeTableLayout(tbl, cW, measureState);
+        const physicalPageIndex = pages.length - 1;
+        const pageContext = measureState.layoutServices
+          ? fieldAcquisitionContextOf(measureState.layoutServices)
+            .resolveDestinationPage?.(physicalPageIndex)
+          : undefined;
+        const finalState: RenderState = {
+          ...measureState,
+          pageIndex: physicalPageIndex,
+          displayPageNumber: pageContext?.displayPageNumber ?? physicalPageIndex + 1,
+          pageNumberFormat: pageContext?.pageNumberFormat ?? measureState.pageNumberFormat,
+        };
+        let finalHeightPt = layout.rowHeights.reduce((sum, height) => sum + height, 0);
+        let box = computeFloatTableBox(
+          tp, finalState, finalState.y, layout.tableW, finalHeightPt,
+        );
+        for (let pass = 0; pass < 4; pass += 1) {
+          const prepared = bodyFlowFragments.sourceIndices.retainedTableMeasureBySource
+            .prepareFittingOuterFragment(tbl, finalState, box);
+          if (!prepared.fragment) {
+            const rawBox = computeFloatTableBox(
+              tp, finalState, finalState.y, layout.tableW, finalHeightPt, true,
+            );
+            return {
+              box,
+              rawBox,
+              layout,
+              requiresCanonicalSplit: true as const,
+              contentWPt: cW / finalState.scale,
+            };
+          }
+          const nextHeightPt = prepared.fragment.advancePt;
+          const nextBox = computeFloatTableBox(
+            tp, finalState, finalState.y, layout.tableW, nextHeightPt,
+          );
+          const rawBox = computeFloatTableBox(
+            tp, finalState, finalState.y, layout.tableW, nextHeightPt, true,
+          );
+          if (nextHeightPt === finalHeightPt
+            && nextBox.x === box.x && nextBox.y === box.y) {
+            return {
+              box: nextBox,
+              rawBox,
+              layout,
+              prepared,
+              requiresCanonicalSplit: false as const,
+              contentWPt: cW / finalState.scale,
+            };
+          }
+          finalHeightPt = nextHeightPt;
+          box = nextBox;
+        }
+        throw new Error('Fitting outer table final-frame probe did not converge');
+      });
+  `.replace(/\s+/g, '');
+  const exactFittingOuterSplitCondition =
+    'first.requiresCanonicalSplit||(isTextAnchored&&tableOverflowsHere)||pageAnchoredOverflows';
+  const exactFittingOuterAcceptance = `
+    if (!first.prepared) {
+      throw new Error('Fitting outer table acceptance requires a whole prepared fragment');
+    }
+    const acceptedFragment = first.prepared.fragment;
+    if (!acceptedFragment) {
+      throw new Error('Fitting outer table acceptance requires a whole prepared fragment');
+    }
+    const acceptedPrepared = {
+      ...first.prepared,
+      fragment: acceptedFragment,
+      box: first.box,
+    };
+    withColumnBand(() => {
+      stampTableLayout(
+        el as PaginatedBodyElement,
+        first.layout.colWidths,
+        first.layout.rowHeights,
+        first.contentWPt,
+        undefined,
+        acceptedPrepared,
+      );
+      const side = floatTableWrapSide(first.box, measureState);
+      registerTableFloat(first.box, tp, measureState, side, tbl.overlap !== 'never');
+    });
+  `.replace(/\s+/g, '');
+  const fittingOuterProbes = [];
+  const fittingOuterSplitConditions = [];
+  const fittingOuterAcceptances = [];
+  const findFittingOuterProbeTransaction = (current) => {
+    if (ts.isVariableStatement(current)
+      && compactText(current, source) === exactFittingOuterProbe) {
+      fittingOuterProbes.push(current);
+    }
+    if (ts.isIfStatement(current)
+      && compactText(current.expression, source) === exactFittingOuterSplitCondition) {
+      fittingOuterSplitConditions.push(current.expression);
+    }
+    if (ts.isBlock(current)) {
+      for (let index = 0; index + 4 < current.statements.length; index += 1) {
+        const statements = current.statements.slice(index, index + 5);
+        if (statements.map((statement) => compactText(statement, source)).join('')
+          === exactFittingOuterAcceptance) {
+          fittingOuterAcceptances.push([statements[0], statements[4]]);
+        }
+      }
+    }
+    ts.forEachChild(current, findFittingOuterProbeTransaction);
+  };
+  findFittingOuterProbeTransaction(node);
+  if (fittingOuterProbes.length === 1
+    && fittingOuterSplitConditions.length === 1
+    && fittingOuterAcceptances.length === 1) {
+    const nodeStart = node.getStart(source);
+    const legacyProbe = `
+      const measureFloat = () =>
+        withColumnBand(() => {
+          const cW = colW() * measureState.scale;
+          const layout = computeTableLayout(tbl, cW, measureState);
+          const tableH = layout.rowHeights.reduce((s, x) => s + x, 0);
+          const box = computeFloatTableBox(
+            tp, measureState, measureState.y, layout.tableW, tableH,
+          );
+          const rawBox = computeFloatTableBox(
+            tp, measureState, measureState.y, layout.tableW, tableH, true,
+          );
+          return { box, rawBox, layout, contentWPt: cW / measureState.scale };
+        });
+    `;
+    const legacySplitCondition =
+      '(isTextAnchored && tableOverflowsHere) || pageAnchoredOverflows';
+    const legacyAcceptance = `
+      withColumnBand(() => {
+        stampTableLayout(
+          el as PaginatedBodyElement,
+          first.layout.colWidths,
+          first.layout.rowHeights,
+          first.contentWPt,
+        );
+        const side = floatTableWrapSide(first.box, measureState);
+        registerTableFloat(first.box, tp, measureState, side, tbl.overlap !== 'never');
+      });
+    `;
+    const [acceptanceStart, acceptanceEnd] = fittingOuterAcceptances[0];
+    const replacements = [
+      [fittingOuterProbes[0].getStart(source), fittingOuterProbes[0].getEnd(), legacyProbe],
+      [
+        fittingOuterSplitConditions[0].getStart(source),
+        fittingOuterSplitConditions[0].getEnd(),
+        legacySplitCondition,
+      ],
+      [acceptanceStart.getStart(source), acceptanceEnd.getEnd(), legacyAcceptance],
+    ].sort((left, right) => right[0] - left[0]);
+    let virtualText = node.getText(source);
+    for (const [start, end, replacement] of replacements) {
+      virtualText = virtualText.slice(0, start - nodeStart)
+        + replacement
+        + virtualText.slice(end - nodeStart);
+    }
+    const virtualSource = ts.createSourceFile(
+      'compute-pages-a5-fitting-probe-virtual.ts',
+      virtualText,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const virtualNode = virtualSource.statements.find((candidate) => (
+      ts.isFunctionDeclaration(candidate) && candidate.name?.text === 'computePages'
+    ));
+    if (virtualNode) return normalizedComputePagesHash(virtualNode, virtualSource);
+  }
   const exactFittingOuterFinalization = 'withColumnBand(()=>{stampTableLayout(elasPaginatedBodyElement,first.layout.colWidths,first.layout.rowHeights,first.contentWPt,);constside=floatTableWrapSide(first.box,measureState);registerTableFloat(first.box,tp,measureState,side,tbl.overlap!==\'never\');});';
   const fittingOuterStatements = [];
   const findFittingOuterStatement = (current) => {
@@ -1003,6 +1175,97 @@ function normalizedComputePagesHash(node, source) {
     );
     const virtualNode = virtualSource.statements.find((candidate) => (
       ts.isFunctionDeclaration(candidate) && candidate.name?.text === 'computePages'
+    ));
+    if (virtualNode) return normalizedComputePagesHash(virtualNode, virtualSource);
+  }
+  const renamedEnvelopeCallees = [];
+  const findRenamedEnvelopeCallees = (current) => {
+    if (ts.isCallExpression(current)
+      && ts.isIdentifier(current.expression)
+      && current.expression.text === 'attachTableFragment') {
+      renamedEnvelopeCallees.push(current.expression);
+    }
+    ts.forEachChild(current, findRenamedEnvelopeCallees);
+  };
+  findRenamedEnvelopeCallees(node);
+  if (renamedEnvelopeCallees.length === 2) {
+    const nodeStart = node.getStart(source);
+    let virtualText = node.getText(source);
+    for (const callee of renamedEnvelopeCallees
+      .slice()
+      .sort((left, right) => right.getStart(source) - left.getStart(source))) {
+      const start = callee.getStart(source) - nodeStart;
+      const end = callee.getEnd() - nodeStart;
+      virtualText = virtualText.slice(0, start)
+        + 'attachRetainedTableEnvelope'
+        + virtualText.slice(end);
+    }
+    const virtualSource = ts.createSourceFile(
+      'compute-pages-a5-envelope-rename-virtual.ts',
+      virtualText,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const virtualNode = virtualSource.statements.find((statement) => (
+      ts.isFunctionDeclaration(statement) && statement.name?.text === 'computePages'
+    ));
+    if (virtualNode) return normalizedComputePagesHash(virtualNode, virtualSource);
+  }
+  const exactIntermediateUpright = `
+    stampTableLayout(tableEl, colWidthsPt, rowHeightsPt, bandPt);
+    if (y + h > effContentH() - tblReservePt && y > colTopY) nextColumnOrPage(i);
+    const sourceIndex = bodySourceIndexFor(tbl);
+    const retained = sourceIndex === undefined
+      ? undefined
+      : measureState.retainedTablesBySourceIndex?.get(sourceIndex);
+    if (sourceIndex === undefined || retained === undefined) {
+      throw new Error('Upright vertical table requires retained physical geometry');
+    }
+    attachRetainedTablePlacement(tableEl, retained.layout, sourceIndex, {
+      xPt: colX(),
+      yPt: measureState.y,
+      widthPt: colW(),
+      flowAdvancePt: h,
+      columnIndex: colIndex,
+    });
+  `.replace(/\s+/g, '');
+  const intermediateUprightTransactions = [];
+  const findIntermediateUprightTransaction = (current) => {
+    if (ts.isBlock(current)) {
+      for (let index = 0; index + 5 < current.statements.length; index += 1) {
+        const statements = current.statements.slice(index, index + 6);
+        if (statements.map((statement) => compactText(statement, source)).join('')
+          === exactIntermediateUpright) {
+          intermediateUprightTransactions.push([statements[0], statements[5]]);
+        }
+      }
+    }
+    ts.forEachChild(current, findIntermediateUprightTransaction);
+  };
+  findIntermediateUprightTransaction(node);
+  if (intermediateUprightTransactions.length === 1) {
+    const [startStatement, endStatement] = intermediateUprightTransactions[0];
+    const nodeStart = node.getStart(source);
+    const relativeStart = startStatement.getStart(source) - nodeStart;
+    const relativeEnd = endStatement.getEnd() - nodeStart;
+    const canonicalUpright = [
+      'stampTableLayout(tableEl, colWidthsPt, rowHeightsPt, bandPt);',
+      'if (y + h > effContentH() - tblReservePt && y > colTopY) nextColumnOrPage(i);',
+    ].join('\n');
+    const nodeText = node.getText(source);
+    const virtualText = nodeText.slice(0, relativeStart)
+      + canonicalUpright
+      + nodeText.slice(relativeEnd);
+    const virtualSource = ts.createSourceFile(
+      'compute-pages-a5-intermediate-upright-virtual.ts',
+      virtualText,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const virtualNode = virtualSource.statements.find((statement) => (
+      ts.isFunctionDeclaration(statement) && statement.name?.text === 'computePages'
     ));
     if (virtualNode) return normalizedComputePagesHash(virtualNode, virtualSource);
   }
