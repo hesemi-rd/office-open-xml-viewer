@@ -2,10 +2,16 @@ packages:
   - "packages/*"
   - "site"
 
-# pnpm 10 blocks dependency build scripts unless approved. skia-canvas ships
-# its native binding via a node-pre-gyp install script (no napi-style prebuilt
-# optionalDependencies), so without this approval `pnpm install` leaves
-# lib/v8/index.node absent and every canvas probe suite dies at import time
-# (caught in CI by the OOXML_REQUIRE_SKIA gate).
-onlyBuiltDependencies:
-  - skia-canvas
+# Keep dependency build-script decisions explicit so a newly introduced script
+# fails installation until it is reviewed. skia-canvas is the sole approval: it
+# ships its native binding via node-pre-gyp rather than optionalDependencies, so
+# disabling its install script leaves lib/v8/index.node absent. The denied tools
+# resolve through optional/prebuilt binaries for the workflows in this repo.
+allowBuilds:
+  "@ast-grep/cli": false
+  "@swc/core": false
+  "@vscode/vsce-sign": false
+  esbuild: false
+  keytar: false
+  sharp: false
+  skia-canvas: true
