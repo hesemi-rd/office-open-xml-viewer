@@ -160,6 +160,44 @@ function documentWith(table: DocTable): DocxDocumentModel {
   } as unknown as DocxDocumentModel;
 }
 
+function freshPageSensitiveSplitDocument(): DocxDocumentModel {
+  const blocker = floatingTable([{ text: 'B', heightPt: 20 }]);
+  blocker.layout = 'fixed';
+  blocker.colWidths = [40];
+  blocker.rows[0]!.cells[0]!.widthPt = 40;
+  blocker.tblpPr = {
+    ...blocker.tblpPr!,
+    horzAnchor: 'page',
+    vertAnchor: 'page',
+    tblpX: 40,
+    tblpY: 110,
+  };
+  const outer = floatingTable([
+    { text: 'unused', heightPt: 20 },
+    { text: 'TAIL', heightPt: 20 },
+  ]);
+  outer.rows[0]!.rowHeight = null;
+  outer.rows[0]!.rowHeightRule = 'auto';
+  const nested = floatingTable([{ text: 'N', heightPt: 70 }]);
+  nested.layout = 'fixed';
+  nested.colWidths = [60];
+  nested.rows[0]!.cells[0]!.widthPt = 60;
+  nested.tblpPr = {
+    ...nested.tblpPr!,
+    horzAnchor: 'page',
+    vertAnchor: 'text',
+    tblpX: 100,
+    tblpY: 0,
+  };
+  outer.rows[0]!.cells[0]!.content = [
+    { type: 'table', ...nested },
+    { type: 'paragraph', ...paragraph('A') },
+  ] as unknown as DocTableCell['content'];
+  const doc = documentWith(blocker);
+  doc.body.push({ type: 'table', ...outer } as unknown as BodyElement);
+  return doc;
+}
+
 describe('vertical outer floating tables retain the canonical logical paint domain', () => {
   it('paints a fitting outer tblpPr table once without physical-domain finalization', async () => {
     const doc = documentWith(floatingTable([{ text: 'OUTER-FLOAT', heightPt: 30 }]));
@@ -643,6 +681,110 @@ describe('vertical outer floating tables retain the canonical logical paint doma
     })).resolves.toBeUndefined();
     expect(paint.measureCalls()).toBe(0);
     expect(runs.filter((run) => run.text === 'C')).toHaveLength(1);
+  });
+
+  it('does not advance for a provisional fresh-page result that fits after slice reseating', () => {
+    const doc = freshPageSensitiveSplitDocument();
+    const measure = recordingCanvas();
+    computePages(
+      doc.body,
+      __test_verticalLayoutSection(PHYSICAL_SECTION),
+      measure.canvas.getContext('2d') as CanvasRenderingContext2D,
+      doc.fontFamilyClasses,
+    );
+    const table = doc.body[1] as unknown as DocTable;
+    let advanceCalls = 0;
+    const emitted: BodyElement[] = [];
+    const events: string[] = [];
+    const registries: string[] = [];
+    let registryCountAtFirstEmit = 0;
+    let advanceCallsAtFirstEmit = -1;
+
+    splitFloatTableAcrossPages(
+      table,
+      table.tblpPr!,
+      [120],
+      [20, 20],
+      80,
+      240,
+      () => 0,
+      () => 0,
+      () => 110,
+      () => {
+        advanceCalls += 1;
+        events.push('advance');
+      },
+      (_sliceTp, tableWidthPt, tableHeightPt, externalRegistry) => {
+        registries.push(JSON.stringify(externalRegistry));
+        return { x: 20, y: 110, w: tableWidthPt, h: tableHeightPt };
+      },
+      (slice) => {
+        if (emitted.length === 0) {
+          registryCountAtFirstEmit = registries.length;
+          advanceCallsAtFirstEmit = advanceCalls;
+        }
+        events.push('emit');
+        emitted.push(slice as unknown as BodyElement);
+      },
+    );
+
+    expect(events[0]).toBe('emit');
+    expect(advanceCallsAtFirstEmit).toBe(0);
+    expect(advanceCalls).toBe(1);
+    expect(emitted).toHaveLength(2);
+    expect(registryCountAtFirstEmit).toBeGreaterThan(1);
+    expect(new Set(registries.slice(0, registryCountAtFirstEmit))).toHaveLength(1);
+    const first = bodyFragmentFor(emitted[0]!);
+    expect(first?.fragment.kind === 'table'
+      ? (first.fragment as TableFragmentLayout).rows.map((row) => row.logicalRowIndex)
+      : []).toEqual([0]);
+  });
+
+  it('advances exactly once only after a true fresh-page outcome is validated', () => {
+    const doc = freshPageSensitiveSplitDocument();
+    const measure = recordingCanvas();
+    computePages(
+      doc.body,
+      __test_verticalLayoutSection(PHYSICAL_SECTION),
+      measure.canvas.getContext('2d') as CanvasRenderingContext2D,
+      doc.fontFamilyClasses,
+    );
+    const table = doc.body[1] as unknown as DocTable;
+    const events: string[] = [];
+    const emitted: BodyElement[] = [];
+    let resolverCalls = 0;
+    let resolverCallsAtAdvance = -1;
+    let advanceCalls = 0;
+
+    splitFloatTableAcrossPages(
+      table,
+      table.tblpPr!,
+      [120],
+      [20, 20],
+      80,
+      240,
+      () => 0,
+      () => 0,
+      () => 110,
+      () => {
+        resolverCallsAtAdvance = resolverCalls;
+        advanceCalls += 1;
+        events.push('advance');
+      },
+      (_sliceTp, tableWidthPt, tableHeightPt) => {
+        resolverCalls += 1;
+        return { x: 80, y: 110, w: tableWidthPt, h: tableHeightPt };
+      },
+      (slice) => {
+        events.push('emit');
+        emitted.push(slice as unknown as BodyElement);
+      },
+    );
+
+    expect(resolverCallsAtAdvance).toBeGreaterThan(0);
+    expect(advanceCalls).toBe(1);
+    expect(events).toEqual(['advance', 'emit']);
+    expect(emitted).toHaveLength(1);
   });
 
   it('rejects a split parent frame that does not converge within four passes', () => {

@@ -8348,117 +8348,110 @@ export function splitFloatTableAcrossPages(
       const sliceTp: TblpPr = firstSlice
         ? tp
         : { ...tp, vertAnchor: 'text', tblpY: 0, tblpYSpec: undefined };
-      let previousGeometryKey: string | null = null;
-      let accepted: ReturnType<typeof takeTableFragment> | null = null;
-      let acceptedParentBox: FloatTableBox | null = null;
-      // Parent placement, selected ownership, descendant reflow, and the child
-      // registry delta form one transaction. Every pass restarts at the same
-      // cursor and immutable external registry; only the parent-frame seed
-      // changes. The existing four-pass final-frame bound remains authoritative.
-      for (let pass = 0; pass < 4; pass += 1) {
-        const candidate = takeTableFragment(retained, cursor, {
-          availableHeightPt,
-          freshPageHeightPt,
-          placement: {
-            container: {
-              id: `${retained.input.flowDomainId}:floating-page`,
-              kind: 'body',
-              bounds: { xPt: 0, yPt: 0, widthPt: contentWPt, heightPt: availableHeightPt },
-            },
-            cursor: { xPt: 0, yPt: 0 },
-            availableBounds: {
+      const takeCandidate = (
+        placementSeed: FloatTableBox,
+        probeAvailableHeightPt: number,
+      ) => takeTableFragment(retained, cursor, {
+        availableHeightPt: probeAvailableHeightPt,
+        freshPageHeightPt,
+        placement: {
+          container: {
+            id: `${retained.input.flowDomainId}:floating-page`,
+            kind: 'body',
+            bounds: {
               xPt: 0,
               yPt: 0,
               widthPt: contentWPt,
-              heightPt: availableHeightPt,
+              heightPt: probeAvailableHeightPt,
             },
           },
-          services: retainedServices,
-          compatibility: 'word',
-          oversizedRowPolicy: 'atomic',
+          cursor: { xPt: 0, yPt: 0 },
+          availableBounds: {
+            xPt: 0,
+            yPt: 0,
+            widthPt: contentWPt,
+            heightPt: probeAvailableHeightPt,
+          },
+        },
+        services: retainedServices,
+        compatibility: 'word',
+        oversizedRowPolicy: 'atomic',
+        page: {
+          physicalPageIndex: destinationPage?.pageIndex ?? sliceOrdinal,
+          displayPageNumber: destinationPage?.displayPageNumber ?? sliceOrdinal + 1,
+          occurrenceId,
+        },
+        floatingTableFrames: {
           page: {
-            physicalPageIndex: destinationPage?.pageIndex ?? sliceOrdinal,
-            displayPageNumber: destinationPage?.displayPageNumber ?? sliceOrdinal + 1,
-            occurrenceId,
+            xPt: 0,
+            yPt: 0,
+            widthPt: probeState.pageWidth,
+            heightPt: probeState.pageH / probeScale,
           },
-          floatingTableFrames: {
-            page: {
-              xPt: 0,
-              yPt: 0,
-              widthPt: probeState.pageWidth,
-              heightPt: probeState.pageH / probeScale,
-            },
-            margin: {
-              xPt: probeState.marginLeft,
-              yPt: probeState.marginTop,
-              widthPt: Math.max(
-                0,
-                probeState.pageWidth - probeState.marginLeft - probeState.marginRight,
-              ),
-              heightPt: Math.max(
-                0,
-                probeState.pageH / probeScale
-                  - probeState.marginTop - probeState.marginBottom,
-              ),
-            },
-            column: {
-              xPt: probeState.contentX / probeScale,
-              yPt: probeState.marginTop + regionTopY(),
-              widthPt: probeState.contentW / probeScale,
-              heightPt: freshPageHeightPt,
-            },
+          margin: {
+            xPt: probeState.marginLeft,
+            yPt: probeState.marginTop,
+            widthPt: Math.max(
+              0,
+              probeState.pageWidth - probeState.marginLeft - probeState.marginRight,
+            ),
+            heightPt: Math.max(
+              0,
+              probeState.pageH / probeScale
+                - probeState.marginTop - probeState.marginBottom,
+            ),
           },
-          floatingTableRegistry: {
-            coordinateSpace: 'logical-page-points',
-            flowDomainId: `logical-page:${destinationPage?.pageIndex ?? sliceOrdinal}`,
-            entries: Object.freeze(externalRegistry.floats.map((float, index) => Object.freeze({
-              kind: float.kind,
-              occurrenceId: float.imageKey || `page-float:${index}`,
-              paragraphId: float.paraId,
-              bounds: Object.freeze({
-                xPt: float.imageX / probeScale,
-                yPt: float.imageY / probeScale,
-                widthPt: float.imageW / probeScale,
-                heightPt: float.imageH / probeScale,
-              }),
-              exclusionBounds: Object.freeze({
-                xPt: float.xLeft / probeScale,
-                yPt: float.yTop / probeScale,
-                widthPt: (float.xRight - float.xLeft) / probeScale,
-                heightPt: (float.yBottom - float.yTop) / probeScale,
-              }),
-            }))),
-            nextParagraphId: externalRegistry.nextParagraphId,
+          column: {
+            xPt: probeState.contentX / probeScale,
+            yPt: probeState.marginTop + regionTopY(),
+            widthPt: probeState.contentW / probeScale,
+            heightPt: freshPageHeightPt,
           },
-          finalPlacementTranslationPt: {
-            xPt: parentSeed.x / probeScale,
-            yPt: parentSeed.y / probeScale,
-          },
-          reacquirePageDependentBlock: (request) => bodyFlowFragments.sourceIndices
-            .retainedTableMeasureBySource.reacquirePageBlock(
-            table,
-            sourceIndex,
-            retained,
-            retainedRecord.state,
-            retainedServices,
-            request,
-          ),
-        });
-        if (candidate.requiresFreshPage) {
-          advancePage();
-          firstSlice = false;
-          continue pagination;
-        }
-        const candidateFragment = candidate.fragment;
-        if (!candidateFragment) {
-          if (candidate.nextCursor === null) return regionTopY();
-          throw new Error('Retained floating-table pagination made no progress');
-        }
+        },
+        floatingTableRegistry: {
+          coordinateSpace: 'logical-page-points',
+          flowDomainId: `logical-page:${destinationPage?.pageIndex ?? sliceOrdinal}`,
+          entries: Object.freeze(externalRegistry.floats.map((float, index) => Object.freeze({
+            kind: float.kind,
+            occurrenceId: float.imageKey || `page-float:${index}`,
+            paragraphId: float.paraId,
+            bounds: Object.freeze({
+              xPt: float.imageX / probeScale,
+              yPt: float.imageY / probeScale,
+              widthPt: float.imageW / probeScale,
+              heightPt: float.imageH / probeScale,
+            }),
+            exclusionBounds: Object.freeze({
+              xPt: float.xLeft / probeScale,
+              yPt: float.yTop / probeScale,
+              widthPt: (float.xRight - float.xLeft) / probeScale,
+              heightPt: (float.yBottom - float.yTop) / probeScale,
+            }),
+          }))),
+          nextParagraphId: externalRegistry.nextParagraphId,
+        },
+        finalPlacementTranslationPt: {
+          xPt: placementSeed.x / probeScale,
+          yPt: placementSeed.y / probeScale,
+        },
+        reacquirePageDependentBlock: (request) => bodyFlowFragments.sourceIndices
+          .retainedTableMeasureBySource.reacquirePageBlock(
+          table,
+          sourceIndex,
+          retained,
+          retainedRecord.state,
+          retainedServices,
+          request,
+        ),
+      });
+      const resolveCandidateParent = (
+        candidateFragment: TableFragmentLayout,
+      ): FloatTableBox => {
         const tableWidthPt = candidateFragment.columnWidthsPt.reduce(
           (sum, width) => sum + width,
           0,
         );
-        const candidateParentBox = resolveSliceParent?.(
+        return resolveSliceParent?.(
           sliceTp,
           tableWidthPt,
           candidateFragment.advancePt,
@@ -8472,13 +8465,66 @@ export function splitFloatTableAcrossPages(
           sliceTp.vertAnchor === 'page' || sliceTp.vertAnchor === 'margin',
           { allowOverlap: table.overlap !== 'never' },
         );
-        const geometryKey = JSON.stringify({
-          // Retained fragments/deltas are plain-data contracts. Comparing the
-          // complete candidate prevents a stable parent box from accepting a
-          // changed row/cell owner or descendant final frame.
-          fragment: candidateFragment,
-          floatingTableRegistryDelta: candidate.floatingTableRegistryDelta ?? null,
-        });
+      };
+      const candidateGeometryKey = (
+        candidate: ReturnType<typeof takeTableFragment>,
+      ): string => JSON.stringify({
+        // Retained fragments/deltas are plain-data contracts. Comparing the
+        // complete candidate prevents a stable parent box from accepting a
+        // changed row/cell owner or descendant final frame.
+        fragment: candidate.fragment,
+        floatingTableRegistryDelta: candidate.floatingTableRegistryDelta ?? null,
+      });
+      let previousGeometryKey: string | null = null;
+      let previousFreshGeometryKey: string | null = null;
+      let accepted: ReturnType<typeof takeTableFragment> | null = null;
+      let acceptedParentBox: FloatTableBox | null = null;
+      let validatedFreshPage = false;
+      // Parent placement, selected ownership, descendant reflow, and the child
+      // registry delta form one transaction. Every pass restarts at the same
+      // cursor and immutable external registry; only the parent-frame seed
+      // changes. The existing four-pass final-frame bound remains authoritative.
+      for (let pass = 0; pass < 4; pass += 1) {
+        const candidate = takeCandidate(parentSeed, availableHeightPt);
+        if (candidate.requiresFreshPage) {
+          // `requiresFreshPage` is candidate data, not a pagination side effect.
+          // Probe the fresh band only for possible slice geometry, then resolve
+          // that slice against the CURRENT page's immutable external base and
+          // retry this band from the original cursor with the resulting frame.
+          const freshCandidate = takeCandidate(parentSeed, freshPageHeightPt);
+          const freshFragment = freshCandidate.fragment;
+          if (!freshFragment) {
+            if (freshCandidate.nextCursor === null) return regionTopY();
+            throw new Error('Retained floating-table fresh-page probe made no progress');
+          }
+          const freshParentBox = resolveCandidateParent(freshFragment);
+          const freshGeometryKey = JSON.stringify({
+            currentBand: {
+              fragment: candidate.fragment,
+              nextCursor: candidate.nextCursor,
+              requiresFreshPage: candidate.requiresFreshPage,
+            },
+            freshSeed: candidateGeometryKey(freshCandidate),
+          });
+          const freshParentStable = freshParentBox.x === parentSeed.x
+            && freshParentBox.y === parentSeed.y
+            && freshParentBox.w === parentSeed.w
+            && freshParentBox.h === parentSeed.h;
+          if (freshParentStable && freshGeometryKey === previousFreshGeometryKey) {
+            validatedFreshPage = true;
+            break;
+          }
+          previousFreshGeometryKey = freshGeometryKey;
+          parentSeed = freshParentBox;
+          continue;
+        }
+        const candidateFragment = candidate.fragment;
+        if (!candidateFragment) {
+          if (candidate.nextCursor === null) return regionTopY();
+          throw new Error('Retained floating-table pagination made no progress');
+        }
+        const candidateParentBox = resolveCandidateParent(candidateFragment);
+        const geometryKey = candidateGeometryKey(candidate);
         const parentStable = candidateParentBox.x === parentSeed.x
           && candidateParentBox.y === parentSeed.y
           && candidateParentBox.w === parentSeed.w
@@ -8490,6 +8536,14 @@ export function splitFloatTableAcrossPages(
         }
         previousGeometryKey = geometryKey;
         parentSeed = candidateParentBox;
+      }
+      if (validatedFreshPage) {
+        // The pure transaction proved that the stabilized actual-slice frame
+        // still cannot progress in this band. Advance exactly once; the next
+        // pagination iteration reacquires destination page fields/domain/frames.
+        advancePage();
+        firstSlice = false;
+        continue pagination;
       }
       if (!accepted?.fragment || !acceptedParentBox) {
         throw new Error('Split outer table final-frame probe did not converge');
