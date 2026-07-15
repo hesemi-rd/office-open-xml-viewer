@@ -13,6 +13,7 @@ import type {
   SectionProps,
 } from './types';
 import { bodyFragmentFor } from './renderer.js';
+import type { TableFragmentLayout } from './layout/table-pagination.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PR 5 Task 13 — body fragment paint purity.
@@ -192,10 +193,8 @@ function tbl(rows: DocTableRow[], colWidths: number[], over: Partial<DocTable> =
 
 describe('table fragment paint purity (PR 6 Task 16)', () => {
   it('paints a table with a NESTED table + vMerge at scale 1 without calling measureText', async () => {
-    // A nested table currently RECOMPUTES its layout at paint (computeTableLayout →
-    // resolveTableRowHeights → measureParagraph), so this is Red on the stamp path.
-    // After the fragment migration the nested table is painted from its stored
-    // TableFragment, measure-free.
+    // Both outer and nested tables must be present in the retained layout tree;
+    // paint traverses those nodes without reacquiring paragraph metrics.
     const inner = tbl([trow([textCell('inner one'), textCell('inner two')])], [40, 40]);
     const outer = tbl(
       [
@@ -206,6 +205,15 @@ describe('table fragment paint purity (PR 6 Task 16)', () => {
     );
     const model = doc([outer as unknown as BodyElement]);
     const pages = paginateDocument(model);
+    const placed = bodyFragmentFor(pages[0]![0]!);
+    expect(placed?.fragment.kind).toBe('table');
+    if (placed?.fragment.kind !== 'table' || !('flowBounds' in placed.fragment)) {
+      throw new Error('expected retained TableLayout/TableFragmentLayout');
+    }
+    const nestedLayouts = placed.fragment.rows.flatMap((tableRow) => tableRow.cells.flatMap((tableCell) =>
+      tableCell.blocks.map((block) => block.layout).filter((layout) => layout.kind === 'table')));
+    expect(nestedLayouts).toHaveLength(1);
+    expect(nestedLayouts[0]!.rows.length).toBeGreaterThan(0);
     const paint = makeThrowingPaintCanvas();
     await expect(
       renderDocumentToCanvas(model, paint.canvas, 0, { dpr: 1, width: 200, prebuiltPages: pages }),
@@ -222,6 +230,19 @@ describe('table fragment paint purity (PR 6 Task 16)', () => {
     const model = doc([tbl(rows, [120]) as unknown as BodyElement], 120);
     const pages = paginateDocument(model);
     expect(pages.length).toBeGreaterThan(1);
+    const retained = pages.map((page) => {
+      const tableElement = page.find((element) => element.type === 'table');
+      expect(tableElement).toBeDefined();
+      const placed = bodyFragmentFor(tableElement!);
+      if (placed?.fragment.kind !== 'table' || !('flowBounds' in placed.fragment)) {
+        throw new Error('expected retained TableFragmentLayout');
+      }
+      return placed.fragment as TableFragmentLayout;
+    });
+    for (const fragment of retained.slice(1)) {
+      expect(fragment.rows[0]?.ownership).toBe('repeated-header');
+      expect(fragment.rows[0]?.logicalRowIndex).toBe(0);
+    }
     for (let p = 0; p < pages.length; p++) {
       const paint = makeThrowingPaintCanvas();
       await expect(

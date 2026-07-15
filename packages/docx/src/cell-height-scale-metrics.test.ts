@@ -1,7 +1,8 @@
-import { describe, it, expect } from 'vitest';
+import { beforeAll, describe, it, expect } from 'vitest';
 import {
+  bodyFragmentFor,
+  paginateDocument,
   renderDocumentToCanvas,
-  __test_setTableReuseEnabled,
 } from './renderer.js';
 import type {
   BodyElement,
@@ -48,6 +49,7 @@ function makeRecordingCanvas(): {
   canvas: HTMLCanvasElement;
   fillTextCalls: FillTextCall[];
   fillRectCalls: FillRectCall[];
+  measured: () => number;
 } {
   let font = '10px serif';
   let fillStyle = '#000';
@@ -56,6 +58,7 @@ function makeRecordingCanvas(): {
   const px = () => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
   const fillTextCalls: FillTextCall[] = [];
   const fillRectCalls: FillRectCall[] = [];
+  let measured = 0;
   const ctx = {
     get font() { return font; },
     set font(v: string) { font = v; },
@@ -63,6 +66,7 @@ function makeRecordingCanvas(): {
     set fillStyle(v: string) { fillStyle = v; },
     letterSpacing: '0px',
     measureText: (s: string) => {
+      measured += 1;
       const p = px();
       const { asc, desc } = glyphMetrics(p);
       return {
@@ -119,8 +123,19 @@ function makeRecordingCanvas(): {
   // `clipExact` rows (ST_HeightRule exact) read `ctx.canvas.width`; wire the
   // back-reference so the exact-height cells below render.
   (ctx as unknown as { canvas: unknown }).canvas = canvas;
-  return { canvas: canvas as unknown as HTMLCanvasElement, fillTextCalls, fillRectCalls };
+  return {
+    canvas: canvas as unknown as HTMLCanvasElement,
+    fillTextCalls,
+    fillRectCalls,
+    measured: () => measured,
+  };
 }
+
+beforeAll(() => {
+  (globalThis as unknown as { OffscreenCanvas: unknown }).OffscreenCanvas = class {
+    getContext() { return makeRecordingCanvas().canvas.getContext('2d'); }
+  };
+});
 
 // An untabled synthetic font so the font-metrics single-line FLOOR
 // (intendedSingleLinePx) is 0 and the line box is exactly the mock's ascent +
@@ -181,8 +196,7 @@ function tableOf(r: DocTableRow): DocTable {
     borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
     cellMarginTop: 0, cellMarginBottom: 0, cellMarginLeft: 0, cellMarginRight: 0,
     jc: 'left',
-    // A negative leading indent forces the legacy table paint path, matching the
-    // negative-indent table class whose cell measurement must still match glyph paint.
+    // Negative leading indents remain represented by retained table geometry.
     tblInd: -10,
   } as DocTable;
 }
@@ -207,11 +221,22 @@ const PAGE_WIDTH = 300;
 const SCALE = CSS_WIDTH / PAGE_WIDTH;
 
 async function renderAndRead(t: DocTable) {
+  const model = docWithTable(t);
+  const pages = paginateDocument(model);
+  const tableElement = pages.flat().find((element) => element.type === 'table');
+  expect(tableElement).toBeDefined();
+  const placed = bodyFragmentFor(tableElement!);
+  expect(placed?.fragment.kind).toBe('table');
+  if (placed?.fragment.kind !== 'table' || !('flowBounds' in placed.fragment)) {
+    throw new Error('expected retained TableLayout/TableFragmentLayout');
+  }
   const rec = makeRecordingCanvas();
-  await renderDocumentToCanvas(docWithTable(t), rec.canvas, 0, {
+  await renderDocumentToCanvas(model, rec.canvas, 0, {
     dpr: 1,
     width: CSS_WIDTH,
+    prebuiltPages: pages,
   });
+  expect(rec.measured()).toBe(0);
   return rec;
 }
 
@@ -278,39 +303,25 @@ describe('cell content height matches canonical transformed Canvas metrics', () 
   });
 
   it('auto row height fallback: reserved row height equals the painted content height', async () => {
-    // Auto height → the row height is the measured cell content height. A negative
-    // leading tblInd selects the explicit A4 table adapter without a global paint
-    // toggle; disabling only its table-layout cache exercises fresh adapter geometry.
-    const prev = __test_setTableReuseEnabled(false);
-    try {
-      const t = tableOf(row(
-        cell([paraOf('aa'), paraOf('bb'), paraOf('cc')], 'top', 'abcdef'),
-        null,
-        'auto',
-      ));
-      (t as unknown as DocTable).tblInd = -1;
-      const { fillTextCalls, fillRectCalls } = await renderAndRead(t);
-      const bg = fillRectCalls.find((r) => r.fillStyle === '#abcdef');
-      expect(bg).toBeDefined();
-      const { top, bottom } = paintedExtent(fillTextCalls, 'aa', 'cc');
-      // Zero cell margins → the reserved row height equals the transformed glyph
-      // extent, even through the legacy table fallback.
-      expect(bg!.h).toBeCloseTo(bottom - top, 1);
-    } finally {
-      __test_setTableReuseEnabled(prev);
-    }
+    // Auto height → the retained row height is the measured cell content height.
+    const t = tableOf(row(
+      cell([paraOf('aa'), paraOf('bb'), paraOf('cc')], 'top', 'abcdef'),
+      null,
+      'auto',
+    ));
+    (t as unknown as DocTable).tblInd = -1;
+    const { fillTextCalls, fillRectCalls } = await renderAndRead(t);
+    const bg = fillRectCalls.find((r) => r.fillStyle === '#abcdef');
+    expect(bg).toBeDefined();
+    const { top, bottom } = paintedExtent(fillTextCalls, 'aa', 'cc');
+    // Zero cell margins → the reserved row height equals the transformed glyph
+    // extent sourced from the retained layout.
+    expect(bg!.h).toBeCloseTo(bottom - top, 1);
   });
 
-  it('PR 6 — a negative-indent vAlign table still reuses paginator scale-1 geometry in production', async () => {
-    // Negative tblInd excludes the table from fragment paint, so the §17.4.84
-    // centring measurement takes the LEGACY renderTable path — which,
-    // in production (table reuse ON), must draw the PAGINATOR's scale-1 row height
-    // × scale exactly as the pre-PR6 stamp reuse did. PR 6 removed the stamp from the
-    // non-split parsed table (model-mutation removal), so computeTableLayout must
-    // source the same geometry from the attached TableFragment instead; without that,
-    // the fallback can diverge from the canonical row geometry and the drawn height shifts
-    // under non-linear metrics (observed as a raw-pixel VRT delta on a private
-    // multi-table document). Defaults untouched: fragment paint ON, table reuse ON.
+  it('a negative-indent vAlign table paints retained scale-1 geometry at viewport scale', async () => {
+    // The §17.4.84 centring calculation and paint both consume the retained row
+    // geometry, so nonlinear paint-size metrics cannot shift the drawn height.
     const t = tableOf(row(
       cell([paraOf('aa'), paraOf('bb'), paraOf('cc')], 'center', 'abcdef'),
       null,

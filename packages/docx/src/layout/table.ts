@@ -109,6 +109,17 @@ function resolveCellFlow(blocks: readonly TableCellBlockInput[]): CellFlowGeomet
   };
 }
 
+/**
+ * Return the authored block-flow height used by table row layout. Pagination
+ * calls this same fold while choosing legal fragment boundaries so paragraph
+ * spacing collapse cannot disagree with the geometry materialized afterwards.
+ */
+export function measureTableCellBlockFlowHeightPt(
+  blocks: readonly TableCellBlockInput[],
+): number {
+  return resolveCellFlow(blocks).flowHeightPt;
+}
+
 interface RowSpacingInsets {
   readonly topPt: number;
   readonly bottomPt: number;
@@ -475,6 +486,23 @@ function resolvedBoundaries(input: TableLayoutInput): Readonly<{
     })
   ));
   return { horizontal, vertical, occupancy };
+}
+
+function horizontalBoundaryWidthsPt(
+  horizontal: ReturnType<typeof resolvedBoundaries>['horizontal'],
+): readonly number[] {
+  return horizontal.map((columns) => columns.reduce((maximum, boundary) => {
+    if (!boundary) return maximum;
+    const resolved = resolveBoundary(
+      boundary.above.border,
+      boundary.below.border,
+      boundary.edge,
+    )?.border;
+    if (!resolved || resolved.authoredStyle === 'nil' || resolved.authoredStyle === 'none') {
+      return maximum;
+    }
+    return Math.max(maximum, resolved.widthPt);
+  }, 0));
 }
 
 function borderSegment(
@@ -942,7 +970,20 @@ export function layoutTable(
     flows.set(cell.id, resolveCellFlow(cell.verticalMerge === 'continue' ? [] : cell.blocks));
   }));
   const resolvedRows = resolveRowHeights(input.rows, flows);
-  const rowHeightsPt = resolvedRows.heights;
+  const boundaries = resolvedBoundaries(input);
+  const horizontalBoundaryWidths = horizontalBoundaryWidthsPt(boundaries.horizontal);
+  // §17.4.80 exact height is the complete row box. Auto/atLeast tracks run
+  // between horizontal rule centres, so each owns half of its top and bottom
+  // page-local winning rule. Recomputing this after fragment selection is what
+  // makes a new outer edge participate in page fit without stale source-table
+  // footprints.
+  const rowHeightsPt = resolvedRows.heights.map((heightPt, rowIndex) => (
+    input.rows[rowIndex]?.heightRule === 'exact'
+      ? heightPt
+      : heightPt
+        + (horizontalBoundaryWidths[rowIndex] ?? 0) / 2
+        + (horizontalBoundaryWidths[rowIndex + 1] ?? 0) / 2
+  ));
   const widthPt = input.columnWidthsPt.reduce((sum, width) => sum + width, 0);
   const heightPt = rowHeightsPt.reduce((sum, height) => sum + height, 0);
   const yPt = placement.cursor.yPt;
@@ -960,7 +1001,6 @@ export function layoutTable(
     placement,
     widthPt,
   );
-  const boundaries = resolvedBoundaries(input);
   const borders = materializeBorders(input, rowXPt, yPt, rowHeightsPt, boundaries);
 
   const columnOffsets = [0];

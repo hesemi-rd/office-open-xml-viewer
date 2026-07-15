@@ -945,8 +945,48 @@ function normalizedNodeHash(node, source) {
 
 /** A2 permits one mechanically constrained edit to computePages: append the
  * two dependency parameters, then append those identifiers to its existing
- * buildMeasureState call. Everything else remains represented in the hash. */
+ * buildMeasureState call. A5 additionally replaces the exact floating-slice
+ * table stamp fold with one retained-slice size lookup. Everything else remains
+ * represented in the hash. */
 function normalizedComputePagesHash(node, source) {
+  const compactText = (current, currentSource) =>
+    current.getText(currentSource).replace(/\s+/g, '');
+  const exactRetainedSliceSize =
+    'const{widthPx:tableW,heightPx:sliceH}=retainedTableSliceSize(sp,measureState.scale,);';
+  const retainedSliceStatements = [];
+  const findRetainedSliceStatement = (current) => {
+    if (ts.isVariableStatement(current)
+      && compactText(current, source) === exactRetainedSliceSize) {
+      retainedSliceStatements.push(current);
+    }
+    ts.forEachChild(current, findRetainedSliceStatement);
+  };
+  findRetainedSliceStatement(node);
+  if (retainedSliceStatements.length === 1) {
+    const statement = retainedSliceStatements[0];
+    const nodeStart = node.getStart(source);
+    const relativeStart = statement.getStart(source) - nodeStart;
+    const relativeEnd = statement.getEnd() - nodeStart;
+    const nodeText = node.getText(source);
+    const legacyFold = [
+      'const tableW = (sp.tableColWidthsPt ?? []).reduce((s, w) => s + w, 0) * measureState.scale;',
+      'const sliceH = (sp.tableRowHeightsPt ?? []).reduce((s, h) => s + h, 0) * measureState.scale;',
+    ].join('\n');
+    const virtualText = nodeText.slice(0, relativeStart)
+      + legacyFold
+      + nodeText.slice(relativeEnd);
+    const virtualSource = ts.createSourceFile(
+      'compute-pages-a5-virtual.ts',
+      virtualText,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const virtualNode = virtualSource.statements.find((statement) => (
+      ts.isFunctionDeclaration(statement) && statement.name?.text === 'computePages'
+    ));
+    if (virtualNode) return normalizedComputePagesHash(virtualNode, virtualSource);
+  }
   const allowedNames = ['layoutServices', 'layoutOptions'];
   const allowedParameterSyntax = [
     'layoutServices?: LayoutServices',

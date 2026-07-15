@@ -505,33 +505,6 @@ export type PaginatedBodyElement = BodyElement & {
    *  mirroring the Rust struct. Absent (undefined) ⇒ legacy pages fall back to
    *  the body-level `doc.section.textDirection`. Runtime-only. */
   sectionTextDirection?: string | null;
-  /** B2 table stage 1b — compute-once table layout for the LEGACY paint path
-   *  (floating tables, and the fallback for a block table the fragment-paint gate does
-   *  not cover). When this element is a table, the paginator stamps the per-grid-column
-   *  widths (pt) it resolved via {@link resolveColumnWidths}; the legacy paint pass
-   *  ({@link computeTableLayout}) reuses them (× the paint scale) when its own layout
-   *  inputs match `tableLayoutInputs`. PR 6 — a migrated block table paints from its
-   *  {@link import('./layout-fragments.js').TableFragment} instead, so it is NOT stamped
-   *  and its parsed element is never mutated with this runtime state; the stamp remains
-   *  for floating/fallback tables (whose slice elements are fresh clones, not the parsed
-   *  model). Absent ⇒ the legacy path resolves the columns itself. Runtime-only. */
-  tableColWidthsPt?: number[];
-  /** B2 table stage 1b — the per-row heights (pt) the paginator resolved via
-   *  {@link resolveTableRowHeights} (ST_HeightRule + §17.4.85 vMerge span), for the
-   *  LEGACY paint path only (see `tableColWidthsPt`). For a floating table split across
-   *  pages this holds THIS slice's rows' heights, in slice row order. A migrated block
-   *  table carries the heights on its {@link import('./layout-fragments.js').TableFragment}
-   *  instead. Runtime-only — never emitted by the parser. */
-  tableRowHeightsPt?: number[];
-  /** B2 table stage 1b — the scale-1 (pt-space) inputs the LEGACY paint reuse gate
-   *  verifies before reusing `tableColWidthsPt` / `tableRowHeightsPt`. `contentWPt` is
-   *  the content-band width the columns were fit to. Runtime-only. */
-  tableLayoutInputs?: {
-    /** Always 1 (paginator space). Present so the gate can assert it. */
-    scale: number;
-    /** The pt content-band width `resolveColumnWidths` was fit to. */
-    contentWPt: number;
-  };
 };
 
 export interface DocParagraph {

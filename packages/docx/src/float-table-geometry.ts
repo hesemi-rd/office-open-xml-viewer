@@ -14,9 +14,15 @@
 
 import type { TblpPr } from './types.js';
 import type { RenderState } from './renderer.js';
+import type {
+  FloatingTablePlacementLayout,
+  FloatingTablePositionInput,
+  FloatingTableReferenceFramesPt,
+  LayoutRect,
+  ResolvedFloatingTablePlacementLayout,
+} from './layout/types.js';
 import {
   frameXContainer,
-  frameYContainer,
   resolveAlignedPosH,
   resolveAlignedPosV,
   clampAbsBoxIntoContainer,
@@ -31,6 +37,184 @@ export interface FloatTableBox {
   y: number;
   w: number;
   h: number;
+}
+
+function frameEndX(frame: LayoutRect): number {
+  return frame.xPt + frame.widthPt;
+}
+
+function frameEndY(frame: LayoutRect): number {
+  return frame.yPt + frame.heightPt;
+}
+
+function resolvePointSpaceFloatBox(
+  positioning: FloatingTablePositionInput,
+  frames: FloatingTableReferenceFramesPt,
+  widthPt: number,
+  heightPt: number,
+  skipVClamp = false,
+): FloatTableBox {
+  const horizontalFrame = positioning.horzSpecified
+    ? positioning.horzAnchor === 'page'
+      ? frames.page
+      : positioning.horzAnchor === 'margin'
+        ? frames.margin
+        : frames.text
+    : frames.text;
+  const verticalFrame = positioning.vertAnchor === 'page'
+    ? frames.page
+    : positioning.vertAnchor === 'margin'
+      ? frames.margin
+      : frames.text;
+  const x = positioning.xAlign
+    ? resolveAlignedPosH(
+        positioning.xAlign,
+        horizontalFrame.xPt,
+        frameEndX(horizontalFrame),
+        widthPt,
+      )
+    : horizontalFrame.xPt + positioning.xPt;
+  let y = positioning.yAlign && positioning.vertAnchor !== 'text'
+    ? resolveAlignedPosV(
+        positioning.yAlign,
+        { start: verticalFrame.yPt, end: frameEndY(verticalFrame) },
+        heightPt,
+      )
+    : verticalFrame.yPt + positioning.yPt;
+  if (!skipVClamp && (positioning.vertAnchor === 'page' || positioning.vertAnchor === 'margin')) {
+    y = clampAbsBoxIntoContainer(
+      y,
+      heightPt,
+      { start: verticalFrame.yPt, end: frameEndY(verticalFrame) },
+    );
+  }
+  return { x, y, w: widthPt, h: heightPt };
+}
+
+/** Resolve parser-independent §17.4.57 positioning facts in point space. */
+export function resolveFloatingTableBoxPt(
+  positioning: FloatingTablePositionInput,
+  frames: FloatingTableReferenceFramesPt,
+  widthPt: number,
+  heightPt: number,
+): FloatTableBox {
+  return resolvePointSpaceFloatBox(positioning, frames, widthPt, heightPt);
+}
+
+/** Register one point-space floating-table exclusion through the shared float registry. */
+export function registerFloatingTableBoxPt(
+  box: FloatTableBox,
+  positioning: FloatingTablePositionInput,
+  overlap: 'never' | 'overlap',
+  state: RenderState,
+  side = 'bothSides',
+): ReturnType<typeof pushFloatRect> {
+  const sc = state.scale;
+  return pushFloatRect(state, {
+    x: box.x * sc,
+    y: box.y * sc,
+    w: box.w * sc,
+    h: box.h * sc,
+    dl: positioning.leftFromTextPt * sc,
+    dr: positioning.rightFromTextPt * sc,
+    dt: positioning.topFromTextPt * sc,
+    db: positioning.bottomFromTextPt * sc,
+    kind: 'table',
+    mode: 'square',
+    side,
+    imageKey: '',
+    drawn: true,
+    paraId: state.floatParaSeq++,
+    avoidOverlap: true,
+    allowOverlap: overlap !== 'never',
+  });
+}
+
+/** Resolve retained §17.4.57 facts against explicit page-local reference frames. */
+export function resolveFloatingTablePlacement(
+  placement: FloatingTablePlacementLayout,
+  frames: FloatingTableReferenceFramesPt,
+): ResolvedFloatingTablePlacementLayout {
+  const widthPt = placement.child.columnWidthsPt.reduce((sum, width) => sum + width, 0);
+  const heightPt = placement.child.advancePt;
+  const rawBox = resolveFloatingTableBoxPt(
+    placement.positioning,
+    frames,
+    widthPt,
+    heightPt,
+  );
+  const usesTextX = !placement.positioning.horzSpecified
+    || (placement.positioning.horzAnchor !== 'page'
+      && placement.positioning.horzAnchor !== 'margin');
+  const usesTextY = placement.positioning.vertAnchor !== 'page'
+    && placement.positioning.vertAnchor !== 'margin';
+  const box = {
+    ...rawBox,
+    x: usesTextX && placement.acquiredTextOffsetPt
+      ? frames.text.xPt + placement.acquiredTextOffsetPt.xPt
+      : rawBox.x,
+    y: usesTextY && placement.acquiredTextOffsetPt
+      ? frames.text.yPt + placement.acquiredTextOffsetPt.yPt
+      : rawBox.y,
+  };
+  const { positioning } = placement;
+  const bounds = Object.freeze({
+    xPt: box.x,
+    yPt: box.y,
+    widthPt: box.w,
+    heightPt: box.h,
+  });
+  const exclusionBounds = Object.freeze({
+    xPt: box.x - positioning.leftFromTextPt,
+    yPt: box.y - positioning.topFromTextPt,
+    widthPt: box.w + positioning.leftFromTextPt + positioning.rightFromTextPt,
+    heightPt: box.h + positioning.topFromTextPt + positioning.bottomFromTextPt,
+  });
+  return Object.freeze({
+    kind: 'resolved-floating-table-placement',
+    occurrenceId: placement.occurrenceId,
+    xPt: box.x,
+    yPt: box.y,
+    bounds,
+    exclusionBounds,
+    overlap: placement.overlap,
+    child: placement.child,
+    source: placement,
+  });
+}
+
+/** Register the retained exclusion and return the collision-adjusted paint box. */
+export function registerResolvedFloatingTablePlacement(
+  placement: ResolvedFloatingTablePlacementLayout,
+  state: RenderState,
+): ResolvedFloatingTablePlacementLayout {
+  const sc = state.scale;
+  const positioning = placement.source.positioning;
+  const rect = registerFloatingTableBoxPt({
+    x: placement.xPt,
+    y: placement.yPt,
+    w: placement.bounds.widthPt,
+    h: placement.bounds.heightPt,
+  }, positioning, placement.overlap, state);
+  const xPt = rect.imageX / sc;
+  const yPt = rect.imageY / sc;
+  return Object.freeze({
+    ...placement,
+    xPt,
+    yPt,
+    bounds: Object.freeze({
+      xPt,
+      yPt,
+      widthPt: placement.bounds.widthPt,
+      heightPt: placement.bounds.heightPt,
+    }),
+    exclusionBounds: Object.freeze({
+      xPt: rect.xLeft / sc,
+      yPt: rect.yTop / sc,
+      widthPt: (rect.xRight - rect.xLeft) / sc,
+      heightPt: (rect.yBottom - rect.yTop) / sc,
+    }),
+  });
 }
 
 /**
@@ -52,67 +236,49 @@ export function computeFloatTableBox(
   paraTop: number,
   tableW: number,
   tableH: number,
-  /** When true, skip the vertAnchor=page/margin bottom-clamp (§17.4.57 Word
-   *  ground truth, sample-18) so the RAW absolute box is returned. The paginator
+  /** When true, skip the observed Office vertAnchor=page/margin bottom-clamp so
+   *  the raw absolute box is returned. The paginator
    *  uses this to find where a page/margin-anchored table that overflows the text
-   *  region must be row-SPLIT (sample-28 p.15): the raw tblpY top drives slice 1's
+   *  region must be row-split: the raw tblpY top drives slice 1's
    *  position, and clamping (which pins a too-tall box to the container top) would
    *  hide the overflow the split is meant to resolve. Placement (paint) keeps the
    *  clamp. Ignored for vertAnchor="text" (never clamped). */
   skipVClamp = false,
 ): FloatTableBox {
   const sc = state.scale;
-  // §17.4.57 + §17.18.35: horzAnchor's literal default is "page", which would
-  // pin a floating table to the physical page edge (left margin). But when the
-  // source `<w:tblpPr>` gave NO horizontal positioning at all (no horzAnchor, no
-  // tblpX, no tblpXSpec), Word anchors the table at the anchor paragraph's text/
-  // column left — the in-flow position it was converted from — NOT the page edge.
-  // (Word runtime behavior; the spec-literal page default does not match Word
-  // here. See calibre sample-11 p.3 "ITEM/NEEDED" float.) We force the text band
-  // for that case so the table aligns with the body column, then let tblpX=0
-  // place it at that band's left.
-  const hx = tp.horzSpecified
-    ? frameXContainer(tp.horzAnchor, state)
-    : frameXContainer('text', state);
-  // Vertical band of the vertAnchor (the "anchor object", §22.9.2.20). The
-  // "text" band end uses the table height; tblpYSpec is gated out for "text" so
-  // only band.start (= paraTop) is consumed there.
-  const vBand = frameYContainer(tp.vertAnchor, paraTop, tableH, state);
-
-  // Horizontal: tblpXSpec (ST_XAlign) supersedes the absolute tblpX offset
-  // (§17.4.57). Mirrors computeFrameBox's xAlign handling.
-  let x: number;
-  if (tp.tblpXSpec) {
-    x = resolveAlignedPosH(tp.tblpXSpec, hx.left, hx.right, tableW);
-  } else {
-    // §17.4.57 tblpX: absolute signed offset from the horzAnchor left edge.
-    x = hx.left + tp.tblpX * sc;
-  }
-
-  // Vertical: tblpYSpec (ST_YAlign) supersedes the absolute tblpY offset
-  // (§17.4.57) — EXCEPT when vertAnchor="text", where relative vertical
-  // positioning is not allowed and tblpYSpec is ignored (fall back to tblpY).
-  // Mirrors computeFrameBox's yAlign handling (ignored when vAnchor="text").
-  let y: number;
-  if (tp.tblpYSpec && tp.vertAnchor !== 'text') {
-    y = resolveAlignedPosV(tp.tblpYSpec, vBand, tableH);
-  } else {
-    // §17.4.57 tblpY: absolute signed offset from the vertAnchor band start.
-    y = vBand.start + tp.tblpY * sc;
-  }
-
-  // Word ground truth (sample-18 Sec B): a vertAnchor=page/margin floating table
-  // whose bottom would fall past its container is shifted UP to sit flush on the
-  // container bottom (physical page edge for page-anchored: measured top 741.9pt =
-  // 841.9 − 100 for a 100pt table), not left overflowing. vertAnchor="text" is
-  // excluded — its overflow is handled by the paginator's row-split (the floating
-  // analogue of splitTableAcrossPages), and its band rides the flow cursor, so
-  // clamping here would be wrong. Mirrors computeFrameBox exactly (§17.3.1.11).
-  if (!skipVClamp && (tp.vertAnchor === 'page' || tp.vertAnchor === 'margin')) {
-    y = clampAbsBoxIntoContainer(y, tableH, vBand);
-  }
-
-  return { x, y, w: tableW, h: tableH };
+  const textBand = frameXContainer('text', state);
+  return resolvePointSpaceFloatBox({
+    leftFromTextPt: tp.leftFromText * sc,
+    rightFromTextPt: tp.rightFromText * sc,
+    topFromTextPt: tp.topFromText * sc,
+    bottomFromTextPt: tp.bottomFromText * sc,
+    horzAnchor: tp.horzAnchor,
+    horzSpecified: tp.horzSpecified,
+    vertAnchor: tp.vertAnchor,
+    xPt: tp.tblpX * sc,
+    yPt: tp.tblpY * sc,
+    ...(tp.tblpXSpec == null ? {} : { xAlign: tp.tblpXSpec }),
+    ...(tp.tblpYSpec == null ? {} : { yAlign: tp.tblpYSpec }),
+  }, {
+    page: {
+      xPt: 0,
+      yPt: 0,
+      widthPt: state.pageWidth * sc,
+      heightPt: state.pageH,
+    },
+    margin: {
+      xPt: state.marginLeft * sc,
+      yPt: state.marginTop * sc,
+      widthPt: Math.max(0, (state.pageWidth - state.marginLeft - state.marginRight) * sc),
+      heightPt: Math.max(0, state.pageH - (state.marginTop + state.marginBottom) * sc),
+    },
+    text: {
+      xPt: textBand.left,
+      yPt: paraTop,
+      widthPt: Math.max(0, textBand.right - textBand.left),
+      heightPt: tableH,
+    },
+  }, tableW, tableH, skipVClamp);
 }
 
 /**
@@ -171,30 +337,13 @@ export function registerTableFloat(
 }
 
 /**
- * §17.4.57 — which side the body text wraps on, from the resolved float box vs
- * the current COLUMN band [contentX, contentX+contentW]. A floating table sits
- * to ONE side of the column and text fills the OTHER:
- *   - float's right edge at/left-of the column centre ⇒ float on the LEFT ⇒
- *     text wraps on the RIGHT (side='right').
- *   - float's left edge at/right-of the column centre ⇒ float on the RIGHT ⇒
- *     text wraps on the LEFT (side='left').
- *   - otherwise the float straddles the centre ⇒ 'bothSides' (resolveLineFloat-
- *     Window then takes the widest free gap on either flank).
- * Coordinates are page-absolute px; the comparison is against the column band so
- * a per-column floating table wraps within its own column (#513).
+ * `tblpPr` supplies an exclusion rectangle but no left/right wrap-side choice.
+ * Preserve both candidate flanks so `resolveLineFloatWindow` can apply the same
+ * widest-free-gap geometry used for other square exclusions. Choosing a side
+ * from the column midpoint discarded usable space and had no OOXML basis.
  *
- * NOTE: comparing against the column CENTRE is a simplified approximation of
- * Word's side selection — it picks a wrap side from where the float's box falls
- * relative to the column midpoint rather than the precise free-space-on-each-
- * flank measurement Word performs.
- *
- * Exported for unit tests only (the float-table-geometry table) — not package API.
+ * Exported for unit tests only — not package API.
  */
-export function floatTableWrapSide(box: FloatTableBox, state: RenderState): string {
-  const colLeft = state.contentX;
-  const colRight = state.contentX + state.contentW;
-  const center = (colLeft + colRight) / 2;
-  if (box.x + box.w <= center) return 'right';
-  if (box.x >= center) return 'left';
+export function floatTableWrapSide(_box: FloatTableBox, _state: RenderState): string {
   return 'bothSides';
 }

@@ -92,6 +92,13 @@ describe('document layout runtime state', () => {
         candidate === paragraph && sourceRunIndex === 3
           ? { pageIndex: 1, displayPageNumber: 50, pageNumberFormat: 'upperRoman' }
           : undefined,
+      resolveTablePageField: (occurrenceId, candidate, sourceRunIndex) =>
+        occurrenceId === 'table-page-2' && candidate === paragraph && sourceRunIndex === 3
+          ? { pageIndex: 1, displayPageNumber: 50, pageNumberFormat: 'upperRoman' }
+          : undefined,
+      resolveDestinationPage: (pageIndex) => pageIndex === 1
+        ? { pageIndex: 1, displayPageNumber: 50, pageNumberFormat: 'upperRoman' }
+        : undefined,
     });
     const second = createFieldAcquisitionServicesView(services, {
       totalPages: 2,
@@ -102,7 +109,16 @@ describe('document layout runtime state', () => {
       pageIndex: 1, displayPageNumber: 50, pageNumberFormat: 'upperRoman',
     });
     expect(fieldAcquisitionContextOf(first).resolvePageField?.(paragraph, 4)).toBeUndefined();
+    expect(fieldAcquisitionContextOf(first).resolveTablePageField?.(
+      'table-page-2', paragraph, 3,
+    )).toEqual({
+      pageIndex: 1, displayPageNumber: 50, pageNumberFormat: 'upperRoman',
+    });
+    expect(fieldAcquisitionContextOf(first).resolveDestinationPage?.(1)).toEqual({
+      pageIndex: 1, displayPageNumber: 50, pageNumberFormat: 'upperRoman',
+    });
     expect(fieldAcquisitionContextOf(second).resolvePageField?.(paragraph, 3)).toBeUndefined();
     expect(fieldAcquisitionContextOf(services).resolvePageField).toBeUndefined();
+    expect(fieldAcquisitionContextOf(services).resolveTablePageField).toBeUndefined();
   });
 });

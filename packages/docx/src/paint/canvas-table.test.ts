@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type {
   ParagraphLayout,
+  ResolvedFloatingTablePlacementLayout,
   ResolvedBorderSegment,
   TableCellLayout,
   TableLayout,
@@ -95,6 +96,37 @@ function tableLayout(): TableLayout {
 }
 
 describe('paintTableLayout', () => {
+  it('clips a retained table fragment at its page-local boundary', async () => {
+    const operations: unknown[] = [];
+    const ctx = {
+      globalAlpha: 1, fillStyle: '', strokeStyle: '', lineWidth: 1,
+      font: '', textAlign: 'left' as CanvasTextAlign,
+      textBaseline: 'alphabetic' as CanvasTextBaseline,
+      direction: 'ltr' as CanvasDirection, letterSpacing: '0px',
+      fontKerning: 'auto' as CanvasFontKerning,
+      save() { operations.push('save'); }, restore() { operations.push('restore'); },
+      beginPath() { operations.push('beginPath'); },
+      rect(x: number, y: number, w: number, h: number) { operations.push(['rect', x, y, w, h]); },
+      clip() { operations.push('clip'); },
+      translate() {}, rotate() {}, scale() {}, fillRect() {}, strokeRect() {},
+      setLineDash() {}, moveTo() {}, lineTo() {}, stroke() {}, fill() {}, drawImage() {},
+      fillText() {},
+    } as unknown as PaintCanvas2D;
+    const node = tableLayout();
+    const clipped = {
+      ...node,
+      clipBounds: { xPt: 10, yPt: 20, widthPt: 80, heightPt: 8 },
+    };
+    const { paintTableLayout } = await import('./canvas-table.js');
+
+    paintTableLayout(clipped, { ctx, scale: 1, dpr: 1, resources });
+
+    expect(operations.slice(0, 4)).toEqual([
+      'save', 'beginPath', ['rect', 10, 20, 80, 8], 'clip',
+    ]);
+    expect(operations.at(-1)).toBe('restore');
+  });
+
   it('paints only retained backgrounds, child layouts, and resolved borders without measuring', async () => {
     const operations: unknown[] = [];
     const target = {
@@ -245,5 +277,80 @@ describe('paintTableLayout', () => {
     // outer content x=12 + nested-local paragraph x=22. The nested table's
     // 20pt centered origin is already retained by its child geometry.
     expect(runs).toEqual([{ x: 34 }]);
+  });
+
+  it('paints each explicitly resolved floating child once outside ordinary cell flow', async () => {
+    const paintedText: string[] = [];
+    const paintOrder: string[] = [];
+    const runs: Array<{ x: number; y: number }> = [];
+    const target = {
+      globalAlpha: 1, fillStyle: '', strokeStyle: '', lineWidth: 1,
+      font: '', textAlign: 'left' as CanvasTextAlign,
+      textBaseline: 'alphabetic' as CanvasTextBaseline,
+      direction: 'ltr' as CanvasDirection, letterSpacing: '0px',
+      fontKerning: 'auto' as CanvasFontKerning,
+      save() {}, restore() {}, beginPath() {}, rect() {}, clip() {},
+      translate() {}, rotate() {}, scale() {}, fillRect() {}, strokeRect() {},
+      setLineDash() {}, moveTo() {}, lineTo() {},
+      stroke() { paintOrder.push(`stroke:${this.strokeStyle}`); },
+      fill() {}, drawImage() {},
+      fillText(text: string) { paintedText.push(text); paintOrder.push(`text:${text}`); },
+    };
+    const ctx = new Proxy(target, {
+      get(object, property, receiver) {
+        if (property === 'measureText') throw new Error('floating table paint must not measure');
+        return Reflect.get(object, property, receiver);
+      },
+    }) as unknown as PaintCanvas2D;
+    const childBase = tableLayout();
+    const child: TableLayout = {
+      ...childBase,
+      borders: childBase.borders.map((border) => ({ ...border, color: '#112299' })),
+    };
+    const ordinaryParent = tableLayout();
+    const firstCell = ordinaryParent.rows[0]!.cells[0]!;
+    const parentWithoutNestedFlow: TableLayout = {
+      ...ordinaryParent,
+      rows: [{
+        ...ordinaryParent.rows[0]!,
+        cells: [{ ...firstCell, blocks: [] }, ...ordinaryParent.rows[0]!.cells.slice(1)],
+      }],
+    };
+    const source = {
+      kind: 'floating-table-placement', occurrenceId: 'page-0:cell-0:0:nested',
+      ownership: 'source', physicalPageIndex: 0, displayPageNumber: 1,
+      hostCellId: 'cell-0', sourceBlockIndex: 0, anchorBlockIndex: 1,
+      tableId: child.id, overlap: 'never',
+      positioning: {
+        leftFromTextPt: 0, rightFromTextPt: 0,
+        topFromTextPt: 0, bottomFromTextPt: 0,
+        horzAnchor: 'text', horzSpecified: true, vertAnchor: 'text', xPt: 0, yPt: 0,
+      },
+      anchorBounds: { xPt: 10, yPt: 20, widthPt: 80, heightPt: 16 },
+      child,
+    } as const;
+    const floating = [{
+      kind: 'resolved-floating-table-placement',
+      occurrenceId: source.occurrenceId,
+      xPt: 200, yPt: 300,
+      bounds: { xPt: 200, yPt: 300, widthPt: 80, heightPt: 16 },
+      exclusionBounds: { xPt: 200, yPt: 300, widthPt: 80, heightPt: 16 },
+      overlap: 'never', child, source,
+    }] satisfies readonly ResolvedFloatingTablePlacementLayout[];
+    const { paintPlacedTableLayout } = await import('./canvas-table.js');
+
+    paintPlacedTableLayout(
+      parentWithoutNestedFlow,
+      { xPt: 110, yPt: 220 },
+      {
+        ctx, scale: 1, dpr: 1, resources,
+        onTextRun: (run) => runs.push({ x: run.x, y: run.y }),
+      },
+      floating,
+    );
+
+    expect(paintedText).toEqual(['child']);
+    expect(runs).toEqual([{ x: 202, y: 302 }]);
+    expect(paintOrder.at(-1)).toBe('stroke:#445566');
   });
 });

@@ -9091,12 +9091,20 @@ fn parse_table(
         // tblPrEx, and trPr spacing remain separate higher-precedence wires.
         let mut style_cell_spacing = tstyle.cell_spacing.clone();
         let mut style_cell_margins = tstyle.cell_margins.clone();
+        let mut style_tbl_header = tstyle.tbl_header;
+        let mut style_cant_split = tstyle.cant_split;
         for key in row_conds(r) {
             if let Some(condition) = tstyle.cond.get(key) {
                 if let Some(spacing) = condition.cell_spacing.clone() {
                     style_cell_spacing = Some(spacing);
                 }
                 merge_table_margin_layer(&mut style_cell_margins, &condition.cell_margins);
+                if condition.tbl_header.is_some() {
+                    style_tbl_header = condition.tbl_header;
+                }
+                if condition.cant_split.is_some() {
+                    style_cant_split = condition.cant_split;
+                }
             }
         }
         let row = parse_table_row(
@@ -9119,6 +9127,8 @@ fn parse_table(
             &cell_conds,
             style_cell_spacing,
             style_cell_margins,
+            style_tbl_header,
+            style_cant_split,
             depth,
         );
         rows.push(row);
@@ -9337,6 +9347,8 @@ fn parse_table_row(
     cell_conds: &[CondFmt],
     style_cell_spacing: Option<TableWidthAcquisitionWire>,
     style_cell_margins: Option<TableMarginAcquisitionWire>,
+    style_tbl_header: Option<bool>,
+    style_cant_split: Option<bool>,
     // Recursion-depth guard threaded from the owning table (see `parse_table`).
     depth: DepthGuard,
 ) -> DocTableRow {
@@ -9369,9 +9381,13 @@ fn parse_table_row(
         // §17.4.60 places tblPrEx directly under tr, not inside trPr.
         exception: table_property_exception_acquisition(child_w(node, "tblPrEx")),
     };
-    let is_header = tr_pr.and_then(|p| child_w(p, "tblHeader")).is_some();
+    let is_header = tr_pr
+        .and_then(|p| bool_prop(p, "tblHeader"))
+        .or(style_tbl_header)
+        .unwrap_or(false);
     let cant_split = tr_pr
         .and_then(|p| bool_prop(p, "cantSplit"))
+        .or(style_cant_split)
         .unwrap_or(false);
     // ECMA-376 §17.4.15 / §17.4.14 — these are structural offsets into the
     // shared tblGrid. They determine which grid columns the row's first/last
@@ -10847,6 +10863,99 @@ mod tests {
             &theme,
             DepthGuard::root(),
         )
+    }
+
+    #[test]
+    fn table_row_on_off_pagination_properties_honor_all_ct_on_off_tokens() {
+        let table = parse_tbl(
+            r#"
+            <w:tr><w:trPr><w:tblHeader/><w:cantSplit/></w:trPr><w:tc><w:p/></w:tc></w:tr>
+            <w:tr><w:trPr><w:tblHeader w:val="true"/><w:cantSplit w:val="1"/></w:trPr><w:tc><w:p/></w:tc></w:tr>
+            <w:tr><w:trPr><w:tblHeader w:val="false"/><w:cantSplit w:val="0"/></w:trPr><w:tc><w:p/></w:tc></w:tr>
+            <w:tr><w:trPr><w:tblHeader w:val="off"/><w:cantSplit w:val="off"/></w:trPr><w:tc><w:p/></w:tc></w:tr>
+            "#,
+        );
+
+        let pagination = table
+            .rows
+            .iter()
+            .map(|row| (row.is_header, row.cant_split))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            pagination,
+            vec![(true, true), (true, true), (false, false), (false, false)]
+        );
+    }
+
+    #[test]
+    fn table_row_pagination_properties_cascade_from_style_to_direct_tr_pr() {
+        let styles = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="table" w:styleId="BaseRows">
+                <w:trPr><w:tblHeader/><w:cantSplit/></w:trPr>
+              </w:style>
+              <w:style w:type="table" w:styleId="DerivedRows">
+                <w:basedOn w:val="BaseRows"/>
+                <w:trPr><w:tblHeader w:val="0"/></w:trPr>
+              </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        let table = parse_tbl_with_styles(
+            r#"
+            <w:tblPr><w:tblStyle w:val="DerivedRows"/></w:tblPr>
+            <w:tr><w:tc><w:p/></w:tc></w:tr>
+            <w:tr>
+              <w:trPr><w:tblHeader/><w:cantSplit w:val="false"/></w:trPr>
+              <w:tc><w:p/></w:tc>
+            </w:tr>
+            "#,
+            &styles,
+        );
+
+        assert_eq!(
+            table
+                .rows
+                .iter()
+                .map(|row| (row.is_header, row.cant_split))
+                .collect::<Vec<_>>(),
+            vec![(false, true), (true, false)]
+        );
+    }
+
+    #[test]
+    fn conditional_table_style_row_properties_override_whole_table_row_properties() {
+        let styles = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="table" w:styleId="ConditionalRows">
+                <w:trPr><w:tblHeader w:val="0"/><w:cantSplit w:val="0"/></w:trPr>
+                <w:tblStylePr w:type="firstRow">
+                  <w:trPr><w:tblHeader/><w:cantSplit/></w:trPr>
+                </w:tblStylePr>
+              </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        let table = parse_tbl_with_styles(
+            r#"
+            <w:tblPr>
+              <w:tblStyle w:val="ConditionalRows"/>
+              <w:tblLook w:firstRow="1"/>
+            </w:tblPr>
+            <w:tr><w:tc><w:p/></w:tc></w:tr>
+            <w:tr><w:tc><w:p/></w:tc></w:tr>
+            "#,
+            &styles,
+        );
+
+        assert_eq!(
+            table
+                .rows
+                .iter()
+                .map(|row| (row.is_header, row.cant_split))
+                .collect::<Vec<_>>(),
+            vec![(true, true), (false, false)]
+        );
     }
 
     #[test]

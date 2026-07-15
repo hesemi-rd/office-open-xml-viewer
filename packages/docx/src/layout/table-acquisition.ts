@@ -1,4 +1,11 @@
-import type { BorderSpec, CellBorders, DocParagraph, DocTable, TableBorders } from '../types.js';
+import type {
+  BorderSpec,
+  CellBorders,
+  DocParagraph,
+  DocTable,
+  TableBorders,
+  TblpPr,
+} from '../types.js';
 import {
   acquireTableCellBlocks,
   isStructuralTrailingParagraph,
@@ -6,8 +13,11 @@ import {
 import type { ParagraphBorderEdges } from './paragraph-border-adjacency.js';
 import { layoutTable } from './table.js';
 import { tableCellHorizontalSpacingInsets } from './table-columns.js';
+import { snapshotPlainData } from './plain-data.js';
 import type {
+  FloatingTablePositionInput,
   LayoutServices,
+  LayoutNodeId,
   ParagraphLayout,
   TableBorderInput,
   TableEdgeInputs,
@@ -29,7 +39,73 @@ export interface RetainedTableAcquisitionDependencies<State> {
     flowDomainId: string,
     paragraphBorderEdges: ParagraphBorderEdges,
   ): ParagraphLayout;
+  registerFloatingTable(
+    state: State,
+    request: Readonly<{
+      child: TableLayout;
+      positioning: FloatingTablePositionInput;
+      overlap: 'never' | 'overlap';
+    }>,
+  ): Readonly<{ xPt: number; yPt: number }> | null;
   advanceState(state: State, advancePt: number): void;
+}
+
+/**
+ * The finished geometry and the immutable semantic input that produced it travel
+ * together. Pagination may derive page-local row and border geometry from the
+ * input, while ordinary paint consumes the finished layout without measuring.
+ */
+export interface RetainedTableAcquisition {
+  readonly input: TableLayoutInput;
+  readonly layout: TableLayout;
+  readonly nestedById: Readonly<Record<string, RetainedTableAcquisition>>;
+  readonly floatingTables: readonly NestedFloatingTableOccurrence[];
+}
+
+/**
+ * A cell-owned out-of-flow occurrence. The retained table is referenced by id
+ * rather than embedded again so layout and paint cannot count the same child as
+ * both an ordinary block and a floating placement.
+ */
+export interface NestedFloatingTableOccurrence {
+  readonly hostCellId: LayoutNodeId;
+  readonly sourceBlockIndex: number;
+  readonly anchorBlockIndex: number;
+  readonly tableId: LayoutNodeId;
+  readonly overlap: 'never' | 'overlap';
+  readonly positioning: FloatingTablePositionInput;
+  readonly acquiredTextOffsetPt?: Readonly<{ xPt: number; yPt: number }>;
+}
+
+function floatingPositionInput(positioning: TblpPr): FloatingTablePositionInput {
+  return {
+    leftFromTextPt: positioning.leftFromText,
+    rightFromTextPt: positioning.rightFromText,
+    topFromTextPt: positioning.topFromText,
+    bottomFromTextPt: positioning.bottomFromText,
+    horzAnchor: positioning.horzAnchor,
+    horzSpecified: positioning.horzSpecified,
+    vertAnchor: positioning.vertAnchor,
+    xPt: positioning.tblpX,
+    yPt: positioning.tblpY,
+    ...(positioning.tblpXSpec == null ? {} : { xAlign: positioning.tblpXSpec }),
+    ...(positioning.tblpYSpec == null ? {} : { yAlign: positioning.tblpYSpec }),
+  };
+}
+
+function nextRegularParagraphIndex(
+  content: DocTable['rows'][number]['cells'][number]['content'],
+  afterIndex: number,
+): number {
+  const anchorBlockIndex = content.findIndex((element, index) => (
+    index > afterIndex
+      && element.type === 'paragraph'
+      && element.framePr == null
+  ));
+  if (anchorBlockIndex < 0) {
+    throw new Error('A nested floating table requires a following regular paragraph anchor');
+  }
+  return anchorBlockIndex;
 }
 
 function retainedBorder(border: BorderSpec | null): TableBorderInput | null {
@@ -62,20 +138,26 @@ function physicalAlignment(
   return (bidiVisual ? !trailing : trailing) ? 'right' : 'left';
 }
 
+function paragraphHasPageDependency(layout: ParagraphLayout): boolean {
+  return layout.lines.some((line) => line.placements.some((placement) => (
+    placement.kind === 'text' && placement.dependency === 'page'
+  )));
+}
+
 /**
  * Acquire an ordinary or nested table from final-width retained children.
  * Parser-private authored-presence and lexical facts arrive only through the
  * immutable TableFormatInput; this fold owns recursive table geometry and never
  * reaches back into parser/model metadata.
  */
-export function acquireRetainedTableLayout<State>(
+export function acquireRetainedTable<State>(
   table: DocTable,
   columnWidthsPt: readonly number[],
   contentWidthPt: number,
   outerState: State,
   sourcePath: readonly number[],
   dependencies: RetainedTableAcquisitionDependencies<State>,
-): TableLayout {
+): RetainedTableAcquisition {
   const services = dependencies.layoutServices(outerState);
   if (!services) throw new Error('Retained table acquisition requires layout services');
   const flowDomainId = `table:${sourcePath.join('.')}`;
@@ -85,6 +167,8 @@ export function acquireRetainedTableLayout<State>(
   const tableIndentPt = firstRowException?.indentAuthored
     ? (firstRowException.indentPt ?? 0)
     : (table.tblInd ?? 0);
+  const nestedById: Record<string, RetainedTableAcquisition> = {};
+  const floatingTables: NestedFloatingTableOccurrence[] = [];
   const rows: TableLayoutInput['rows'] = table.rows.map((row, rowIndex) => {
     const rowFormat = format.rows[rowIndex];
     let columnStart = Math.max(0, Math.min(columnWidthsPt.length, row.gridBefore ?? 0));
@@ -111,6 +195,7 @@ export function acquireRetainedTableLayout<State>(
         columnWidthsPt.length,
       );
       const cellPath = [...sourcePath, rowIndex, cellIndex];
+      const cellId = `${flowDomainId}:cell:${rowIndex}.${cellIndex}`;
       const acquired = cell.vMerge === false
         ? []
         : acquireTableCellBlocks({
@@ -149,7 +234,7 @@ export function acquireRetainedTableLayout<State>(
                 nestedContentWidthPt,
                 cellState,
               );
-              return acquireRetainedTableLayout(
+              const nested = acquireRetainedTable(
                 nestedTable,
                 nestedColumns,
                 nestedContentWidthPt,
@@ -157,11 +242,35 @@ export function acquireRetainedTableLayout<State>(
                 nestedPath,
                 dependencies,
               );
+              nestedById[nested.layout.id] = nested;
+              if (nestedTable.tblpPr != null) {
+                const sourceBlockIndex = nestedPath[nestedPath.length - 1]!;
+                const positioning = floatingPositionInput(nestedTable.tblpPr);
+                const overlap = nestedTable.overlap === 'never' ? 'never' : 'overlap';
+                const acquiredTextOffsetPt = dependencies.registerFloatingTable(cellState, {
+                  child: nested.layout,
+                  positioning,
+                  overlap,
+                });
+                const occurrence = {
+                  hostCellId: cellId,
+                  sourceBlockIndex,
+                  anchorBlockIndex: nextRegularParagraphIndex(cell.content, sourceBlockIndex),
+                  tableId: nested.layout.id,
+                  overlap,
+                  positioning,
+                  ...(acquiredTextOffsetPt == null ? {} : {
+                    acquiredTextOffsetPt: Object.freeze({ ...acquiredTextOffsetPt }),
+                  }),
+                } as const;
+                floatingTables.push(occurrence);
+              }
+              return nested.layout;
             },
             advanceState: dependencies.advanceState,
           });
       return {
-        id: `${flowDomainId}:cell:${rowIndex}.${cellIndex}`,
+        id: cellId,
         source: { story: 'body' as const, storyInstance: 'body', path: cellPath },
         columnStart: currentColumnStart,
         columnSpan,
@@ -181,16 +290,21 @@ export function acquireRetainedTableLayout<State>(
           },
         } : {}),
         borders: retainedEdges(cell.borders),
-        blocks: acquired.map((layout, blockIndex) => {
-          if (layout.kind === 'table' && !('flowBounds' in layout)) {
-            throw new Error('Ordinary table acquisition cannot retain a page-slice table fragment');
-          }
-          return {
-            layout: layout as ParagraphLayout | TableLayout,
-            ...(isStructuralTrailingParagraph(cell.content, blockIndex)
+        blocks: acquired.flatMap((layout, sourceBlockIndex) => {
+          const sourceElement = cell.content[sourceBlockIndex];
+          // ECMA-376 §17.4.57 keeps tblpPr tables at their logical source
+          // position only for anchoring; they do not participate in cell flow.
+          if (sourceElement?.type === 'table' && sourceElement.tblpPr != null) return [];
+          return [{
+            layout,
+            sourceBlockIndex,
+            ...((layout.kind === 'paragraph' && paragraphHasPageDependency(layout))
+              ? { pageDependent: true }
+              : {}),
+            ...(isStructuralTrailingParagraph(cell.content, sourceBlockIndex)
               ? { structuralTrailing: true }
               : {}),
-          };
+          }];
         }),
       };
     });
@@ -198,6 +312,8 @@ export function acquireRetainedTableLayout<State>(
     return {
       id: `${flowDomainId}:row:${rowIndex}`,
       source: { story: 'body' as const, storyInstance: 'body', path: [...sourcePath, rowIndex] },
+      logicalRowIndex: rowIndex,
+      cantSplit: rowFormat?.cantSplit ?? row.cantSplit === true,
       heightPt: rowFormat?.height?.valuePt ?? null,
       heightRule,
       cellSpacingPt: rowFormat?.cellSpacingPt ?? 0,
@@ -207,31 +323,40 @@ export function acquireRetainedTableLayout<State>(
       alignment: physicalAlignment(rowFormat?.justification ?? table.jc, bidiVisual),
       indentPt: tableIndentPt,
       cells,
-      ...(row.isHeader ? { repeatedHeader: true } : {}),
+      repeatedHeader: rowFormat?.repeatedHeader ?? row.isHeader === true,
     };
   });
-  const input: TableLayoutInput = {
+  const input = snapshotPlainData<TableLayoutInput>({
     kind: 'table',
     id: flowDomainId,
     source: { story: 'body', storyInstance: 'body', path: [...sourcePath] },
     flowDomainId,
-    ordinaryFlow: true,
+    ordinaryFlow: table.tblpPr == null,
     alignment: physicalAlignment(table.jc, bidiVisual),
     indentPt: tableIndentPt,
     bidiVisual,
     columnWidthsPt,
     borders: retainedEdges(table.borders),
     rows,
-  };
+  }, 'RetainedTableAcquisition.input') as TableLayoutInput;
   const bounds = {
     xPt: 0,
     yPt: 0,
     widthPt: contentWidthPt,
     heightPt: 1,
   };
-  return layoutTable(input, {
+  const layout = layoutTable(input, {
     container: { id: flowDomainId, kind: 'tableCell', bounds },
     cursor: { xPt: 0, yPt: 0 },
     availableBounds: bounds,
   }, services).layout;
+  return Object.freeze({
+    input,
+    layout,
+    nestedById: Object.freeze(nestedById),
+    floatingTables: snapshotPlainData(
+      floatingTables,
+      'RetainedTableAcquisition.floatingTables',
+    ) as readonly NestedFloatingTableOccurrence[],
+  });
 }

@@ -306,6 +306,10 @@ pub struct CondFmt {
     pub cell_spacing: Option<crate::types::TableWidthAcquisitionWire>,
     /// Full-row conditional table margin layer (§17.7.6.3).
     pub cell_margins: Option<crate::types::TableMarginAcquisitionWire>,
+    /// Row pagination properties participate in the table-style cascade; an
+    /// explicit `false` must remain distinguishable from an omitted property.
+    pub tbl_header: Option<bool>,
+    pub cant_split: Option<bool>,
 }
 
 /// Fold an ordered list of conditional-format layers into one effective
@@ -336,6 +340,12 @@ pub fn merge_cond_layers(layers: &[&CondFmt]) -> CondFmt {
             out.cell_spacing = layer.cell_spacing.clone();
         }
         merge_table_margin_layer(&mut out.cell_margins, &layer.cell_margins);
+        if layer.tbl_header.is_some() {
+            out.tbl_header = layer.tbl_header;
+        }
+        if layer.cant_split.is_some() {
+            out.cant_split = layer.cant_split;
+        }
     }
     out
 }
@@ -391,6 +401,10 @@ pub struct TableStyleDef {
     pub cell_margins: Option<crate::types::TableMarginAcquisitionWire>,
     /// Whole-table style spacing, inherited through basedOn.
     pub cell_spacing: Option<crate::types::TableWidthAcquisitionWire>,
+    /// ECMA-376 §17.7.6.10/.11: row properties supplied by the table style.
+    /// `Option` preserves inheritance and explicit CT_OnOff false values.
+    pub tbl_header: Option<bool>,
+    pub cant_split: Option<bool>,
 }
 
 #[derive(Default)]
@@ -593,6 +607,12 @@ impl StyleMap {
             if def.cell_spacing.is_some() {
                 out.cell_spacing = def.cell_spacing.clone();
             }
+            if def.tbl_header.is_some() {
+                out.tbl_header = def.tbl_header;
+            }
+            if def.cant_split.is_some() {
+                out.cant_split = def.cant_split;
+            }
             // §17.7.6: a derived table style's whole-table rPr/pPr layers ON TOP
             // of the base style's. We fold each level into a single accumulated
             // RunFmt/ParaFmt with the standard merge semantics (later wins).
@@ -618,6 +638,12 @@ impl StyleMap {
                     slot.cell_spacing = v.cell_spacing.clone();
                 }
                 merge_table_margin_layer(&mut slot.cell_margins, &v.cell_margins);
+                if v.tbl_header.is_some() {
+                    slot.tbl_header = v.tbl_header;
+                }
+                if v.cant_split.is_some() {
+                    slot.cant_split = v.cant_split;
+                }
             }
         }
         out
@@ -2267,6 +2293,10 @@ fn parse_tbl_style_def(style_node: roxmltree::Node, based_on: Option<String>) ->
         def.cell_shd = shd_fill(tc_pr);
         def.cell_valign = child_w(tc_pr, "vAlign").and_then(|v| attr_w(v, "val"));
     }
+    if let Some(tr_pr) = child_w(style_node, "trPr") {
+        def.tbl_header = bool_prop(tr_pr, "tblHeader");
+        def.cant_split = bool_prop(tr_pr, "cantSplit");
+    }
     // ECMA-376 §17.7.6: a table style's top-level `<w:rPr>`/`<w:pPr>` are
     // whole-table run/paragraph defaults applied to every cell (e.g. Calendar 3
     // sets `<w:color w:val="7F7F7F"/>` so day numbers are gray, and `<w:jc
@@ -2297,6 +2327,10 @@ fn parse_tbl_style_def(style_node: roxmltree::Node, based_on: Option<String>) ->
             }
             cf.cell_spacing = table_width_wire(child_w(tbl_pr, "tblCellSpacing"));
             cf.cell_margins = child_w(tbl_pr, "tblCellMar").map(table_margin_wire);
+        }
+        if let Some(tr_pr) = child_w(sp, "trPr") {
+            cf.tbl_header = bool_prop(tr_pr, "tblHeader");
+            cf.cant_split = bool_prop(tr_pr, "cantSplit");
         }
         // §17.7.6: the conditional block carries its own `<w:rPr>`/`<w:pPr>`
         // (e.g. firstRow `<w:color w:val="365F91"/>` + `<w:jc w:val="right"/>`).

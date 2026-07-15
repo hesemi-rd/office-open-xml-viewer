@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { bodyFragmentFor, computePages, computeColumns } from './renderer.js';
 import type {
+  BlockContinuationRange,
+  TableCellFragmentLayout,
+  TableFragmentLayout,
+} from './layout/table-pagination.js';
+import type {
   BodyElement, CellElement, DocParagraph, DocTableCell, DocxTextRun, ShapeRun, SectionProps, PaginatedBodyElement, DocTable, DocTableRow,
 } from './types';
 
@@ -328,6 +333,16 @@ const textOf = (el: PaginatedBodyElement): string =>
         .map((r) => (r as DocxTextRun).text)
         .join('')
     : '';
+
+function retainedTableOn(page: PaginatedBodyElement[]) {
+  const element = page.find((el) => el.type === 'table');
+  if (!element) return undefined;
+  const placed = bodyFragmentFor(element);
+  if (placed?.fragment.kind !== 'table' || !('flowBounds' in placed.fragment)) {
+    throw new Error('expected a retained table fragment');
+  }
+  return { element, placed, fragment: placed.fragment as TableFragmentLayout };
+}
 
 function bodyPaginationGeometry(pages: PaginatedBodyElement[][]) {
   return {
@@ -777,110 +792,156 @@ describe('computePages — tall header/footer reserve indexing (§17.6.11)', () 
 });
 
 describe('computePages — over-tall table row splitting (§17.4 table pagination)', () => {
+  const paragraphContinuation = (cell: TableCellFragmentLayout, blockIndex = 0) => {
+    const block = cell.blocks.find((candidate) => (
+      candidate.layout.kind === 'paragraph'
+      && cell.contentRanges.some((range) => (
+        range.kind === 'paragraph' && range.blockIndex === blockIndex
+      ))
+    ));
+    return block?.layout.kind === 'paragraph' ? block.layout.continuation : undefined;
+  };
+
   it('splits an auto-height row by cell block boundaries instead of overflowing the footer band', () => {
     const pages = computePages([autoTableWithTallRow(8)], section(), makeCtx());
-    const tables = pages.flatMap((page) => page.filter((el) => el.type === 'table'));
+    const tables = pages.map(retainedTableOn).filter((table) => table !== undefined);
 
     expect(tables.length).toBeGreaterThan(1);
-    expect(tables.flatMap((t) => (t as unknown as DocTable).rows).length).toBe(2);
+    expect(tables.flatMap((table) => table.fragment.rows)
+      .map((row) => [row.logicalRowIndex, row.fragmentIndex])).toEqual([[0, 0], [0, 1]]);
+    expect(tables.flatMap((table) => table.fragment.rows[0]?.cells[0]?.contentRanges ?? []))
+      .toEqual(Array.from({ length: 8 }, (_, blockIndex) => ({
+        kind: 'paragraph', blockIndex, lineStart: 0, lineEnd: 1,
+      })));
     for (const table of tables) {
-      const h = (table.tableRowHeightsPt ?? []).reduce((sum, rowH) => sum + rowH, 0);
-      expect(h).toBeLessThanOrEqual(100);
+      expect(table.placed.heightPt).toBeLessThanOrEqual(100);
     }
   });
 
   it('splits a splittable auto-height row into the remaining page band before continuing', () => {
     const pages = computePages([para(), para(), autoTableWithTallRow(4)], section(), makeCtx());
-    const firstPageTable = pages[0].find((el) => el.type === 'table') as (PaginatedBodyElement & DocTable) | undefined;
-    const secondPageTable = pages[1].find((el) => el.type === 'table') as (PaginatedBodyElement & DocTable) | undefined;
+    const firstPageTable = retainedTableOn(pages[0]);
+    const secondPageTable = retainedTableOn(pages[1]);
 
     expect(firstPageTable).toBeDefined();
     expect(secondPageTable).toBeDefined();
 
-    const firstSliceBlocks = firstPageTable?.rows[0]?.cells[0]?.content.length ?? 0;
-    const secondSliceBlocks = secondPageTable?.rows[0]?.cells[0]?.content.length ?? 0;
+    const firstSliceBlocks = firstPageTable?.fragment.rows[0]?.cells[0]?.contentRanges.length ?? 0;
+    const secondSliceBlocks = secondPageTable?.fragment.rows[0]?.cells[0]?.contentRanges.length ?? 0;
     expect(firstSliceBlocks).toBeGreaterThan(0);
     expect(firstSliceBlocks).toBeLessThan(4);
     expect(firstSliceBlocks + secondSliceBlocks).toBe(4);
+    expect([
+      firstPageTable?.fragment.rows[0]?.fragmentIndex,
+      secondPageTable?.fragment.rows[0]?.fragmentIndex,
+    ]).toEqual([0, 1]);
   });
 
   it('keeps a cantSplit row intact when it does not fit the remaining page band', () => {
     const pages = computePages([para(), para(), autoTableWithTallRow(4, { cantSplit: true })], section(), makeCtx());
 
     expect(pages[0].some((el) => el.type === 'table')).toBe(false);
-    const secondPageTable = pages[1].find((el) => el.type === 'table') as (PaginatedBodyElement & DocTable) | undefined;
-    expect(secondPageTable?.rows[0]?.cells[0]?.content.length).toBe(4);
+    const secondPageTable = retainedTableOn(pages[1]);
+    expect(secondPageTable?.fragment.rows[0]?.cells[0]?.contentRanges).toEqual(
+      Array.from({ length: 4 }, (_, blockIndex) => ({ kind: 'whole', blockIndex })),
+    );
   });
 
   it('splits a single cell paragraph in a splittable row at line boundaries', () => {
     const pages = computePages([para(), para(), autoTableWithSingleWrappedParagraph(32)], section(), makeCtx());
-    const firstPageTable = pages[0].find((el) => el.type === 'table') as (PaginatedBodyElement & DocTable) | undefined;
-    const secondPageTable = pages[1].find((el) => el.type === 'table') as (PaginatedBodyElement & DocTable) | undefined;
+    const firstPageTable = retainedTableOn(pages[0]);
+    const secondPageTable = retainedTableOn(pages[1]);
 
     expect(firstPageTable).toBeDefined();
     expect(secondPageTable).toBeDefined();
 
-    const firstPara = firstPageTable?.rows[0]?.cells[0]?.content[0] as (CellElement & { lineSlice?: { start: number; end: number } }) | undefined;
-    const secondPara = secondPageTable?.rows[0]?.cells[0]?.content[0] as (CellElement & { lineSlice?: { start: number; end: number } }) | undefined;
-    expect(firstPara?.lineSlice).toEqual({ start: 0, end: 3 });
-    expect(secondPara?.lineSlice).toEqual({ start: 3, end: 4 });
+    const firstCell = firstPageTable?.fragment.rows[0]?.cells[0];
+    const secondCell = secondPageTable?.fragment.rows[0]?.cells[0];
+    expect(firstCell?.contentRanges).toEqual([
+      { kind: 'paragraph', blockIndex: 0, lineStart: 0, lineEnd: 3 },
+    ]);
+    expect(secondCell?.contentRanges).toEqual([
+      { kind: 'paragraph', blockIndex: 0, lineStart: 3, lineEnd: 4 },
+    ]);
+    expect(firstCell && paragraphContinuation(firstCell)).toEqual({
+      lineStart: 0, lineEnd: 3, continuesFromPrevious: false, continuesOnNext: true,
+    });
+    expect(secondCell && paragraphContinuation(secondCell)).toEqual({
+      lineStart: 3, lineEnd: 4, continuesFromPrevious: true, continuesOnNext: false,
+    });
   });
 
   it('splits the next row when it overflows after earlier rows filled part of the page', () => {
     const pages = computePages([autoTableWithIntroRowThenSingleWrappedParagraph(32)], section(), makeCtx());
-    const firstPageTable = pages[0].find((el) => el.type === 'table') as (PaginatedBodyElement & DocTable) | undefined;
-    const secondPageTable = pages[1].find((el) => el.type === 'table') as (PaginatedBodyElement & DocTable) | undefined;
+    const firstPageTable = retainedTableOn(pages[0]);
+    const secondPageTable = retainedTableOn(pages[1]);
 
-    expect(firstPageTable?.rows.length).toBe(2);
-    expect(secondPageTable?.rows.length).toBe(1);
+    expect(firstPageTable?.fragment.rows.map((row) => [row.logicalRowIndex, row.fragmentIndex]))
+      .toEqual([[0, 0], [1, 0]]);
+    expect(secondPageTable?.fragment.rows.map((row) => [row.logicalRowIndex, row.fragmentIndex]))
+      .toEqual([[1, 1]]);
 
-    const splitPara = firstPageTable?.rows[1]?.cells[0]?.content[0] as (CellElement & { lineSlice?: { start: number; end: number } }) | undefined;
-    const restPara = secondPageTable?.rows[0]?.cells[0]?.content[0] as (CellElement & { lineSlice?: { start: number; end: number } }) | undefined;
-    expect(splitPara?.lineSlice).toEqual({ start: 0, end: 3 });
-    expect(restPara?.lineSlice).toEqual({ start: 3, end: 4 });
+    expect(firstPageTable?.fragment.rows[1]?.cells[0]?.contentRanges).toEqual([
+      { kind: 'paragraph', blockIndex: 0, lineStart: 0, lineEnd: 3 },
+    ]);
+    expect(secondPageTable?.fragment.rows[0]?.cells[0]?.contentRanges).toEqual([
+      { kind: 'paragraph', blockIndex: 0, lineStart: 3, lineEnd: 4 },
+    ]);
   });
 
   it('uses collapsed paragraph spacing when fitting a cell paragraph line into a split row', () => {
     const pages = computePages([autoTableWithIntroRowThenSpacedWrappedParagraph()], section(), makeCtx());
-    const firstPageTable = pages[0].find((el) => el.type === 'table') as (PaginatedBodyElement & DocTable) | undefined;
-    const secondPageTable = pages[1].find((el) => el.type === 'table') as (PaginatedBodyElement & DocTable) | undefined;
+    const firstPageTable = retainedTableOn(pages[0]);
+    const continuationTables = pages.slice(1).map(retainedTableOn)
+      .filter((table) => table !== undefined);
 
-    expect(firstPageTable?.rows.length).toBe(2);
-    expect(firstPageTable?.rows[1]?.cells[0]?.content.map((el) => el.type === 'paragraph' ? textOf(el as unknown as PaginatedBodyElement) : el.type)).toEqual(['first', 'あ'.repeat(32)]);
-
-    const splitPara = firstPageTable?.rows[1]?.cells[0]?.content[1] as (CellElement & { lineSlice?: { start: number; end: number } }) | undefined;
-    const restSlices = secondPageTable?.rows
-      .map((row) => row.cells[0]?.content[0] as (CellElement & { lineSlice?: { start: number; end: number } }) | undefined)
-      .map((el) => el?.lineSlice);
-    expect(splitPara?.lineSlice).toEqual({ start: 0, end: 1 });
-    expect(restSlices).toEqual([{ start: 1, end: 3 }, { start: 3, end: 4 }]);
+    expect(firstPageTable?.fragment.rows.map((row) => [row.logicalRowIndex, row.fragmentIndex]))
+      .toEqual([[0, 0], [1, 0]]);
+    const ranges = [firstPageTable, ...continuationTables]
+      .flatMap((table) => table?.fragment.rows ?? [])
+      .filter((row) => row.logicalRowIndex === 1)
+      .map((row) => row.cells[0]?.contentRanges ?? []);
+    expect(ranges).toEqual([
+      [
+        { kind: 'paragraph', blockIndex: 0, lineStart: 0, lineEnd: 1 },
+        { kind: 'paragraph', blockIndex: 1, lineStart: 0, lineEnd: 1 },
+      ],
+      [{ kind: 'paragraph', blockIndex: 1, lineStart: 1, lineEnd: 4 }],
+    ]);
   });
 
   it('splits a nested table inside a cell at inner row boundaries', () => {
     const pages = computePages([autoTableWithNestedFixedTable([30, 30, 30, 30])], section(), makeCtx());
     expect(pages.length).toBe(2);
-    const firstPageTable = pages[0].find((el) => el.type === 'table') as (PaginatedBodyElement & DocTable) | undefined;
-    const secondPageTable = pages[1].find((el) => el.type === 'table') as (PaginatedBodyElement & DocTable) | undefined;
+    const firstPageTable = retainedTableOn(pages[0]);
+    const secondPageTable = retainedTableOn(pages[1]);
 
-    const firstNested = firstPageTable?.rows[0]?.cells[0]?.content[0] as (CellElement & DocTable) | undefined;
-    const secondNested = secondPageTable?.rows[0]?.cells[0]?.content[0] as (CellElement & DocTable) | undefined;
-    expect(firstNested?.type).toBe('table');
-    expect(secondNested?.type).toBe('table');
+    const firstNested = firstPageTable?.fragment.rows[0]?.cells[0]?.blocks[0]?.layout;
+    const secondNested = secondPageTable?.fragment.rows[0]?.cells[0]?.blocks[0]?.layout;
+    expect(firstPageTable?.fragment.rows[0]?.cells[0]?.contentRanges).toEqual([
+      { kind: 'nested-table', blockIndex: 0, childFragmentIndex: 0 },
+    ]);
+    expect(secondPageTable?.fragment.rows[0]?.cells[0]?.contentRanges).toEqual([
+      { kind: 'nested-table', blockIndex: 0, childFragmentIndex: 1 },
+    ]);
+    expect(firstNested?.kind).toBe('table');
+    expect(secondNested?.kind).toBe('table');
+    if (firstNested?.kind !== 'table' || secondNested?.kind !== 'table') {
+      throw new Error('expected retained nested-table fragments');
+    }
     expect(firstNested?.rows.length).toBe(3);
     expect(secondNested?.rows.length).toBe(1);
   });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Mid-page splitting of a row whose cells START a vertical merge (§17.4.85 +
-// §17.4.6). A `restart` cell begins its span in THIS row: its content fits the
-// page band like any cell, the page-1 piece keeps `restart` (its truncated box
-// ends at the page cut) and the page-2 piece keeps `restart` too, so the
-// following `continue` rows chain onto it — the span re-opens on the next page
-// exactly as Word draws it. Only a `continue` cell (span owned by an EARLIER
-// row) forbids the split.
+// Mid-page splitting of a row whose cells start a vertical merge (§17.4.84 +
+// §17.4.6). The retained fragments preserve each source cell's restart/continue
+// semantics. A page-local `visualMergeOwnership` marker supplies only the paint
+// ownership needed when a continuation row starts a page; pagination never
+// rewrites a continuation into an authored restart.
 // ─────────────────────────────────────────────────────────────────────────────
-describe('computePages — mid-page split of rows with vMerge restart cells (§17.4.85 + §17.4.6)', () => {
+describe('computePages — mid-page split of rows with vMerge restart cells (§17.4.84 + §17.4.6)', () => {
   const emptyBorders = () => ({ top: null, bottom: null, left: null, right: null, insideH: null, insideV: null });
   const mkCell = (content: CellElement[], vMerge: boolean | null, vAlign: 'top' | 'center' | 'bottom' = 'top'): DocTableCell => ({
     content, colSpan: 1, vMerge, borders: emptyBorders(), background: null, vAlign, widthPt: null,
@@ -908,79 +969,78 @@ describe('computePages — mid-page split of rows with vMerge restart cells (§1
     } as unknown as DocTable;
     return { type: 'table', ...t } as BodyElement;
   };
-  const tblOn = (pg: PaginatedBodyElement[]) =>
-    pg.find((el) => el.type === 'table') as (PaginatedBodyElement & DocTable) | undefined;
-  const cellSlice = (t: (PaginatedBodyElement & DocTable) | undefined, ri: number, ci: number) =>
-    (t?.rows[ri]?.cells[ci]?.content[0] as (CellElement & { lineSlice?: { start: number; end: number } }) | undefined)?.lineSlice;
+  const paragraphRanges = (cell: TableCellFragmentLayout | undefined) =>
+    (cell?.contentRanges.filter((range): range is Extract<BlockContinuationRange, { kind: 'paragraph' }> => (
+      range.kind === 'paragraph'
+    )) ?? []);
+  const sourceBlockIndices = (cell: TableCellFragmentLayout | undefined) =>
+    (cell?.contentRanges.map((range) => range.blockIndex) ?? []);
 
-  it('splits a restart-cell row mid-page and re-opens the span on the next page', () => {
+  it('splits a restart-cell row mid-page without changing its semantic merge role', () => {
     // 2 filler paragraphs (40pt) leave 60pt: the content cell fits 3 of its 4
     // lines; the 2-paragraph label (40pt) fits page 1 entirely.
     const pages = computePages([para(), para(), restartSpanTable(2)], section(), makeCtx());
 
-    const first = tblOn(pages[0]);
-    const second = tblOn(pages[1]);
+    const first = retainedTableOn(pages[0]);
+    const continuations = pages.slice(1).map(retainedTableOn)
+      .filter((table) => table !== undefined);
+    const second = continuations[0];
     expect(first).toBeDefined();
     expect(second).toBeDefined();
 
-    // Page 1: one piece row — restart label (whole) + content lines [0, 3).
-    expect(first?.rows).toHaveLength(1);
-    expect(first?.rows[0]?.cells[0]?.vMerge).toBe(true);
-    expect(first?.rows[0]?.cells[0]?.content).toHaveLength(2);
-    expect(cellSlice(first, 0, 1)).toEqual({ start: 0, end: 3 });
+    expect(first?.fragment.rows.map((row) => [row.logicalRowIndex, row.fragmentIndex]))
+      .toEqual([[0, 0]]);
+    expect(first?.fragment.rows[0]?.cells[0]?.verticalMerge).toBe('restart');
+    expect(sourceBlockIndices(first?.fragment.rows[0]?.cells[0])).toEqual([0, 1]);
+    expect(paragraphRanges(first?.fragment.rows[0]?.cells[1])).toEqual([
+      { kind: 'paragraph', blockIndex: 0, lineStart: 0, lineEnd: 3 },
+    ]);
 
-    // Page 2: the continuation piece KEEPS restart (span re-opens) with the
-    // fully-consumed label continuing as EMPTY content, then the continue rows
-    // stay chained on the same page (§17.4.85 — no break before a continue row).
-    expect(second?.rows).toHaveLength(3);
-    expect(second?.rows[0]?.cells[0]?.vMerge).toBe(true);
-    expect(second?.rows[0]?.cells[0]?.content).toHaveLength(0);
-    expect(cellSlice(second, 0, 1)).toEqual({ start: 3, end: 4 });
-    expect(second?.rows[1]?.cells[0]?.vMerge).toBe(false);
-    expect(second?.rows[2]?.cells[0]?.vMerge).toBe(false);
-
-    // Fragment layer: pieces share sourceRowIndex 0; the continuation slice's
-    // roles are restart/continue/continue.
-    const placedFirst = bodyFragmentFor(first as PaginatedBodyElement);
-    const placedSecond = bodyFragmentFor(second as PaginatedBodyElement);
-    if (placedFirst?.fragment.kind === 'table' && !('flowBounds' in placedFirst.fragment)
-      && placedSecond?.fragment.kind === 'table' && !('flowBounds' in placedSecond.fragment)) {
-      expect(placedFirst.fragment.rows.map((r) => r.sourceRowIndex)).toEqual([0]);
-      expect(placedSecond.fragment.rows.map((r) => r.sourceRowIndex)).toEqual([0, 1, 2]);
-      expect(placedSecond.fragment.rows.map((r) => r.cells[0]?.verticalMerge)).toEqual([
-        'restart', 'continue', 'continue',
-      ]);
-    } else {
-      throw new Error('expected table fragments on both pages');
-    }
+    const continuationRows = continuations.flatMap((table) => table.fragment.rows);
+    expect(continuationRows.map((row) => [row.logicalRowIndex, row.fragmentIndex]))
+      .toEqual([[0, 1], [1, 0], [2, 0]]);
+    expect(continuationRows.map((row) => row.cells[0]?.verticalMerge)).toEqual([
+      'restart', 'continue', 'continue',
+    ]);
+    expect(second?.fragment.rows[0]?.cells[0]?.contentRanges).toEqual([]);
+    expect(paragraphRanges(second?.fragment.rows[0]?.cells[1])).toEqual([
+      { kind: 'paragraph', blockIndex: 0, lineStart: 3, lineEnd: 4 },
+    ]);
+    const firstParagraph = first?.fragment.rows[0]?.cells[1]?.blocks[0]?.layout;
+    const secondParagraph = second?.fragment.rows[0]?.cells[1]?.blocks[0]?.layout;
+    expect(firstParagraph?.kind === 'paragraph' ? firstParagraph.continuation : undefined).toEqual({
+      lineStart: 0, lineEnd: 3, continuesFromPrevious: false, continuesOnNext: true,
+    });
+    expect(secondParagraph?.kind === 'paragraph' ? secondParagraph.continuation : undefined).toEqual({
+      lineStart: 3, lineEnd: 4, continuesFromPrevious: true, continuesOnNext: false,
+    });
+    const firstSemanticContinuation = continuationRows.find((row) => row.logicalRowIndex === 1);
+    expect(firstSemanticContinuation?.cells[0]?.visualMergeOwnership).toBe('continuation');
   });
 
   it('splits the restart cell content itself when it exceeds the page-1 band', () => {
     // 6 label paragraphs (120pt) cannot fit the 60pt band: 3 land on page 1 and
-    // 3 continue inside the re-opened span — independently of the content cell.
+    // 3 continue in a second fragment with the same authored restart semantics.
     const pages = computePages([para(), para(), restartSpanTable(6)], section(), makeCtx());
 
-    const first = tblOn(pages[0]);
-    const second = tblOn(pages[1]);
-    expect(first?.rows[0]?.cells[0]?.content).toHaveLength(3);
-    expect(second?.rows[0]?.cells[0]?.content).toHaveLength(3);
-    expect(cellSlice(first, 0, 1)).toEqual({ start: 0, end: 3 });
-    expect(cellSlice(second, 0, 1)).toEqual({ start: 3, end: 4 });
-    // Review note: this fixture's 120pt restart content coincidentally equals
-    // the base span height (extension zero). The band bound below keeps the
-    // case honest either way; the nonzero-extension regression lives in the
-    // dedicated double-counting test.
+    const first = retainedTableOn(pages[0]);
+    const second = retainedTableOn(pages[1]);
+    expect(sourceBlockIndices(first?.fragment.rows[0]?.cells[0])).toEqual([0, 1, 2]);
+    expect(sourceBlockIndices(second?.fragment.rows[0]?.cells[0])).toEqual([3, 4, 5]);
+    expect(paragraphRanges(first?.fragment.rows[0]?.cells[1])).toEqual([
+      { kind: 'paragraph', blockIndex: 0, lineStart: 0, lineEnd: 3 },
+    ]);
+    expect(paragraphRanges(second?.fragment.rows[0]?.cells[1])).toEqual([
+      { kind: 'paragraph', blockIndex: 0, lineStart: 3, lineEnd: 4 },
+    ]);
     for (const pg of pages) {
-      const el = tblOn(pg);
-      if (!el) continue;
-      const placed = bodyFragmentFor(el as PaginatedBodyElement);
-      if (placed?.fragment.kind !== 'table' || 'flowBounds' in placed.fragment) throw new Error('expected a table fragment');
-      expect(placed.heightPt).toBeLessThanOrEqual(100 + 1e-6);
+      const table = retainedTableOn(pg);
+      if (table) expect(table.placed.heightPt).toBeLessThanOrEqual(100 + 1e-6);
     }
   });
 
   it('re-derives the span extension once after the split (no double counting)', () => {
-    // Review repro (§17.4.85): restart content 200pt, normal cell 80pt (4
+    // ECMA-376 §17.4.84: restart content 200pt, normal cell 80pt (4
     // lines), two 20pt continue rows, 100pt page body. The ORIGINAL heights
     // resolver extended the merge-END row by 200 − (80+20+20) = 80pt; after
     // the split that extension must be RE-DERIVED against the remaining
@@ -988,78 +1048,52 @@ describe('computePages — mid-page split of rows with vMerge restart cells (§1
     // fitted content — the double count overflowed the body band and leaked
     // an extra page.
     const pages = computePages([restartSpanTable(10)], section(), makeCtx());
+    const tables = pages.map(retainedTableOn).filter((table) => table !== undefined);
 
     // Every page's table charges at most the 100pt body band.
-    for (const pg of pages) {
-      const el = tblOn(pg);
-      if (!el) continue;
-      const placed = bodyFragmentFor(el as PaginatedBodyElement);
-      if (placed?.fragment.kind !== 'table' || 'flowBounds' in placed.fragment) throw new Error('expected a table fragment');
-      expect(placed.heightPt).toBeLessThanOrEqual(100 + 1e-6);
+    for (const table of tables) {
+      expect(table.placed.heightPt).toBeLessThanOrEqual(100 + 1e-6);
     }
 
-    // Content appears exactly once: all 10 label paragraphs and the 4 content
-    // lines are placed with no duplication and no loss.
-    const labelTexts = pages.flatMap((pg) => pg.filter((el) => el.type === 'table'))
-      .flatMap((el) => (el as unknown as DocTable).rows)
-      .flatMap((r) => (r.cells[0]?.content ?? []))
-      .map((ce) => textOf(ce as unknown as PaginatedBodyElement));
-    expect(labelTexts.filter((t) => t.length > 0).sort()).toEqual(
-      Array.from({ length: 10 }, (_v, i) => `L${i}`).sort(),
-    );
-    const contentEls = pages.flatMap((pg) => pg.filter((el) => el.type === 'table'))
-      .flatMap((el) => (el as unknown as DocTable).rows)
-      .flatMap((r) => (r.cells[1]?.content ?? []))
-      .filter((ce) => textOf(ce as unknown as PaginatedBodyElement).startsWith('あ'));
-    const contentSlices = contentEls
-      .map((ce) => (ce as CellElement & { lineSlice?: { start: number; end: number } }).lineSlice)
-      .filter((s): s is { start: number; end: number } => s !== undefined);
-    if (contentSlices.length > 0) {
-      // Sliced: the 4 content lines cover [0,4) exactly once across all slices.
-      const covered = contentSlices
-        .flatMap((s) => Array.from({ length: s.end - s.start }, (_v, k) => s.start + k))
-        .sort();
-      expect(covered).toEqual([0, 1, 2, 3]);
-      expect(contentEls).toHaveLength(contentSlices.length);
-    } else {
-      // Whole: the content paragraph was placed exactly once.
-      expect(contentEls).toHaveLength(1);
-    }
+    // Stable source block/line ranges prove that every label paragraph and
+    // content line is owned by exactly one retained fragment.
+    const labelBlocks = tables.flatMap((table) => table.fragment.rows)
+      .filter((row) => row.logicalRowIndex === 0)
+      .flatMap((row) => sourceBlockIndices(row.cells[0]));
+    expect(labelBlocks).toEqual(Array.from({ length: 10 }, (_v, index) => index));
+    const coveredLines = tables.flatMap((table) => table.fragment.rows)
+      .filter((row) => row.logicalRowIndex === 0)
+      .flatMap((row) => paragraphRanges(row.cells[1]))
+      .flatMap((range) => Array.from(
+        { length: range.lineEnd - range.lineStart },
+        (_v, offset) => range.lineStart + offset,
+      ));
+    expect(coveredLines).toEqual([0, 1, 2, 3]);
   });
 
-  it('splits a row whose restart label is vAlign=center (target-class shape; placement Word-unverified)', () => {
-    // The target document class centres its restart label cells. The split must
-    // still fire (excluding center/bottom would push the whole span to the next
-    // page and regress the class); each PIECE then re-centres its own fitted
-    // content within its page-local box. Word ground truth for the per-piece
-    // vertical placement is NOT available — this pins the STRUCTURE (split
-    // occurs, content once, band respected) and documents the placement as
-    // unverified rather than asserting unknown Y positions.
+  it('preserves center vAlign on every retained piece of a split restart cell', () => {
     for (const labelParas of [2, 6]) {
       const pages = computePages([para(), para(), restartSpanTable(labelParas, 'center')], section(), makeCtx());
-      const first = tblOn(pages[0]);
-      const second = tblOn(pages[1]);
-      expect(first?.rows[0]?.cells[0]?.vMerge).toBe(true);
-      expect(second?.rows[0]?.cells[0]?.vMerge).toBe(true);
-      const labels = pages.flatMap((pg) => pg.filter((el) => el.type === 'table'))
-        .flatMap((el) => (el as unknown as DocTable).rows)
-        .flatMap((r) => (r.cells[0]?.content ?? []))
-        .map((ce) => textOf(ce as unknown as PaginatedBodyElement))
-        .filter((t) => t.length > 0);
-      expect(labels.sort()).toEqual(Array.from({ length: labelParas }, (_v, i) => `L${i}`).sort());
-      for (const pg of pages) {
-        const el = tblOn(pg);
-        if (!el) continue;
-        const placed = bodyFragmentFor(el as PaginatedBodyElement);
-        if (placed?.fragment.kind !== 'table' || 'flowBounds' in placed.fragment) throw new Error('expected a table fragment');
-        expect(placed.heightPt).toBeLessThanOrEqual(100 + 1e-6);
+      const tables = pages.map(retainedTableOn).filter((table) => table !== undefined);
+      const restartPieces = tables.flatMap((table) => table.fragment.rows)
+        .filter((row) => row.logicalRowIndex === 0);
+      expect(restartPieces.map((row) => [
+        row.fragmentIndex,
+        row.cells[0]?.verticalMerge,
+        row.cells[0]?.vAlign,
+      ])).toEqual([
+        [0, 'restart', 'center'],
+        [1, 'restart', 'center'],
+      ]);
+      expect(restartPieces.flatMap((row) => sourceBlockIndices(row.cells[0])))
+        .toEqual(Array.from({ length: labelParas }, (_v, index) => index));
+      for (const table of tables) {
+        expect(table.placed.heightPt).toBeLessThanOrEqual(100 + 1e-6);
       }
     }
   });
 
-  it('still refuses to split a row containing a CONTINUE cell', () => {
-    // Make the CONTINUE row overflow: its non-merge cell wraps to 4 lines. The
-    // row belongs to a span started ABOVE it, so it must move whole.
+  it('derives page-local ownership when a semantic continue cell starts a fragment', () => {
     const label = mkCell([shortPara('L0')], true);
     const content = mkCell([shortPara('c0')], null);
     const tallContinue: DocTableRow = {
@@ -1084,13 +1118,16 @@ describe('computePages — mid-page split of rows with vMerge restart cells (§1
       section(),
       makeCtx(),
     );
-    // The continue row never splits: no cell of any emitted slice of it carries
-    // a lineSlice.
-    const allRows = pages.flatMap((pg) => pg.filter((el) => el.type === 'table'))
-      .flatMap((el) => (el as unknown as DocTable).rows);
-    const sliced = allRows.some((r) => r.cells.some((c) =>
-      c.content.some((ce) => (ce as CellElement & { lineSlice?: unknown }).lineSlice !== undefined)));
-    expect(sliced).toBe(false);
+    const first = retainedTableOn(pages[0]);
+    const second = retainedTableOn(pages[1]);
+    expect(first?.fragment.rows.map((row) => row.logicalRowIndex)).toEqual([0]);
+    expect(first?.fragment.rows[0]?.cells[0]?.verticalMerge).toBe('restart');
+    expect(second?.fragment.rows.map((row) => row.logicalRowIndex)).toEqual([1]);
+    expect(second?.fragment.rows[0]?.cells[0]?.verticalMerge).toBe('continue');
+    expect(second?.fragment.rows[0]?.cells[0]?.visualMergeOwnership).toBe('continuation');
+    expect(second?.fragment.rows[0]?.cells[1]?.contentRanges).toEqual([
+      { kind: 'whole', blockIndex: 0 },
+    ]);
   });
 });
 

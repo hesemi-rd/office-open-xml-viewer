@@ -2,7 +2,7 @@ import type { CellElement, DocParagraph, DocTable, DocTableCell } from '../types
 import type { FlowFragment } from '../layout-fragments.js';
 import type { ParagraphLayout } from './types.js';
 import { paragraphGapPt } from './paragraph-spacing.js';
-import { paragraphFragmentAdvancePt, tableFragmentHeightPt } from '../layout-fragments.js';
+import { paragraphFragmentAdvancePt } from '../layout-fragments.js';
 import {
   resolveParagraphBorderEdges,
   type ParagraphBorderEdges,
@@ -118,7 +118,7 @@ export function resolveRetainedCellBlockPlacement(
 
     if (previousParagraph) cursorPt += previousAfterPt;
     const advancePt = block.kind === 'table'
-      ? ('flowBounds' in block ? block.advancePt : tableFragmentHeightPt(block))
+      ? block.advancePt
       : paragraphFragmentAdvancePt(block);
     blockPlacements.push({ offsetPt: cursorPt, advancePt });
     firstInkTopPt ??= cursorPt;

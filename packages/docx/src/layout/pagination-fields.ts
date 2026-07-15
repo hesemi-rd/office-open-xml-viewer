@@ -1,6 +1,7 @@
 import { convergeLayout, type LayoutIteration } from './convergence.js';
 import { stableFingerprint } from './fingerprint.js';
 import type { FlowFragment } from '../layout-fragments.js';
+import type { TableRowFragmentLayout } from './table-pagination.js';
 import type {
   BodyElement,
   CellElement,
@@ -150,24 +151,6 @@ export function paginationFieldFlowGeometry(fragment: FlowFragment): unknown {
     };
   }
   if (fragment.kind === 'table') {
-    if (!('flowBounds' in fragment)) {
-      return {
-        kind: fragment.kind,
-        columnWidthsPt: fragment.columnWidthsPt,
-        continuesFromPreviousPage: fragment.continuesFromPreviousPage,
-        continuesOnNextPage: fragment.continuesOnNextPage,
-        rows: fragment.rows.map((row) => ({
-          sourceRowIndex: row.sourceRowIndex,
-          heightPt: row.heightPt,
-          repeatedHeader: row.repeatedHeader,
-          cells: row.cells.map((cell) => ({
-            verticalMerge: cell.verticalMerge,
-            boxHeightPt: cell.boxHeightPt,
-            blocks: cell.blocks.map(paginationFieldFlowGeometry),
-          })),
-        })),
-      };
-    }
     return {
       kind: fragment.kind,
       flowBounds: fragment.flowBounds,
@@ -176,6 +159,14 @@ export function paginationFieldFlowGeometry(fragment: FlowFragment): unknown {
       columnWidthsPt: fragment.columnWidthsPt,
       borders: fragment.borders,
       rows: fragment.rows.map((row) => ({
+        ...('occurrenceId' in row ? {
+          logicalRowIndex: (row as TableRowFragmentLayout).logicalRowIndex,
+          fragmentIndex: (row as TableRowFragmentLayout).fragmentIndex,
+          ownership: (row as TableRowFragmentLayout).ownership,
+          occurrenceId: (row as TableRowFragmentLayout).occurrenceId,
+          physicalPageIndex: (row as TableRowFragmentLayout).physicalPageIndex,
+          displayPageNumber: (row as TableRowFragmentLayout).displayPageNumber,
+        } : {}),
         flowBounds: row.flowBounds,
         contentHeightPt: row.contentHeightPt,
         cells: row.cells.map((cell) => ({

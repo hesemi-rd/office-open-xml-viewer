@@ -669,7 +669,7 @@ Expected: tests pass, parser input remains deeply equal before/after layout and
 paint, and every remaining `rg` match is owned by A5's floating/page-split
 migration rather than ordinary or nested table acquisition.
 
-- [ ] **Step 5: Commit, independently review, fix, and merge PR A4**
+- [x] **Step 5: Commit, independently review, fix, and merge PR A4**
 
 Commit subject: `refactor(docx): retain one table layout acquisition`.
 Use the roadmap review gate.
@@ -679,9 +679,17 @@ Use the roadmap review gate.
 **Files:**
 
 - Modify: `packages/docx/src/layout/table.ts`
+- Create: `packages/docx/src/layout/table-pagination.ts`
 - Create: `packages/docx/src/layout/table-pagination.test.ts`
+- Modify: `packages/docx/src/layout/table-acquisition.ts`
+- Modify: `packages/docx/src/layout/types.ts`
+- Modify: `packages/docx/src/parser-model.ts`
+- Modify: `packages/docx/parser/src/parser.rs`
+- Modify: `packages/docx/parser/src/styles.rs`
+- Modify: `packages/docx/parser/src/types.rs`
 - Modify: `packages/docx/src/table-fragments.ts`
 - Modify: `packages/docx/src/renderer.ts`
+- Modify: `packages/docx/src/float-table-geometry.ts`
 - Modify: `packages/docx/src/float-table-geometry.test.ts`
 - Modify: `packages/docx/src/float-table-page-fit.test.ts`
 - Modify: `packages/docx/src/float-table-width.test.ts`
@@ -690,28 +698,58 @@ Use the roadmap review gate.
 
 **Interfaces:**
 
-- Consumes: `TableLayout` from A4 and current float exclusion inputs.
-- Produces: `TableFragmentLayout`, per-cell continuation ranges, `splitTableLayout`, and floating `TableLayout` placements using the same node type.
+- Consumes: A4's one `RetainedTableAcquisition` (`TableLayoutInput` plus its
+  final `TableLayout` and nested acquisitions), page/column availability, and
+  current page-field occurrence context.
+- Produces: `TableFragmentLayout`, discriminated per-cell continuation ranges,
+  an immutable fragment cursor, `takeTableFragment`, and floating placements
+  whose child is the same retained table node used by in-flow content.
 
 **Specification evidence:** ECMA-376 §17.4.6 (`w:cantSplit`), §17.4.49
-(`w:tblHeader`), §17.4.84 (`w:vMerge`), and §17.4.57 (`w:tblpPr`) define
-row splitting, repeated headers, merged-cell continuation, and floating table
-positioning. Office-observed mid-cell pagination behavior must be isolated and
-documented if the normative text does not determine a unique split.
+(`w:tblHeader`), §17.4.84 (`w:vMerge`), §17.4.57 (`w:tblpPr`), §17.17.4
+(`CT_OnOff`), and §17.7.6.10/.11 (table-style row properties) define row
+splitting, the leading repeated-header prefix, merged-cell semantics, floating
+table positioning, and effective boolean properties. `[MS-OI29500]` 2.1.120
+defines Word's clipping of an over-page `cantSplit` row; 2.1.162 records Word's
+`tblpPr` defaults/ignored cases and coordinate behavior. The standard permits a
+row to split but does not choose synchronized per-cell block/line breakpoints,
+fragment-local vAlign, page-cut borders, or floating overflow policy. Those are
+deterministic fragment policies, not normative claims; any Word compatibility
+choice must be registered with synthetic evidence rather than a private sample.
 
 ```ts
-export interface BlockContinuationRange { readonly blockIndex: number; readonly lineStart?: number; readonly lineEnd?: number; readonly childFragmentIndex?: number }
+export type BlockContinuationRange =
+  | Readonly<{ kind: 'whole'; blockIndex: number }>
+  | Readonly<{ kind: 'paragraph'; blockIndex: number; lineStart: number; lineEnd: number }>
+  | Readonly<{ kind: 'nested-table'; blockIndex: number; childFragmentIndex: number }>;
 export interface TableCellFragmentLayout { readonly logicalCellIndex: number; readonly contentRanges: readonly BlockContinuationRange[]; readonly flowBounds: LayoutRect }
 export interface TableRowFragmentLayout { readonly logicalRowIndex: number; readonly fragmentIndex: number; readonly ownership: 'source' | 'repeated-header'; readonly cells: readonly TableCellFragmentLayout[]; readonly flowBounds: LayoutRect }
 export interface TableFragmentLayout { readonly tableId: LayoutNodeId; readonly rows: readonly TableRowFragmentLayout[]; readonly continuesFromPreviousPage: boolean; readonly continuesOnNextPage: boolean }
-export function splitTableLayout(table: TableLayout, availableHeightPt: number): readonly TableFragmentLayout[];
+export function takeTableFragment(acquisition: RetainedTableAcquisition, cursor: TableFragmentCursor, context: TableFragmentContext): TableFragmentResult;
 ```
+
+**Paused implementation checkpoint (2026-07-15):** Parser row facts, immutable
+table acquisition, page-local retained pagination, repeated-header/page-field
+occurrences, retained body/floating paint, and removal of the old
+`TableFragment` model, runtime stamps, reuse flag, and split fallbacks are in
+place. Nested text-anchored floating tables share one collision-adjusted box for
+layout and paint. Resume with two deliberately unfinished review items before
+the A5 gate: (1) resolve page/margin-anchored nested-table exclusions from final
+page/column frames and reacquire the anchor paragraph before row selection,
+without mutating the live float registry during fit probes; (2) migrate the
+seven remaining old-suite contracts covering nested structured cloning,
+independent layout runs, page-local border footprints, flow-versus-ink
+allocation, repeated-header boundary fit, and split-row boundary advance.
+Checkpoint verification: TypeScript build and 82 focused retained-table tests
+pass; no PR or merge has been created for A5.
 
 - [ ] **Step 1: Write failing continuation and floating tests**
 
-Cover repeated header rows, `cantSplit`, mid-cell paragraph continuation,
-vertical merge continuation, nested table continuation, negative table indent,
-floating table wrapping, and a float that must move to the next page. Include a
+Cover the full `CT_OnOff` matrix and style cascade for `tblHeader`/`cantSplit`,
+`exact × cantSplit`, leading and non-leading headers, mid-cell paragraph
+continuation, vertical merge continuation without semantic-role mutation,
+nested table continuation, negative table indent, floating table wrapping, and
+a float that must move to the next page. Include a
 `PAGE` field in a repeated header and assert every emitted header occurrence is
 acquired with its own physical/display page context. Also place `PAGE` in a
 non-leading cell block that continues onto another page and assert its retained
@@ -720,7 +758,11 @@ block index. Assert
 logical rows may have several disjoint fragments, per-cell content ranges are
 disjoint and exhaustive, repeated headers use `repeated-header` ownership and do
 not claim source content twice, fragments reuse the same resolved columns, and
-ordinary flow bounds do not enter the bottom margin.
+ordinary flow bounds do not enter the bottom margin. Assert `tblHeader` and
+`exact` do not imply `cantSplit`; a Word-compatible over-page `cantSplit` row is
+clipped per `[MS-OI29500]` 2.1.120. Floating headers repeat because §17.4.49 does
+not exclude floating tables. Replace midpoint wrap-side selection with the
+existing widest-free-gap geometry.
 
 - [ ] **Step 2: Run tests to verify Red**
 
@@ -734,10 +776,22 @@ Expected: legacy-gated floating cases do not produce `TableLayout` continuations
 
 - [ ] **Step 3: Implement splits as immutable views over retained geometry**
 
-Split only at legal row/cell/line boundaries, repeat the resolved header layout,
-and create fragment-local translated bounds without recomputing columns or text.
-Represent floating placement as a `DrawingLayout`-style placement wrapper whose
-child is the same `TableLayout` used for in-flow content.
+Retain the plain `TableLayoutInput` beside its final A4 `TableLayout`; recursively
+retain nested acquisitions by layout ID. Split only at row, cell-block,
+paragraph-line, and nested-fragment boundaries. Re-run table row/border geometry
+for a fragment from the retained input, but never resolve columns or shape
+ordinary text again. Reacquire only page-dependent occurrences (notably repeated
+header `PAGE`) with the destination page context and include them in field
+convergence. A vMerge continuation receives a fragment-local visual ownership
+view while its source semantic role and restart-only content ownership remain
+unchanged. Represent floating placement as a `DrawingLayout`-style placement
+wrapper whose child is the same retained table node used for in-flow content.
+
+Keep `computePages` unchanged except for the mechanically checked replacement of
+its two direct legacy-stamp reads with one retained-slice size lookup. Extend the
+boundary checker with a negative test that rejects every other `computePages`
+change. Remove private-sample comments and correct historical misreferences:
+`vMerge` is §17.4.84 and `tblHeader` is §17.4.49.
 
 Delete `tableRequiresLegacyPaint`, `isFragmentPaintableTable`,
 `tableReuseEnabled`, `renderTableFragment`, and the legacy table-paint selection.

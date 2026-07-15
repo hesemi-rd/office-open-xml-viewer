@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { computePages } from './renderer.js';
+import { bodyFragmentFor, computePages } from './renderer.js';
+import type { TableFragmentLayout } from './layout/table-pagination.js';
 import type {
   BodyElement,
   CellElement,
@@ -15,17 +16,12 @@ import type {
 // Unit tests for the page-fit pagination of a page-overflowing FLOATING table
 // (ECMA-376 §17.4.57 `<w:tblpPr>`).
 //
-// HISTORY: PR #691 shipped "relocate the whole undivided floating table to the
-// next page". That was measured to be WRONG against Word: the Word-exported PDFs
-// of private/sample-18 + sample-21 (pdftotext bbox — see issue #674's reopening
-// comment) show Word SPLITS a page-overflowing vertAnchor="text" floating table
-// ROW BY ROW like a block table, spilling the remainder onto continuation pages,
-// and flows the anchor paragraph beside the FINAL continuation band from that
-// page's body TOP. The old whole-table-relocation tests are therefore replaced
-// here with row-split assertions. A page/margin-anchored floating table is still
-// NOT split — its absolute in-page y is instead clamped up into its container by
-// computeFloatTableBox (geometry; see float-table-geometry.test.ts), so it stays a
-// single element on its page.
+// A page-overflowing vertAnchor="text" floating table follows Word's observed
+// row-pagination behavior: it spills row-by-row onto continuation pages and the
+// anchor paragraph flows beside the terminal continuation band from that page's
+// body top. A page/margin-anchored floating table is still not split when its
+// complete box fits the page's text region; computeFloatTableBox clamps that box
+// into its absolute container instead.
 //
 // The stub canvas mirrors frame-keep-with-anchor.test.ts / pagination.test.ts:
 // glyph advance = charCount × fontPx and the font box = 0.8/0.2 em, so a single
@@ -145,6 +141,32 @@ function floatTableRows(tp: TblpPr, n: number, rowHPt: number): BodyElement {
     tblpPr: tp,
   };
   return { type: 'table', ...t } as unknown as BodyElement;
+}
+
+function floatingTableWithHeader(
+  tp: TblpPr,
+  bodyRowCount: number,
+  rowHeightPt: number,
+): BodyElement {
+  const rows = [
+    { ...row(rowHeightPt, 'header'), isHeader: true } as DocTableRow,
+    ...Array.from(
+      { length: bodyRowCount },
+      (_value, index) => row(rowHeightPt, `r${index + 1}`),
+    ),
+  ];
+  const table: DocTable = {
+    colWidths: [80],
+    rows,
+    borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
+    cellMarginTop: 0,
+    cellMarginBottom: 0,
+    cellMarginLeft: 0,
+    cellMarginRight: 0,
+    jc: 'left',
+    tblpPr: tp,
+  };
+  return { type: 'table', ...table } as unknown as BodyElement;
 }
 
 function borderedFloatTableRows(
@@ -271,6 +293,13 @@ const colOf = (el: PaginatedBodyElement): number | undefined => el.colIndex;
 const floatTableEl = (page: PaginatedBodyElement[]): PaginatedBodyElement | undefined =>
   page.find(isFloatTable);
 
+const retainedFloatFragment = (element: PaginatedBodyElement): TableFragmentLayout => {
+  const placed = bodyFragmentFor(element);
+  expect(placed?.fragment.kind).toBe('table');
+  expect(placed?.fragment.kind === 'table' && 'flowBounds' in placed.fragment).toBe(true);
+  return placed!.fragment as TableFragmentLayout;
+};
+
 describe('computePages — floating-table page-fit / row-split (§17.4.57, Word ground truth)', () => {
   // Content band 160×100, bodyTop 20. A vertAnchor="text" table's first slice sits
   // at its in-flow anchor (y=20N after N leading 20pt lines); it overflows once
@@ -319,7 +348,8 @@ describe('computePages — floating-table page-fit / row-split (§17.4.57, Word 
       expect(slices).toHaveLength(3);
       expect(pages.map(floatRowsOn).filter((labels) => labels.length > 0))
         .toEqual([['r1'], ['r2'], ['r3']]);
-      expect(slices.map((slice) => slice.tableRowHeightsPt))
+      expect(slices.map((slice) =>
+        retainedFloatFragment(slice).rows.map((rowLayout) => rowLayout.advancePt)))
         .toEqual([[24], [24], [24]]);
     },
   );
@@ -338,9 +368,34 @@ describe('computePages — floating-table page-fit / row-split (§17.4.57, Word 
 
     expect(slices.map((slice) => (slice as unknown as DocTable).rows.length))
       .toEqual([4, 1]);
-    expect(slices.map((slice) =>
-      slice.tableRowHeightsPt?.reduce((sum, height) => sum + height, 0)))
+    expect(slices.map((slice) => retainedFloatFragment(slice).advancePt))
       .toEqual([28, 22]);
+  });
+
+  it('repeats leading tblHeader rows with page-local ownership on floating continuations', () => {
+    const body = [
+      para({ text: 'a' }),
+      para({ text: 'b' }),
+      floatingTableWithHeader(
+        tblp({ vertAnchor: 'text', tblpY: 0 }),
+        5,
+        20,
+      ),
+      para({ text: 'anchor' }),
+    ];
+
+    const pages = computePages(body, section(), makeCtx());
+    const fragments = pages.flatMap((page) =>
+      page.filter(isFloatTable).map(retainedFloatFragment));
+
+    expect(pages).toHaveLength(2);
+    expect(fragments.map((fragment) => fragment.rows.map((rowLayout) => [
+      rowLayout.logicalRowIndex,
+      rowLayout.ownership,
+    ]))).toEqual([
+      [[0, 'source'], [1, 'source'], [2, 'source']],
+      [[0, 'repeated-header'], [3, 'source'], [4, 'source'], [5, 'source']],
+    ]);
   });
 
   it('moves a following block table past a page-filling float across a continuous section', () => {
@@ -386,12 +441,11 @@ describe('computePages — floating-table page-fit / row-split (§17.4.57, Word 
     expect(pages[1].filter((el) => el.type === 'table' && !isFloatTable(el))).toHaveLength(1);
   });
 
-  it('(b) splits a tall floating table across pages until every row is placed (sample-21 shape)', () => {
+  it('(b) splits a tall floating table across pages until every row is placed', () => {
     // A single leading 20pt line (anchor at y=20) then an 8-row table (20pt each ⇒
     // 160pt total, > the 100pt content area, so it needs 2 pages). Page 1's band
     // runs from the anchor (y=20) to the bottom (100) = 80pt ⇒ 4 rows (r1–r4);
-    // page 2 (fresh, full 100pt band) takes the remaining 4 (r5–r8). This is the
-    // reduced analogue of sample-21 (800pt/32 rows → r1–r23 then r24–r32).
+    // page 2 (fresh, full 100pt band) takes the remaining 4 (r5–r8).
     const body = [
       para({ text: 'a' }),
       floatTableRows(tblp({ vertAnchor: 'text', tblpY: 0 }), 8, 20),
@@ -453,8 +507,8 @@ describe('computePages — floating-table page-fit / row-split (§17.4.57, Word 
   it('(f) keeps a text-anchored floating table as ONE element when every row fits (no split)', () => {
     // Only 1 leading line (anchor at y=20). A 3-row 20pt table (60pt) fits within
     // [20,100] ⇒ no split. Everything stays on page 1 as a single float element
-    // (sample-11 shape: a small vertAnchor="text" float near the page top must not
-    // be divided or relocated).
+    // A small vertAnchor="text" float near the page top must not be divided or
+    // relocated.
     const body = [
       para({ text: 'a' }),
       floatTableRows(tblp({ vertAnchor: 'text', tblpY: 1 }), 3, 20),
@@ -556,11 +610,10 @@ describe('computePages — floating-table page-fit / row-split (§17.4.57, Word 
     expect(floatCount).toBe(1);
   });
 
-  it('(d2) SPLITS a page-anchored floating table that is TALLER than the body content area (sample-28 p.15 shape)', () => {
+  it('(d2) SPLITS a page-anchored floating table that is TALLER than the body content area', () => {
     // vertAnchor="page", tblpY=10: 6 rows × 30pt = 180pt total. The body content
     // area is 100pt (pageH 140 − margins 20+20). A page-anchored table taller than
-    // the text region CANNOT fit even clamped to the top — so, like Word (sample-28
-    // p.15 competitor-info form: PDF splits it across pages 15→16), it ROW-SPLITS.
+    // the text region cannot fit even when clamped to the top, so Word row-splits it.
     // Slice 1 sits at its absolute tblpY (page-y 10 ⇒ content-relative −10, i.e. it
     // starts in the top margin band down through the body); continuation slices flow
     // from the next page's body top (tblpY=0). This is distinct from (d): there the
@@ -620,9 +673,9 @@ describe('computePages — floating-table page-fit / row-split (§17.4.57, Word 
     }
   });
 
-  it('(g) DEFERS a page-anchored floating table to the next page when its raw band intersects another table float already on the page (sample-28 projects-form shape)', () => {
-    // ── Two page-anchored floating tables whose raw bands collide (§17.4.56 / Word
-    //    ground truth, sample-28 pp.16→17) ──────────────────────────────────────
+  it('(g) DEFERS a page-anchored floating table when its raw band intersects an existing table float', () => {
+    // Two page-anchored floating tables whose raw bands collide (§17.4.56 and
+    // observed Word behavior).
     // Content band is 100pt (pageH 140 − margins 20+20), bodyTop 20.
     //
     // Table A: vertAnchor="page", tblpY=10, 4 rows × 30pt = 120pt > 100pt ⇒ it
@@ -636,10 +689,8 @@ describe('computePages — floating-table page-fit / row-split (§17.4.57, Word 
     //
     // If B is placed on page 2 (where A4's continuation band sits at content-y
     // 0 → 30), B's raw band (content-y 5 → 95) INTERSECTS A4's band — two floating
-    // tables overlapping. Word's PDF (sample-28: the previous-projects experience
-    // table lands on a FRESH page after the competitor-form residue, never stacked
-    // over it) defers the whole of B to the next page, where its absolute tblpY=25
-    // no longer collides with any other table float.
+    // tables overlapping. Word defers the whole of B to the next page, where its
+    // absolute tblpY=25 no longer collides with another table float.
     const body = [
       para({ text: 'a' }),
       floatTableRows(tblp({ vertAnchor: 'page', tblpY: 10 }), 4, 30), // Table A → r1..r4
@@ -648,7 +699,6 @@ describe('computePages — floating-table page-fit / row-split (§17.4.57, Word 
       para({ text: 'end' }),
     ];
     const pages = computePages(body, section(), makeCtx());
-
     // Page 2 (index 1) carries A's continuation (A4) but MUST NOT also carry any of
     // Table B — B is deferred so it never overlaps A4's band.
     const bandCollisionPage = pages[1];

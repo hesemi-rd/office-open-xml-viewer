@@ -1,4 +1,8 @@
-import type { ParagraphLayout, TableLayout } from '../layout/types.js';
+import type {
+  ParagraphLayout,
+  ResolvedFloatingTablePlacementLayout,
+  TableLayout,
+} from '../layout/types.js';
 import { composeAffine, scaleAffine, translationAffine } from './affine.js';
 import { paintStrokeSegment } from './canvas-border.js';
 import { paintParagraphLayout } from './canvas-text.js';
@@ -50,8 +54,11 @@ function paintPlacedChild(
   }
 }
 
-/** Paint stored table geometry. No inheritance, sizing, shaping, or conflict resolution occurs here. */
-export function paintTableLayout(node: TableLayout, context: CanvasPaintContext): void {
+function paintTableContents(
+  node: TableLayout,
+  context: CanvasPaintContext,
+  floatingTables: readonly ResolvedFloatingTablePlacementLayout[],
+): void {
   for (const row of node.rows) {
     for (const cell of row.cells) {
       if (cell.verticalMerge === 'continue') continue;
@@ -98,7 +105,48 @@ export function paintTableLayout(node: TableLayout, context: CanvasPaintContext)
       }
     }
   }
+  paintResolvedFloatingTablePlacements(floatingTables, context);
   for (const border of node.borders) paintStrokeSegment(border, context);
+}
+
+/** Paint stored table geometry. No inheritance, sizing, shaping, or conflict resolution occurs here. */
+export function paintTableLayout(
+  node: TableLayout,
+  context: CanvasPaintContext,
+  floatingTables: readonly ResolvedFloatingTablePlacementLayout[] = [],
+): void {
+  if (!node.clipBounds) {
+    paintTableContents(node, context, floatingTables);
+    return;
+  }
+  context.ctx.save();
+  try {
+    context.ctx.beginPath();
+    context.ctx.rect(
+      node.clipBounds.xPt,
+      node.clipBounds.yPt,
+      node.clipBounds.widthPt,
+      node.clipBounds.heightPt,
+    );
+    context.ctx.clip();
+    paintTableContents(node, context, floatingTables);
+  } finally {
+    context.ctx.restore();
+  }
+}
+
+/** Paint only point-space placements already resolved by the layout adapter. */
+export function paintResolvedFloatingTablePlacements(
+  placements: readonly ResolvedFloatingTablePlacementLayout[],
+  context: CanvasPaintContext,
+): void {
+  const parentTranslation = context.layoutTranslationPt ?? { xPt: 0, yPt: 0 };
+  for (const placement of placements) {
+    paintPlacedChild(placement.child, {
+      xPt: placement.xPt - parentTranslation.xPt,
+      yPt: placement.yPt - parentTranslation.yPt,
+    }, context);
+  }
 }
 
 /** Bridge an unscaled renderer canvas to the retained point-space table painter. */
@@ -106,6 +154,7 @@ export function paintPlacedTableLayout(
   node: TableLayout,
   placement: Readonly<{ xPt: number; yPt: number }>,
   context: CanvasPaintContext,
+  floatingTables: readonly ResolvedFloatingTablePlacementLayout[] = [],
 ): void {
   const dxPt = placement.xPt - node.flowBounds.xPt;
   const dyPt = placement.yPt - node.flowBounds.yPt;
@@ -117,7 +166,7 @@ export function paintPlacedTableLayout(
   try {
     context.ctx.translate(dxPt * context.scale, dyPt * context.scale);
     context.ctx.scale(context.scale, context.scale);
-    paintTableLayout(node, {
+    const placedContext: CanvasPaintContext = {
       ...context,
       pointToCss,
       textRunTransform: {
@@ -126,7 +175,8 @@ export function paintPlacedTableLayout(
         scale: context.scale,
       },
       layoutTranslationPt: { xPt: dxPt, yPt: dyPt },
-    });
+    };
+    paintTableLayout(node, placedContext, floatingTables);
   } finally {
     context.ctx.restore();
   }

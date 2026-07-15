@@ -9,29 +9,20 @@ import { testFontSnapshot } from './layout/test-font-snapshot.js';
 import type { BodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, DocxDocumentModel, SectionProps, PaginatedBodyElement } from './types';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Phase 4-1 B2 T2 — TABLE-CELL paragraph line reuse (compute-once).
+// A5 P4 — retained TABLE-CELL paragraph layout.
 //
-// The paginator lays every cell paragraph out at scale 1 while sizing table rows
-// (computeTablePtLayout → resolveTableRowHeights → measureCellContentHeightPx →
-// measureParaHeight). That measure now STAMPS the scale-1 lines + layout inputs
-// onto the cell paragraph, and `renderParagraph`'s existing reuse gate consumes
-// them at paint — so cell paragraphs no longer re-run layoutLines twice
-// (measure + paint), exactly as body paragraphs already did (Stage 1/2).
+// Pagination acquires each cell paragraph once in scale-1 point geometry and keeps
+// it inside TableLayout/TableFragmentLayout. Paint consumes that retained tree and
+// never writes line caches onto the parsed document model.
 //
 // These tests pin, using the SAME cross-context flow the public renderPage uses
 // (paginate ctx from OffscreenCanvas(1,1) ≠ paint ctx), that:
-//   (a) the reuse actually FIRES for cell paragraphs (paint makes strictly fewer
-//       measureText calls with reuse ON than OFF) AND is byte-identical (same
-//       paint stream);
-//   (b) a cell whose paint width no longer matches the stamp (a column re-resolved
-//       to a different width) RECOMPUTES — the self-verifying gate rejects the
-//       stale stamp — while still painting an identical stream to the recompute;
+//   (a) cell paragraph paint makes zero measureText calls;
+//   (b) retained acquisition does not create obsolete parser-side line stamps;
 //   (c) the wrap PARTITION is zoom-invariant: the same table painted at scale 1
 //       and at scale 0.75 breaks each cell paragraph at the same points (line
-//       count + relative segment order), so a column shrunk by ×scale partitions
-//       identically (Stage-2 contract);
-//   (d) NESTED tables (a cell containing a table) recurse through the same measure
-//       path, so their inner cell paragraphs are stamped and reused too.
+//       count + relative segment order);
+//   (d) nested tables retain their inner cell paragraph geometry too.
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface Call { op: 'fill' | 'stroke' | 'img'; text: string; x: number; y: number; font: string; }
@@ -67,10 +58,8 @@ function makeMeasureStubCtx(): CanvasRenderingContext2D {
   getContext() { return makeMeasureStubCtx(); }
 };
 
-/** A recording paint ctx with a font-size-LINEAR advance, so scale-1 and paint
- *  lines are bit-identical (this suite is about the reuse mechanism, not hinting).
- *  Records every text/image draw + counts measureText calls (the proxy for the
- *  layoutLines wrap work the stamp eliminates). */
+/** A recording paint ctx with a font-size-LINEAR advance. Records every
+ *  text/image draw and counts forbidden paint-time measureText calls. */
 function makeRecordingCanvas(): { canvas: HTMLCanvasElement; calls: Call[]; measures: () => number } {
   let font = '10px serif';
   const calls: Call[] = [];
@@ -241,24 +230,20 @@ function tableMeasurementGeometry() {
   const model = doc([wrapTable(8) as unknown as BodyElement]);
   const pages = paginateDocument(model, createLayoutServices(model, { localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]) }));
   const tables = pages.flatMap((page) => page.filter((el) => el.type === 'table'));
+  const fragments = tables.map((table) => {
+    const placed = bodyFragmentFor(table);
+    if (placed?.fragment.kind !== 'table' || !('flowBounds' in placed.fragment)) {
+      throw new Error('expected retained TableLayout/TableFragmentLayout');
+    }
+    return placed.fragment;
+  });
   return {
     pageCount: pages.length,
-    rowHeightsPt: tables.flatMap((table) => table.tableRowHeightsPt ?? []),
-    cellLineCounts: tables.flatMap((table) => {
-      const placed = bodyFragmentFor(table);
-      if (placed?.fragment.kind === 'table') {
-        return 'flowBounds' in placed.fragment
-          ? placed.fragment.rows.flatMap((row) =>
-              row.cells.flatMap((cell) => cell.blocks.map((block) =>
-                block.layout.kind === 'paragraph' ? block.layout.lines.length : null,
-              )))
-          : placed.fragment.rows.flatMap((row) =>
-              row.cells.flatMap((cell) => cell.blocks.map((block) =>
-                block.kind === 'paragraph' ? block.lines.length : null,
-              )));
-      }
-      return [];
-    }),
+    rowHeightsPt: fragments.flatMap((fragment) => fragment.rows.map((tableRow) => tableRow.heightPt)),
+    cellLineCounts: fragments.flatMap((fragment) => fragment.rows.flatMap((tableRow) =>
+      tableRow.cells.flatMap((tableCell) => tableCell.blocks.map((block) =>
+        block.layout.kind === 'paragraph' ? block.layout.lines.length : null,
+      )))),
   };
 }
 
@@ -332,11 +317,9 @@ describe('table-cell paragraph line reuse — B2 T2', () => {
     }
   });
 
-  it('(d) nested table: inner-cell paragraphs are stamped and reused too', async () => {
+  it('(d) nested table: inner-cell paragraphs are retained and painted measure-free', async () => {
     // Outer cell contains a nested table whose own cells wrap. The nested table's
-    // cell paragraphs are measured at scale 1 through the SAME recursion
-    // (measureCellElementHeight → estimateTableHeight → measureParaHeight), so they
-    // get stamped and must reuse at paint.
+    // cell paragraphs are acquired at scale 1 through the same retained recursion.
     const inner = tableOf([
       row([cell('inner ' + Array.from({ length: 6 }, (_, i) => `x${i}`).join(' '), 100)]),
       row([cell('more ' + Array.from({ length: 6 }, (_, i) => `y${i}`).join(' '), 100)]),
@@ -352,7 +335,7 @@ describe('table-cell paragraph line reuse — B2 T2', () => {
     expect(drewInner).toBe(true);
   });
 
-  it('(e) same page painted twice is identical (shared stamped array never mutated by draw)', async () => {
+  it('(e) same page painted twice is identical (the retained tree is not mutated)', async () => {
     const model = doc([wrapTable(16) as unknown as BodyElement]);
     const pages = paginateDocument(model, createLayoutServices(model, { localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]) }));
     const first = await renderAll(model, pages, 300);

@@ -44,6 +44,49 @@ function initializeRepository() {
   return root;
 }
 
+const computePagesTableStampBaseline = `
+export function computePages(sp: any, measureState: any) {
+  const tableW = (sp.tableColWidthsPt ?? []).reduce((s, w) => s + w, 0) * measureState.scale;
+  const sliceH = (sp.tableRowHeightsPt ?? []).reduce((s, h) => s + h, 0) * measureState.scale;
+  return [tableW, sliceH];
+}
+export function computeTableLayout() { return []; }
+`;
+
+const computePagesRetainedSliceMigration = `
+export function computePages(sp: any, measureState: any) {
+  const { widthPx: tableW, heightPx: sliceH } = retainedTableSliceSize(
+    sp, measureState.scale,
+  );
+  return [tableW, sliceH];
+}
+export function computeTableLayout() { return []; }
+`;
+
+function initializeComputePagesTableStampRepository() {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-compute-pages-table-stamp-'));
+  write(root, 'packages/docx/src/renderer.ts', computePagesTableStampBaseline);
+  write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
+  write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
+  git(root, 'init', '-b', 'main');
+  git(root, 'config', 'user.email', 'boundary-test@example.invalid');
+  git(root, 'config', 'user.name', 'Boundary Test');
+  git(root, 'add', '.');
+  git(root, 'commit', '-m', 'base');
+  git(root, 'switch', '-c', 'a1');
+  establishA1Baseline(root);
+  return root;
+}
+
+function removeComputePagesTableStampCounts(root) {
+  const baselinePath = join(root, 'scripts/docx-layout-boundary-baseline.json');
+  const baseline = JSON.parse(readFileSync(baselinePath, 'utf8'));
+  for (const symbol of ['tableColWidthsPt', 'tableRowHeightsPt']) {
+    delete baseline.legacySymbolCounts[`packages/docx/src/renderer.ts#${symbol}`];
+  }
+  writeFileSync(baselinePath, `${JSON.stringify(baseline, null, 2)}\n`);
+}
+
 const computePagesAcquisitionBaseline = `
 const EMPTY_HEADERS_FOOTERS = {};
 function buildMeasureState(ctx: unknown, section: unknown, fontFamilyClasses: unknown, documentSettings: unknown, resolvedLocalFonts: unknown) { return { ctx, section, fontFamilyClasses, documentSettings, resolvedLocalFonts }; }
@@ -1085,6 +1128,50 @@ test('allows only exact A2 service and option dependency threading through compu
   const result = runChecker(root, '--base-ref', 'main');
 
   assert.equal(result.status, 0, result.output);
+});
+
+test('allows only the exact A5 retained slice size replacement inside computePages', () => {
+  const root = initializeComputePagesTableStampRepository();
+  write(root, 'packages/docx/src/renderer.ts', computePagesRetainedSliceMigration);
+  removeComputePagesTableStampCounts(root);
+
+  const result = runChecker(root, '--base-ref', 'main');
+
+  assert.equal(result.status, 0, result.output);
+});
+
+test('rejects partial, duplicated, altered, or adjacent A5 computePages edits', () => {
+  const variants = [
+    computePagesRetainedSliceMigration.replace(
+      'sp, measureState.scale,',
+      'sp, measureState.dpr,',
+    ),
+    computePagesRetainedSliceMigration.replace(
+      'heightPx: sliceH',
+      'heightPx: tableHeight',
+    ),
+    computePagesRetainedSliceMigration.replace(
+      '  return [tableW, sliceH];',
+      '  const { widthPx: duplicateW, heightPx: duplicateH } = retainedTableSliceSize(sp, measureState.scale);\n  return [tableW, sliceH];',
+    ),
+    computePagesRetainedSliceMigration.replace(
+      'return [tableW, sliceH];',
+      'return [tableW, sliceH, 1];',
+    ),
+    computePagesTableStampBaseline.replace(
+      'const tableW = (sp.tableColWidthsPt ?? []).reduce((s, w) => s + w, 0) * measureState.scale;',
+      'const { widthPx: tableW } = retainedTableSliceSize(sp, measureState.scale);',
+    ),
+  ];
+
+  for (const source of variants) {
+    const root = initializeComputePagesTableStampRepository();
+    write(root, 'packages/docx/src/renderer.ts', source);
+    removeComputePagesTableStampCounts(root);
+    const result = runChecker(root, '--base-ref', 'main');
+    assert.notEqual(result.status, 0, source);
+    assert.match(result.output, /LEGACY_DECLARATION_CHANGED|BASELINE_EXPANSION/);
+  }
 });
 
 test('rejects retained-acquisition edits inside computePages', () => {

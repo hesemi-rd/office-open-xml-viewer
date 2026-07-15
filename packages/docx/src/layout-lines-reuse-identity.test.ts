@@ -4,14 +4,13 @@ import {
   paginateDocument,
   createLayoutServices,
   bodyFragmentFor,
-  __test_tableRequiresLegacyPaint,
 } from './renderer.js';
 import { testFontSnapshot } from './layout/test-font-snapshot.js';
 import { stableFingerprint } from './layout/fingerprint.js';
+import type { TableFragmentLayout } from './layout/table-pagination.js';
 import type { FlowFragment } from './layout-fragments.js';
 import type {
   BodyElement,
-  CellElement,
   DocParagraph,
   DocTable,
   DocxDocumentModel,
@@ -205,24 +204,6 @@ async function renderAllPages(model: DocxDocumentModel, pages: PaginatedBodyElem
 function retainedFlowGeometry(fragment: FlowFragment): unknown {
   if (fragment.kind === 'paragraph') return fragment;
   if (fragment.kind === 'table') {
-    if (!('flowBounds' in fragment)) {
-      return {
-        kind: fragment.kind,
-        columnWidthsPt: fragment.columnWidthsPt,
-        continuesFromPreviousPage: fragment.continuesFromPreviousPage,
-        continuesOnNextPage: fragment.continuesOnNextPage,
-        rows: fragment.rows.map((row) => ({
-          sourceRowIndex: row.sourceRowIndex,
-          heightPt: row.heightPt,
-          repeatedHeader: row.repeatedHeader,
-          cells: row.cells.map((cell) => ({
-            verticalMerge: cell.verticalMerge,
-            boxHeightPt: cell.boxHeightPt ?? null,
-            blocks: cell.blocks.map(retainedFlowGeometry),
-          })),
-        })),
-      };
-    }
     return {
       kind: fragment.kind,
       columnWidthsPt: fragment.columnWidthsPt,
@@ -611,8 +592,9 @@ describe('body retained paragraph acquisition and paint', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// A4 keeps one explicit table adapter predicate for negative leading tblInd. Cell
-// paragraphs themselves already use the same retained contract as body paragraphs.
+// A5 body tables consume one retained TableLayout contract. Signed placement and
+// page-local continuation ownership are acquired before paint; neither class may
+// re-enter table measurement during paint.
 // ─────────────────────────────────────────────────────────────────────────────
 
 function cellOf(content: unknown[], widthPt: number): Record<string, unknown> {
@@ -646,61 +628,40 @@ function tableOf(
   } as unknown as BodyElement;
 }
 
-describe('table fragment-paint legacy gate', () => {
-  it('excludes only negative leading tblInd tables, including nested tables', () => {
-    const negative = tableOf([para('negative')], { tblInd: -30 }) as unknown as DocTable;
-    const nestedNegative = tableOf([para('nested')], { tblInd: -12 }) as unknown as DocTable;
-    const outer = tableOf([nestedNegative]) as unknown as DocTable;
-    const positive = tableOf([para('positive')], { tblInd: 12 }) as unknown as DocTable;
-    const centeredNegative = tableOf([para('centered')], {
-      tblInd: -30,
-      jc: 'center',
-    }) as unknown as DocTable;
-
-    expect(__test_tableRequiresLegacyPaint(negative)).toBe(true);
-    expect(__test_tableRequiresLegacyPaint(outer)).toBe(true);
-    expect(__test_tableRequiresLegacyPaint(positive)).toBe(false);
-    expect(__test_tableRequiresLegacyPaint(centeredNegative)).toBe(false);
-  });
-
-  it('permits a table containing a sliced cell paragraph', () => {
-    const sliced = {
-      ...para('sliced'),
-      lineSlice: { start: 0, end: 2 },
-    } as unknown as CellElement;
-    const table = tableOf([sliced]) as unknown as DocTable;
-
-    expect(__test_tableRequiresLegacyPaint(table)).toBe(false);
-  });
-
-  it('permits production row slices emitted from a tall cell paragraph', () => {
+describe('body table retained layout paint', () => {
+  it('retains page-local continuation fragments and paints them without measuring', async () => {
     const cellPara = para(Array.from({ length: 40 }, () => 'wrap').join(' '));
-    const pages = paginateDocument(doc([tableOf([cellPara])], 60));
+    const model = doc([tableOf([cellPara])], 60);
+    const pages = paginateDocument(model, createLayoutServices(model, {
+      localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+    }));
     const sliceTables = pages
       .flatMap((page) => page)
-      .filter((el): el is PaginatedBodyElement & DocTable => el.type === 'table');
-    const slicedTables = sliceTables.filter((table) =>
-      table.rows.some((row) =>
-        row.cells.some((cell) =>
-          cell.content.some(
-            (ce) =>
-              ce.type === 'paragraph' &&
-              (ce as CellElement & { lineSlice?: unknown }).lineSlice !== undefined,
-          ),
-        ),
-      ),
-    );
+      .filter((element): element is PaginatedBodyElement & DocTable => element.type === 'table');
 
     expect(sliceTables.length).toBeGreaterThan(1);
-    expect(slicedTables.length).toBeGreaterThan(0);
-    for (const table of slicedTables) {
-      expect(__test_tableRequiresLegacyPaint(table)).toBe(false);
+    const fragments: TableFragmentLayout[] = [];
+    for (const table of sliceTables) {
+      const placed = bodyFragmentFor(table);
+      if (placed?.fragment.kind !== 'table' || !('flowBounds' in placed.fragment)) {
+        throw new Error('expected retained table continuation geometry');
+      }
+      const fragment = placed.fragment as TableFragmentLayout;
+      expect(fragment.rows.length).toBeGreaterThan(0);
+      expect(fragment.rows.every((row) => row.occurrenceId.length > 0)).toBe(true);
+      fragments.push(fragment);
     }
+    expect(new Set(fragments.flatMap((fragment) =>
+      fragment.rows.map((row) => row.occurrenceId))).size).toBeGreaterThan(1);
+
+    const production = await renderAllPages(model, pages);
+    expect(production.measures).toBe(0);
+    expect(production.perPage.flat().some((call) => call.text.includes('wrap'))).toBe(true);
   });
 });
 
 describe('table-cell retained paragraph paint', () => {
-  it('negative leading tblInd remains covered by the explicit A4 table adapter', async () => {
+  it('negative leading tblInd retains its signed origin and paints without measuring', async () => {
     const cellPara = para(Array.from({ length: 50 }, () => 'wide').join(' '));
     const model = doc([
       tableOf([cellPara], {
@@ -712,8 +673,18 @@ describe('table-cell retained paragraph paint', () => {
       }),
     ], 400);
 
+    const pages = paginateDocument(model, createLayoutServices(model, {
+      localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+    }));
+    const placed = bodyFragmentFor(pages[0][0]);
+    if (placed?.fragment.kind !== 'table' || !('flowBounds' in placed.fragment)) {
+      throw new Error('expected retained negative-indent table geometry');
+    }
+    expect(placed.fragment.flowBounds.xPt).toBeCloseTo(-30, 6);
+
     const r = await assertRetainedPaint(model);
     expect(r.drawn).toBeGreaterThan(0);
+    expect(r.measures).toBe(0);
   });
 
   it('numbered paragraph inside a table cell retains marker/body geometry', async () => {
@@ -784,23 +755,14 @@ describe('table-cell retained paragraph paint', () => {
       elements.flatMap((element) => {
         const placed = bodyFragmentFor(element);
         if (placed?.fragment.kind === 'table') {
-          return 'flowBounds' in placed.fragment
-            ? placed.fragment.rows.flatMap((tableRow) =>
-                tableRow.cells.flatMap((cell) =>
-                  cell.blocks.flatMap((block) =>
-                    block.layout.kind === 'paragraph' && block.layout.lines.some((line) =>
-                      line.placements.some((placement) =>
-                        placement.kind === 'text' && placement.dependency === 'page'))
-                      ? [{ pageIndex, fragment: block.layout }]
-                      : [])))
-            : placed.fragment.rows.flatMap((tableRow) =>
-                tableRow.cells.flatMap((cell) =>
-                  cell.blocks.flatMap((block) =>
-                    block.kind === 'paragraph' && block.lines.some((line) =>
-                      line.placements.some((placement) =>
-                        placement.kind === 'text' && placement.dependency === 'page'))
-                      ? [{ pageIndex, fragment: block }]
-                      : [])));
+          return placed.fragment.rows.flatMap((tableRow) =>
+            tableRow.cells.flatMap((cell) =>
+              cell.blocks.flatMap((block) =>
+                block.layout.kind === 'paragraph' && block.layout.lines.some((line) =>
+                  line.placements.some((placement) =>
+                    placement.kind === 'text' && placement.dependency === 'page'))
+                  ? [{ pageIndex, fragment: block.layout }]
+                  : [])));
         }
         return [];
       }));
@@ -816,6 +778,68 @@ describe('table-cell retained paragraph paint', () => {
     expect(production.measures).toBe(0);
     expect(production.perPage[pageIndex].some((call) =>
       call.text === String(pageIndex + 1))).toBe(true);
+  });
+
+  it('acquires every repeated-header PAGE occurrence from its destination page', async () => {
+    const pageField = para('');
+    (pageField.runs as unknown[]).push({
+      type: 'field', fieldType: 'page', instruction: 'PAGE', fallbackText: '?',
+      bold: false, italic: false, underline: false, strikethrough: false,
+      fontSize: 10, color: null, fontFamily: 'Times New Roman', background: null,
+    });
+    const table = tableOf([pageField]) as unknown as DocTable;
+    const row = (paragraph: DocParagraph, isHeader = false): DocTable['rows'][number] => ({
+      cells: [cellOf([paragraph], 180) as unknown as DocTable['rows'][number]['cells'][number]],
+      rowHeight: 16,
+      rowHeightRule: 'exact',
+      isHeader,
+    });
+    table.rows = [
+      row(pageField, true),
+      row(para('body-1')),
+      row(para('body-2')),
+      row(para('body-3')),
+    ];
+    const model = doc([table as unknown as BodyElement], 60);
+    model.section = {
+      ...model.section,
+      pageNumType: { start: 9, fmt: 'upperRoman' },
+    };
+    const pages = paginateDocument(model, createLayoutServices(model, {
+      localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+    }));
+
+    expect(pages).toHaveLength(3);
+    const retainedHeaderPages = pages.map((elements, pageIndex) => {
+      const tableElement = elements.find((element) => element.type === 'table');
+      const placed = tableElement ? bodyFragmentFor(tableElement) : undefined;
+      if (placed?.fragment.kind !== 'table' || !('flowBounds' in placed.fragment)) {
+        throw new Error('expected a retained table fragment');
+      }
+      const retained = placed.fragment as TableFragmentLayout;
+      const header = retained.rows.find((candidate) => candidate.logicalRowIndex === 0);
+      const field = header?.cells[0]?.blocks[0]?.layout;
+      const result = field?.kind === 'paragraph'
+        ? field.lines.flatMap((line) => line.placements).find((placement) =>
+            placement.kind === 'text' && placement.dependency === 'page')
+        : undefined;
+      return {
+        pageIndex,
+        ownership: header?.ownership,
+        occurrenceId: header?.occurrenceId,
+        text: result?.kind === 'text' ? result.text : undefined,
+      };
+    });
+    expect(retainedHeaderPages).toEqual([
+      { pageIndex: 0, ownership: 'source', occurrenceId: expect.any(String), text: 'IX' },
+      { pageIndex: 1, ownership: 'repeated-header', occurrenceId: expect.any(String), text: 'X' },
+      { pageIndex: 2, ownership: 'repeated-header', occurrenceId: expect.any(String), text: 'XI' },
+    ]);
+
+    const production = await renderAllPages(model, pages);
+    expect(production.measures).toBe(0);
+    expect(production.perPage.map((calls, pageIndex) => calls.some((call) =>
+      call.text === ['IX', 'X', 'XI'][pageIndex]))).toEqual([true, true, true]);
   });
 
   it('acquires the following cell paragraph in the preceding float wrap context', async () => {

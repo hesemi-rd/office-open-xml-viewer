@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import {
+  bodyFragmentFor,
   paginateDocument,
   renderDocumentToCanvas,
 } from './renderer.js';
@@ -199,9 +200,13 @@ async function renderPage(
 function firstSliceOnPage(pages: PaginatedBodyElement[][], pageIndex: number) {
   const table = pages[pageIndex].find((element) => element.type === 'table') as
     (PaginatedBodyElement & DocTable) | undefined;
-  const paragraph = table?.rows[0]?.cells[0]?.content[0] as
-    (CellElement & { lineSlice?: { start: number; end: number } }) | undefined;
-  return paragraph?.lineSlice;
+  if (!table) return undefined;
+  const placed = bodyFragmentFor(table);
+  if (placed?.fragment.kind !== 'table' || !('flowBounds' in placed.fragment)) return undefined;
+  const paragraph = placed.fragment.rows[0]?.cells[0]?.blocks[0]?.layout;
+  if (paragraph?.kind !== 'paragraph') return undefined;
+  const continuation = paragraph.continuation;
+  return continuation ? { start: continuation.lineStart, end: continuation.lineEnd } : undefined;
 }
 
 const splitText =
@@ -215,12 +220,12 @@ describe('table row split fidelity — fragment-owned paint geometry', () => {
     const model = documentWithRow(row(splitText, 'top'), 60);
     const pages = paginateDocument(model);
     expect(pages).toHaveLength(2);
-    expect(firstSliceOnPage(pages, 0)).toEqual({ start: 0, end: 2 });
-    expect(firstSliceOnPage(pages, 1)).toEqual({ start: 2, end: 4 });
+    expect(firstSliceOnPage(pages, 0)).toEqual({ start: 0, end: 3 });
+    expect(firstSliceOnPage(pages, 1)).toEqual({ start: 3, end: 4 });
 
     const page2 = await renderPage(model, pages, 1);
     const paintedText = page2.texts.map((call) => call.text).join('');
-    expect(paintedText).toBe('丙'.repeat(16) + '丁'.repeat(16));
+    expect(paintedText).toBe('丁'.repeat(16));
     expect(paintedText).not.toContain('甲');
     expect(paintedText).not.toContain('乙');
   });
@@ -229,7 +234,7 @@ describe('table row split fidelity — fragment-owned paint geometry', () => {
     const model = documentWithRow(row(splitText, 'center'), 60);
     const pages = paginateDocument(model);
     expect(pages).toHaveLength(2);
-    expect(firstSliceOnPage(pages, 1)).toEqual({ start: 2, end: 4 });
+    expect(firstSliceOnPage(pages, 1)).toEqual({ start: 3, end: 4 });
 
     const page2 = await renderPage(model, pages, 1);
     const topRule = page2.strokes.find(

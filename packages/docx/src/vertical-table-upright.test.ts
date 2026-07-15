@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  bodyFragmentFor,
   computePages,
   renderDocumentToCanvas,
   __test_verticalLayoutSection,
@@ -39,15 +40,18 @@ interface RectCall { x: number; y: number; w: number; h: number; }
 function makeRecordingCanvas(): {
   canvas: HTMLCanvasElement;
   rectCalls: RectCall[];
+  measureCalls: () => number;
 } {
   let font = '10px serif';
   const px = () => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
   const rectCalls: RectCall[] = [];
+  let measures = 0;
   const ctx = {
     get font() { return font; },
     set font(v: string) { font = v; },
     letterSpacing: '0px',
     measureText: (s: string) => {
+      measures += 1;
       const p = px();
       return {
         width: [...s].length * p,
@@ -80,7 +84,11 @@ function makeRecordingCanvas(): {
     getContext: () => ctx,
   };
   (ctx as unknown as { canvas: unknown }).canvas = canvas;
-  return { canvas: canvas as unknown as HTMLCanvasElement, rectCalls };
+  return {
+    canvas: canvas as unknown as HTMLCanvasElement,
+    rectCalls,
+    measureCalls: () => measures,
+  };
 }
 
 function emptyBorders() {
@@ -209,10 +217,11 @@ describe('vertical (tbRl) table cells render upright/horizontal (§17.6.20 + §1
 
   it('trHeight exact clips at the physical row height; auto grows past it', async () => {
     const { runs, rectCalls } = await renderRuns();
-    // §17.4.80 exact ⇒ a Y-only clip band at the row's PHYSICAL box:
-    // top = physical column top (20), height = 80.
+    // §17.4.80 exact ⇒ an 80 pt clip band. The retained painter submits
+    // point-space clip geometry before the canvas placement transform, while
+    // the text-run assertions below observe the resulting physical placement.
     const clipRect = rectCalls.find(
-      (r) => Math.abs(r.y - COL_TOP) < 1e-6 && Math.abs(r.h - 80) < 1e-6,
+      (r) => Math.abs(r.h - 80) < 1e-6,
     );
     expect(clipRect, 'exact row must clip at its physical Y band').toBeDefined();
     // auto ⇒ the row grows: content extends well past the 80 pt exact height.
@@ -254,5 +263,70 @@ describe('vertical (tbRl) table cells render upright/horizontal (§17.6.20 + §1
     const pages = computePages(body, logicalSec, ctx, { 'Times New Roman': 'roman' });
     expect(pages.length).toBe(1);
     expect(pages[0].length).toBe(2);
+  });
+
+  it('retains upright physical geometry while the placement owns the vertical flow footprint', async () => {
+    const doc = verticalTableDoc();
+    const measure = makeRecordingCanvas();
+    const logicalSec = __test_verticalLayoutSection(PHYS);
+    const pages = computePages(
+      doc.body,
+      logicalSec,
+      measure.canvas.getContext('2d') as CanvasRenderingContext2D,
+      doc.fontFamilyClasses,
+    );
+    const tables = pages[0].filter((element) => element.type === 'table');
+    expect(tables).toHaveLength(2);
+
+    const exact = bodyFragmentFor(tables[0]);
+    const auto = bodyFragmentFor(tables[1]);
+    if (
+      exact?.fragment.kind !== 'table' || !('flowBounds' in exact.fragment) ||
+      auto?.fragment.kind !== 'table' || !('flowBounds' in auto.fragment)
+    ) {
+      throw new Error('expected retained upright table layouts');
+    }
+
+    // §17.6.20: the upright table's rows remain in physical coordinates, so
+    // the exact row owns an 80 pt physical row stack. The surrounding vertical
+    // story advances by the table's 50 pt physical width instead.
+    expect(exact.fragment.advancePt).toBeCloseTo(80, 6);
+    expect(auto.fragment.advancePt).toBeGreaterThan(80);
+    expect(exact.heightPt).toBeCloseTo(TABLE_W, 6);
+    expect(auto.heightPt).toBeCloseTo(TABLE_W, 6);
+
+    const paint = makeRecordingCanvas();
+    await renderDocumentToCanvas(doc, paint.canvas, 0, {
+      dpr: 1,
+      width: PHYS.pageWidth,
+      prebuiltPages: pages,
+    });
+    expect(paint.measureCalls()).toBe(0);
+  });
+
+  it('records the destination column on an upright retained placement', () => {
+    const wide = fixedTable('', 20);
+    wide.colWidths = [140];
+    wide.rows[0].cells[0].widthPt = 140;
+    const narrow = fixedTable('', 20);
+    const physical = {
+      ...PHYS,
+      columns: { count: 2, spacePt: 10, equalWidth: true, sep: false, cols: [] },
+    } as SectionProps;
+    const body = [
+      { type: 'table', ...wide },
+      { type: 'table', ...narrow },
+    ] as unknown as BodyElement[];
+    const measure = makeRecordingCanvas();
+    const pages = computePages(
+      body,
+      __test_verticalLayoutSection(physical),
+      measure.canvas.getContext('2d') as CanvasRenderingContext2D,
+      { 'Times New Roman': 'roman' },
+    );
+    const tables = pages[0].filter((element) => element.type === 'table');
+    expect(tables).toHaveLength(2);
+    expect(bodyFragmentFor(tables[0])?.columnIndex).toBe(0);
+    expect(bodyFragmentFor(tables[1])?.columnIndex).toBe(1);
   });
 });

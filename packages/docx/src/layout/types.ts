@@ -590,6 +590,48 @@ export interface TableLayout extends LayoutNodeBase {
   readonly borders: readonly ResolvedBorderSegment[];
 }
 
+/**
+ * Page-local ownership of an out-of-flow nested table. Absolute page/margin
+ * coordinates remain unresolved here; the wrapper retains the anchor fragment
+ * bounds needed by the later placement stage and reuses the acquired child.
+ */
+export interface FloatingTablePlacementLayout {
+  readonly kind: 'floating-table-placement';
+  readonly occurrenceId: string;
+  readonly ownership: 'source' | 'repeated-header';
+  readonly physicalPageIndex: number;
+  readonly displayPageNumber: number;
+  readonly hostCellId: LayoutNodeId;
+  readonly sourceBlockIndex: number;
+  readonly anchorBlockIndex: number;
+  readonly tableId: LayoutNodeId;
+  readonly overlap: 'never' | 'overlap';
+  readonly positioning: FloatingTablePositionInput;
+  readonly acquiredTextOffsetPt?: Readonly<{ xPt: number; yPt: number }>;
+  readonly anchorBounds: LayoutRect;
+  readonly child: TableLayout;
+}
+
+/** Explicit point-space anchor frames supplied at the page/column adapter. */
+export interface FloatingTableReferenceFramesPt {
+  readonly page: LayoutRect;
+  readonly margin: LayoutRect;
+  readonly text: LayoutRect;
+}
+
+/** Paint-ready result of resolving a page-local floating-table occurrence. */
+export interface ResolvedFloatingTablePlacementLayout {
+  readonly kind: 'resolved-floating-table-placement';
+  readonly occurrenceId: string;
+  readonly xPt: number;
+  readonly yPt: number;
+  readonly bounds: LayoutRect;
+  readonly exclusionBounds: LayoutRect;
+  readonly overlap: 'never' | 'overlap';
+  readonly child: TableLayout;
+  readonly source: FloatingTablePlacementLayout;
+}
+
 export interface TextBoxLayout extends LayoutNodeBase {
   readonly kind: 'textbox';
   readonly paragraphs: readonly ParagraphLayout[];
@@ -750,6 +792,10 @@ export interface TableEdgeInputs {
 
 export interface TableCellBlockInput {
   readonly layout: ParagraphLayout | TableLayout;
+  /** Stable source index; continuation slices must not renumber field ownership. */
+  readonly sourceBlockIndex: number;
+  /** True when destination-page context can change the acquired child geometry. */
+  readonly pageDependent?: boolean;
   /** The required empty paragraph after a nested table owns no row-height ink. */
   readonly structuralTrailing?: boolean;
 }
@@ -818,6 +864,9 @@ export interface TableRowExceptionInput {
 
 export interface TableRowFormatInput {
   readonly height: TableRowHeightInput | null;
+  /** Effective CT_OnOff values after table-style and direct row resolution. */
+  readonly cantSplit: boolean;
+  readonly repeatedHeader: boolean;
   readonly cellSpacingPt: number;
   readonly justification: string | null;
   readonly exception: TableRowExceptionInput | null;
@@ -828,6 +877,21 @@ export interface TableRowFormatInput {
 export interface TableFormatInput {
   readonly rows: readonly TableRowFormatInput[];
   readonly firstRowException: TableRowExceptionInput | null;
+}
+
+/** Parser-independent positioning facts retained from §17.4.57 `<w:tblpPr>`. */
+export interface FloatingTablePositionInput {
+  readonly leftFromTextPt: number;
+  readonly rightFromTextPt: number;
+  readonly topFromTextPt: number;
+  readonly bottomFromTextPt: number;
+  readonly horzAnchor: string;
+  readonly horzSpecified: boolean;
+  readonly vertAnchor: string;
+  readonly xPt: number;
+  readonly yPt: number;
+  readonly xAlign?: string;
+  readonly yAlign?: string;
 }
 
 export interface TableCellLayoutInput {
@@ -851,6 +915,8 @@ export interface TableCellLayoutInput {
 export interface TableRowLayoutInput {
   readonly id: LayoutNodeId;
   readonly source: SourceRef;
+  readonly logicalRowIndex: number;
+  readonly cantSplit: boolean;
   readonly heightPt: number | null;
   readonly heightRule: 'auto' | 'atLeast' | 'exact';
   /** Effective §17.4.43/.44/.45 dxa spacing for this row. */
@@ -862,7 +928,7 @@ export interface TableRowLayoutInput {
   /** Effective table indent after Word's first-row tblPrEx rule. */
   readonly indentPt: number;
   readonly cells: readonly TableCellLayoutInput[];
-  readonly repeatedHeader?: boolean;
+  readonly repeatedHeader: boolean;
 }
 
 export interface TableLayoutInput {

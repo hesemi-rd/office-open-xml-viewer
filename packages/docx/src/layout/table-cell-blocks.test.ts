@@ -39,12 +39,11 @@ function retainedNestedTable(
   heightPt: number,
   nestedBlocks: readonly FlowFragment[],
 ): TableLayout {
-  const blocks = nestedBlocks.map((layout) => {
-    if (layout.kind === 'table' && !('flowBounds' in layout)) {
-      throw new Error('ordinary nested acquisition must retain a TableLayout');
-    }
-    return { layout, offsetPt: 0, advancePt: layout.advancePt };
-  });
+  const blocks = nestedBlocks.map((layout) => ({
+    layout,
+    offsetPt: 0,
+    advancePt: layout.advancePt,
+  }));
   return {
     kind: 'table', id: `nested-${path.join('.')}`,
     source: { story: 'body', storyInstance: 'body', path: [...path] },

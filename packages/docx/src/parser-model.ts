@@ -470,6 +470,8 @@ export function tableFormatInput(table: Readonly<DocTable>): TableFormatInput {
     const exception = rowWire?.exception ?? null;
     return {
       height: rowWire?.height ? privateTableRowHeight(rowWire.height) : publicTableRowHeight(row),
+      cantSplit: row.cantSplit === true,
+      repeatedHeader: row.isHeader === true,
       cellSpacingPt: wordTableCellSpacingPt(
         rowWire?.cellSpacing,
         exception?.cellSpacing,

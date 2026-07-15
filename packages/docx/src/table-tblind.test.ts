@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { renderDocumentToCanvas } from './renderer.js';
+import { bodyFragmentFor, computePages, renderDocumentToCanvas } from './renderer.js';
 import type {
   DocxDocumentModel,
   DocTable,
@@ -123,6 +123,29 @@ function tableDoc(colW: number, tblInd: number | undefined, bidiVisual: boolean)
 }
 
 describe('§17.4.50 tblInd — table indent from the leading margin', () => {
+  it('retains the signed leading-edge origin for both visual directions', () => {
+    const retained = (doc: DocxDocumentModel) => {
+      const recording = makeRecordingCanvas();
+      const pages = computePages(
+        doc.body,
+        doc.section,
+        recording.canvas.getContext('2d') as CanvasRenderingContext2D,
+        doc.fontFamilyClasses,
+      );
+      return bodyFragmentFor(pages[0][0]);
+    };
+    const ltr = retained(tableDoc(160, -10, false));
+    const rtl = retained(tableDoc(160, -10, true));
+    if (
+      ltr?.fragment.kind !== 'table' || !('flowBounds' in ltr.fragment) ||
+      rtl?.fragment.kind !== 'table' || !('flowBounds' in rtl.fragment)
+    ) {
+      throw new Error('expected retained table geometry');
+    }
+    expect(ltr.fragment.flowBounds.xPt).toBeCloseTo(-10, 6);
+    expect(rtl.fragment.flowBounds.xPt).toBeCloseTo(10, 6);
+  });
+
   it('LTR: negative tblInd pulls the LEFT origin outward past the left margin', async () => {
     // scale=1 (width 200 = pageWidth). content=[20,180]. colW=160 fits content.
     // No indent: left origin = contentX = 20. With tblInd=-10 → left origin = 10.

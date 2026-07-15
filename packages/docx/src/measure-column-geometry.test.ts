@@ -183,11 +183,11 @@ describe('measure/paint column-band parity for a tblpPr FLOATING TABLE (§17.4.5
     const sidePaint = wrapSide(paint, state(paintBand(COL1, 1)));
     expect(sideMeasure).toBe(sidePaint);
 
-    // The OLD full-band wrap side would differ: against [60,540] (centre 300) the
-    // x=322 left edge is right-of-centre ⇒ 'left', but against column 1 (centre
-    // 426) the box straddles ⇒ 'bothSides'. This is the divergence the fix removes.
+    // Side selection is no longer a midpoint heuristic. Both bands pass the
+    // actual exclusion to the same widest-free-gap solver.
     const sideOld = wrapSide(measure, state(FULL_BAND));
-    expect(sideOld).not.toBe(sideMeasure);
+    expect(sideOld).toBe(sideMeasure);
+    expect(sideMeasure).toBe('bothSides');
   });
 
   it('the registered FloatRect x-range matches between measure and paint', () => {
