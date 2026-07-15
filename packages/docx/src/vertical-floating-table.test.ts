@@ -3,6 +3,7 @@ import {
   bodyFragmentFor,
   computePages,
   renderDocumentToCanvas,
+  splitFloatTableAcrossPages,
   __test_verticalLayoutSection,
   type DocxTextRunInfo,
 } from './renderer.js';
@@ -566,5 +567,117 @@ describe('vertical outer floating tables retain the canonical logical paint doma
       expect(paint.measureCalls()).toBe(0);
     }
     expect(runs.filter((run) => run.text === 'NESTED-FLOAT')).toHaveLength(1);
+  });
+
+  it('reflows a split child against the accepted slice box after an external blocker', async () => {
+    const blocker = floatingTable([{ text: 'B', heightPt: 20 }]);
+    blocker.layout = 'fixed';
+    blocker.colWidths = [40];
+    blocker.rows[0]!.cells[0]!.widthPt = 40;
+    blocker.tblpPr = {
+      ...blocker.tblpPr!,
+      horzAnchor: 'page',
+      vertAnchor: 'page',
+      tblpX: 40,
+      tblpY: 170,
+    };
+
+    const outer = floatingTable([
+      { text: 'unused', heightPt: 140 },
+      { text: 'OUTER-TAIL', heightPt: 20 },
+    ]);
+    const nestedTable = floatingTable([{ text: 'C', heightPt: 20 }]);
+    nestedTable.layout = 'fixed';
+    nestedTable.colWidths = [20];
+    nestedTable.rows[0]!.cells[0]!.widthPt = 20;
+    nestedTable.tblpPr = {
+      ...nestedTable.tblpPr!,
+      horzAnchor: 'text',
+      vertAnchor: 'page',
+      tblpX: 0,
+      tblpY: 0,
+    };
+    outer.rows[0]!.cells[0]!.content = [
+      { type: 'table', ...nestedTable },
+      { type: 'paragraph', ...paragraph('CHILD-ANCHOR') },
+    ] as unknown as DocTableCell['content'];
+
+    const doc = documentWith(blocker);
+    doc.body.push({ type: 'table', ...outer } as unknown as BodyElement);
+    doc.body.push({ type: 'paragraph', ...paragraph('AFTER-BLOCKED-SPLIT') } as unknown as BodyElement);
+    const measure = recordingCanvas();
+    const pages = computePages(
+      doc.body,
+      __test_verticalLayoutSection(PHYSICAL_SECTION),
+      measure.canvas.getContext('2d') as CanvasRenderingContext2D,
+      doc.fontFamilyClasses,
+    );
+    const firstOuterElement = pages[0]?.filter((element) => element.type === 'table')[1];
+    const blockerElement = pages[0]?.filter((element) => element.type === 'table')[0];
+    const retainedOuter = firstOuterElement ? bodyFragmentFor(firstOuterElement) : undefined;
+    const retainedBlocker = blockerElement ? bodyFragmentFor(blockerElement) : undefined;
+    if (retainedOuter?.fragment.kind !== 'table'
+      || !('resolvedFloatingTables' in retainedOuter.fragment)
+      || retainedBlocker?.fragment.kind !== 'table') {
+      throw new Error('expected a first split slice with a selected text-anchored child');
+    }
+    const fragment = retainedOuter.fragment as TableFragmentLayout;
+    const [nested] = fragment.resolvedFloatingTables;
+    if (!nested) throw new Error('expected the selected text-anchored child');
+    expect(pages).toHaveLength(2);
+    expect(retainedOuter.xPt).toBeCloseTo(20, 6);
+    expect(retainedOuter.yPt).toBeCloseTo(30, 6);
+    expect(retainedOuter.heightPt).toBeCloseTo(140, 6);
+    expect(retainedOuter.yPt + retainedOuter.heightPt).toBeCloseTo(retainedBlocker.yPt, 6);
+    expect(retainedOuter.yPt + 160).toBeGreaterThan(retainedBlocker.yPt);
+    expect(nested.bounds.xPt).toBeCloseTo(retainedOuter.xPt, 6);
+    expect(nested.source.anchorBounds.xPt).toBeCloseTo(retainedOuter.xPt, 6);
+
+    const paint = recordingCanvas();
+    const runs: DocxTextRunInfo[] = [];
+    await expect(renderDocumentToCanvas(doc, paint.canvas, 0, {
+      dpr: 1,
+      width: PHYSICAL_SECTION.pageWidth,
+      prebuiltPages: pages,
+      onTextRun: (run) => runs.push(run),
+    })).resolves.toBeUndefined();
+    expect(paint.measureCalls()).toBe(0);
+    expect(runs.filter((run) => run.text === 'C')).toHaveLength(1);
+  });
+
+  it('rejects a split parent frame that does not converge within four passes', () => {
+    const doc = documentWith(floatingTable([
+      { text: 'FIRST', heightPt: 140 },
+      { text: 'SECOND', heightPt: 20 },
+    ]));
+    const measure = recordingCanvas();
+    computePages(
+      doc.body,
+      __test_verticalLayoutSection(PHYSICAL_SECTION),
+      measure.canvas.getContext('2d') as CanvasRenderingContext2D,
+      doc.fontFamilyClasses,
+    );
+    const table = doc.body[0] as unknown as DocTable;
+    let pass = 0;
+
+    expect(() => splitFloatTableAcrossPages(
+      table,
+      table.tblpPr!,
+      [120],
+      [140, 20],
+      0,
+      240,
+      () => 0,
+      () => 0,
+      () => 146,
+      () => {},
+      (_sliceTp, tableWidthPt, tableHeightPt) => ({
+        x: pass++ % 2 === 0 ? 20 : 40,
+        y: 30,
+        w: tableWidthPt,
+        h: tableHeightPt,
+      }),
+    )).toThrow('Split outer table final-frame probe did not converge');
+    expect(pass).toBe(4);
   });
 });

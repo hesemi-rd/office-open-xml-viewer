@@ -1166,6 +1166,99 @@ function normalizedComputePagesHash(node, source) {
     ));
     if (virtualNode) return normalizedComputePagesHash(virtualNode, virtualSource);
   }
+  const exactConvergedSplitParentResolverSource = `
+    (sliceTp, tableWidthPt, tableHeightPt, externalRegistry) =>
+      withColumnBand(() => {
+        const skipVClamp = sliceTp.vertAnchor === 'page' || sliceTp.vertAnchor === 'margin';
+        const stateAgainstExternalRegistry: RenderState = {
+          ...measureState,
+          floats: [...externalRegistry.floats],
+          floatParaSeq: externalRegistry.nextParagraphId,
+        };
+        return computeFloatTableBox(
+          sliceTp,
+          stateAgainstExternalRegistry,
+          measureState.y,
+          tableWidthPt * measureState.scale,
+          tableHeightPt * measureState.scale,
+          skipVClamp,
+          { allowOverlap: tbl.overlap !== 'never' },
+        );
+      })
+  `;
+  const exactConvergedSplitEmitterSource = '(sliceEl) => pushTagged(sliceEl)';
+  const convergedSplitCallbacksSource = ts.createSourceFile(
+    'compute-pages-a5-converged-split-parent-expected.ts',
+    `const callbacks = [${exactConvergedSplitParentResolverSource}, ${exactConvergedSplitEmitterSource}];`,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const convergedSplitCallbacksDeclaration = convergedSplitCallbacksSource.statements[0]
+    ?.declarationList?.declarations?.[0];
+  const convergedSplitCallbacks = convergedSplitCallbacksDeclaration?.initializer?.elements;
+  const syntaxPrinter = ts.createPrinter({ removeComments: true });
+  const printedSyntax = (current, currentSource) => syntaxPrinter
+    .printNode(ts.EmitHint.Unspecified, current, currentSource)
+    .replace(/\s+/g, '');
+  const expectedConvergedSplitResolver = convergedSplitCallbacks?.[0]
+    ? printedSyntax(convergedSplitCallbacks[0], convergedSplitCallbacksSource)
+    : '';
+  const expectedConvergedSplitEmitter = convergedSplitCallbacks?.[1]
+    ? printedSyntax(convergedSplitCallbacks[1], convergedSplitCallbacksSource)
+    : '';
+  const convergedSplitCalls = [];
+  const findConvergedSplitCall = (current) => {
+    if (ts.isCallExpression(current)
+      && ts.isIdentifier(current.expression)
+      && current.expression.text === 'splitFloatTableAcrossPages'
+      && current.arguments.length >= 2) {
+      const resolver = current.arguments[current.arguments.length - 2];
+      const emitter = current.arguments[current.arguments.length - 1];
+      if (printedSyntax(resolver, source) === expectedConvergedSplitResolver
+        && printedSyntax(emitter, source) === expectedConvergedSplitEmitter) {
+        convergedSplitCalls.push({ resolver, emitter });
+      }
+    }
+    ts.forEachChild(current, findConvergedSplitCall);
+  };
+  findConvergedSplitCall(node);
+  if (convergedSplitCalls.length === 1) {
+    const { resolver, emitter } = convergedSplitCalls[0];
+    const nodeStart = node.getStart(source);
+    const start = resolver.getStart(source) - nodeStart;
+    const end = emitter.getEnd() - nodeStart;
+    const previousCallback = `
+      (sliceEl) => {
+        pushTagged(sliceEl);
+        return withColumnBand(() => {
+          const sp = sliceEl as PaginatedBodyElement;
+          const sliceTp = (sliceEl as unknown as DocTable).tblpPr as TblpPr;
+          const { widthPx: tableW, heightPx: sliceH } = retainedTableSliceSize(
+            sp, measureState.scale,
+          );
+          const skipVClamp = sliceTp.vertAnchor === 'page' || sliceTp.vertAnchor === 'margin';
+          return computeFloatTableBox(
+            sliceTp, measureState, measureState.y, tableW, sliceH, skipVClamp,
+            { allowOverlap: tbl.overlap !== 'never' },
+          );
+        });
+      }
+    `;
+    const nodeText = node.getText(source);
+    const virtualText = nodeText.slice(0, start) + previousCallback + nodeText.slice(end);
+    const virtualSource = ts.createSourceFile(
+      'compute-pages-a5-converged-split-parent-virtual.ts',
+      virtualText,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const virtualNode = virtualSource.statements.find((candidate) => (
+      ts.isFunctionDeclaration(candidate) && candidate.name?.text === 'computePages'
+    ));
+    if (virtualNode) return normalizedComputePagesHash(virtualNode, virtualSource);
+  }
   const exactSplitParentPreResolutionSource = `
     (sliceEl) => {
       pushTagged(sliceEl);
@@ -1193,10 +1286,6 @@ function normalizedComputePagesHash(node, source) {
   const expectedSplitCallbackDeclaration = expectedSplitCallbackSource.statements[0]
     ?.declarationList?.declarations?.[0];
   const expectedSplitCallback = expectedSplitCallbackDeclaration?.initializer;
-  const syntaxPrinter = ts.createPrinter({ removeComments: true });
-  const printedSyntax = (current, currentSource) => syntaxPrinter
-    .printNode(ts.EmitHint.Unspecified, current, currentSource)
-    .replace(/\s+/g, '');
   const exactSplitParentPreResolutionSyntax = expectedSplitCallback
     ? printedSyntax(expectedSplitCallback, expectedSplitCallbackSource)
     : '';

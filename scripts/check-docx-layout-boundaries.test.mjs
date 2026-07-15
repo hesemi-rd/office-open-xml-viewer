@@ -278,29 +278,29 @@ function initializeComposedFittingOuterProbeRepository() {
 }
 
 function priorSplitParentCommitSource(current) {
-  const startMarker = `            (sliceEl) => {
-              // Stamp destination ownership first, then resolve the accepted parent`;
-  const endMarker = '            },\n          );';
+  const startMarker = '            (sliceTp, tableWidthPt, tableHeightPt, externalRegistry) =>';
+  const endMarker = '            (sliceEl) => pushTagged(sliceEl),\n          );';
   const start = current.indexOf(startMarker);
   const end = current.indexOf(endMarker, start);
   assert.ok(start >= 0 && end > start);
   const legacy = `            (sliceEl) => {
-              withColumnBand(() => {
+              pushTagged(sliceEl);
+              return withColumnBand(() => {
                 const sp = sliceEl as PaginatedBodyElement;
                 const sliceTp = (sliceEl as unknown as DocTable).tblpPr as TblpPr;
                 const { widthPx: tableW, heightPx: sliceH } = retainedTableSliceSize(
                   sp, measureState.scale,
                 );
                 const skipVClamp = sliceTp.vertAnchor === 'page' || sliceTp.vertAnchor === 'margin';
-                const sliceBox = computeFloatTableBox(
+                return computeFloatTableBox(
                   sliceTp, measureState, measureState.y, tableW, sliceH, skipVClamp,
+                  { allowOverlap: tbl.overlap !== 'never' },
                 );
-                const side = floatTableWrapSide(sliceBox, measureState);
-                registerTableFloat(sliceBox, sliceTp, measureState, side, tbl.overlap !== 'never');
               });
-              pushTagged(sliceEl);
+            },
+          );
 `;
-  return current.slice(0, start) + legacy + current.slice(end);
+  return current.slice(0, start) + legacy + current.slice(end + endMarker.length);
 }
 
 function initializeSplitParentCommitRepository() {
@@ -1614,21 +1614,21 @@ test('composes all exact A5 computePages normalizers over production A5 bases', 
   }
 });
 
-test('allows only split parent pre-resolution before the child commit', () => {
+test('allows only converged split parent resolution before the child commit', () => {
   const { root, current } = initializeSplitParentCommitRepository();
   write(root, 'packages/docx/src/renderer.ts', current);
   const result = runChecker(root, '--base-ref', 'main');
   assert.equal(result.status, 0, result.output);
 });
 
-test('rejects altered or adjacent split parent pre-resolution', () => {
+test('rejects altered or adjacent converged split parent resolution', () => {
   const variants = [
     [
       "                  { allowOverlap: tbl.overlap !== 'never' },",
       '                  { allowOverlap: true },',
     ],
-    ['              pushTagged(sliceEl);\n              return withColumnBand', '              return withColumnBand'],
-    ['                return computeFloatTableBox(', '                sideEffect();\n                return computeFloatTableBox('],
+    ['                  floats: [...externalRegistry.floats],', '                  floats: measureState.floats,'],
+    ['            (sliceEl) => pushTagged(sliceEl),', '            (sliceEl) => { sideEffect(); pushTagged(sliceEl); },'],
   ];
   for (const [expected, replacement] of variants) {
     const { root, current } = initializeSplitParentCommitRepository();
