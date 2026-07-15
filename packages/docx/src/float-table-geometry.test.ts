@@ -15,7 +15,10 @@ import type {
 } from './layout/types.js';
 import {
   beginFloatingTablePlacementTransaction,
+  commitFloatingTableRegistryDelta,
+  floatingTableRegistryDelta,
   resolveFloatingTablePlacementInTransaction,
+  resolveFloatingTablePlacementsInFreshRegistry,
 } from './layout/floating-table-transaction.js';
 
 // Table-driven geometry assertions for floating tables (ECMA-376 §17.4.57
@@ -473,6 +476,86 @@ const retainedReferenceFrames: FloatingTableReferenceFramesPt = Object.freeze({
 });
 
 describe('retained floating table placement (§17.4.57)', () => {
+  it('commits the exact probed wrap box and paragraph sequence once', () => {
+    const snapshot = Object.freeze({
+      coordinateSpace: 'logical-page-points' as const,
+      flowDomainId: 'logical-page:3',
+      entries: Object.freeze([]),
+      nextParagraphId: 7,
+    });
+    const placement = retainedFloatingPlacement({
+      horzAnchor: 'page', vertAnchor: 'page', xPt: 100, yPt: 100,
+    });
+    const resolution = resolveFloatingTablePlacementInTransaction(
+      placement,
+      retainedReferenceFrames,
+      beginFloatingTablePlacementTransaction(
+        snapshot.entries,
+        snapshot.nextParagraphId,
+        snapshot.coordinateSpace,
+        snapshot.flowDomainId,
+      ),
+    );
+    const delta = floatingTableRegistryDelta(
+      snapshot,
+      resolution.transaction.delta,
+      resolution.transaction.nextParagraphId,
+    );
+    const current = {
+      coordinateSpace: snapshot.coordinateSpace,
+      flowDomainId: snapshot.flowDomainId,
+      nextParagraphId: snapshot.nextParagraphId,
+      occurrenceIds: Object.freeze([]),
+    } as const;
+
+    const committed = commitFloatingTableRegistryDelta(delta, current, 2);
+
+    expect(committed.nextParagraphId).toBe(8);
+    expect(committed.entries[0]).toMatchObject({
+      imageKey: placement.occurrenceId,
+      paraId: 7,
+      imageX: resolution.placement.bounds.xPt * 2,
+      imageY: resolution.placement.bounds.yPt * 2,
+      xLeft: resolution.placement.exclusionBounds.xPt * 2,
+      yTop: resolution.placement.exclusionBounds.yPt * 2,
+    });
+    expect(() => commitFloatingTableRegistryDelta(delta, {
+      ...current,
+      nextParagraphId: committed.nextParagraphId,
+      occurrenceIds: [placement.occurrenceId],
+    }, 2)).toThrow('base/domain mismatch');
+  });
+
+  it('re-resolves an upright nested float in a fresh physical-page domain', () => {
+    const logicalRetained = retainedFloatingPlacement({
+      horzAnchor: 'page', vertAnchor: 'margin', xPt: 10, yPt: 0,
+    });
+    const physicalFrames: FloatingTableReferenceFramesPt = Object.freeze({
+      page: Object.freeze({ xPt: 0, yPt: 0, widthPt: 200, heightPt: 300 }),
+      margin: Object.freeze({ xPt: 24, yPt: 20, widthPt: 146, heightPt: 240 }),
+      text: Object.freeze({ xPt: 150, yPt: 20, widthPt: 50, heightPt: 80 }),
+    });
+
+    const physical = resolveFloatingTablePlacementsInFreshRegistry(
+      [logicalRetained],
+      () => physicalFrames,
+      'upright-physical-page-points',
+      'upright-physical-page:0',
+    );
+
+    expect(physical.transaction).toMatchObject({
+      coordinateSpace: 'upright-physical-page-points',
+      flowDomainId: 'upright-physical-page:0',
+      nextParagraphId: 1,
+    });
+    expect(physical.placements[0]).toMatchObject({
+      xPt: 10,
+      yPt: 20,
+      bounds: { xPt: 10, yPt: 20 },
+    });
+    expect(physical.placements[0]?.bounds).not.toBe(logicalRetained.anchorBounds);
+  });
+
   it('resolves multiple floats in source order without mutating or duplicating the base snapshot', () => {
     const first = Object.freeze({
       ...retainedFloatingPlacement({

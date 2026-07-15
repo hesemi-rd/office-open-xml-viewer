@@ -157,6 +157,46 @@ function withNestedFloatingTable(
   });
 }
 
+function withFloatingTableAfterLeadingBlock(
+  nested: RetainedTableAcquisition,
+): RetainedTableAcquisition {
+  const baseRow = row(0, 60);
+  const hostCell = baseRow.cells[0]!;
+  const inputRow: TableRowLayoutInput = {
+    ...baseRow,
+    cells: [{
+      ...hostCell,
+      blocks: [
+        { layout: paragraph('leading-block', [30]), sourceBlockIndex: 0 },
+        { layout: paragraph('later-anchor', [30]), sourceBlockIndex: 2 },
+      ],
+    }],
+  };
+  const base = acquisition([inputRow]);
+  return Object.freeze({
+    ...base,
+    nestedById: Object.freeze({ [nested.layout.id]: nested }),
+    floatingTables: Object.freeze([Object.freeze({
+      hostCellId: hostCell.id,
+      sourceBlockIndex: 1,
+      anchorBlockIndex: 2,
+      tableId: nested.layout.id,
+      overlap: 'never' as const,
+      positioning: Object.freeze({
+        leftFromTextPt: 0,
+        rightFromTextPt: 0,
+        topFromTextPt: 0,
+        bottomFromTextPt: 0,
+        horzAnchor: 'page',
+        horzSpecified: true,
+        vertAnchor: 'text',
+        xPt: 5,
+        yPt: 0,
+      }),
+    })]),
+  });
+}
+
 function take(
   source: RetainedTableAcquisition,
   availableHeightPt: number,
@@ -232,7 +272,7 @@ describe('retained table pagination', () => {
         column: { xPt: 10, yPt: 10, widthPt: 100, heightPt: 80 },
       },
       floatingTableRegistry: {
-        coordinateSpace: 'logical-points',
+        coordinateSpace: 'logical-page-points',
         flowDomainId: pageRelative.input.flowDomainId,
         entries: Object.freeze([]),
         nextParagraphId: 0,
@@ -290,7 +330,7 @@ describe('retained table pagination', () => {
         column: { xPt: 10, yPt: 10, widthPt: 100, heightPt: 80 },
       },
       floatingTableRegistry: {
-        coordinateSpace: 'logical-points',
+        coordinateSpace: 'logical-page-points',
         flowDomainId: pageRelative.input.flowDomainId,
         entries: Object.freeze([]), nextParagraphId: 0,
       },
@@ -305,6 +345,114 @@ describe('retained table pagination', () => {
     expect(continuation.floatingTablePlacements).toEqual([]);
     expect(continuation.fragment?.floatingTables).toEqual([]);
     expect(continuation.fragment?.resolvedFloatingTables).toEqual([]);
+  });
+
+  it('defers a final-frame float until the fragment that owns a later anchor start', () => {
+    const source = withFloatingTableAfterLeadingBlock(acquisition([row(0, 10)]));
+    const context = {
+      floatingTableFrames: {
+        page: { xPt: 0, yPt: 0, widthPt: 200, heightPt: 100 },
+        margin: { xPt: 10, yPt: 10, widthPt: 180, heightPt: 80 },
+        column: { xPt: 10, yPt: 10, widthPt: 100, heightPt: 80 },
+      },
+      floatingTableRegistry: {
+        coordinateSpace: 'logical-page-points',
+        flowDomainId: source.input.flowDomainId,
+        entries: Object.freeze([]), nextParagraphId: 0,
+      },
+      finalPlacementTranslationPt: { xPt: 0, yPt: 0 },
+      reacquirePageDependentBlock: (request: { acquired: ParagraphLayout }) => request.acquired,
+    } as unknown as Partial<TableFragmentContext>;
+
+    const beforeAnchor = take(source, 30, startTableFragmentCursor(), context);
+
+    expect(beforeAnchor.fragment?.rows[0]?.cells[0]?.contentRanges).toEqual([
+      { kind: 'paragraph', blockIndex: 0, lineStart: 0, lineEnd: 1 },
+    ]);
+    expect(beforeAnchor.floatingTablePlacements).toEqual([]);
+    expect(beforeAnchor.floatingTableRegistryDelta).toEqual({
+      coordinateSpace: 'logical-page-points',
+      flowDomainId: source.input.flowDomainId,
+      baseNextParagraphId: 0,
+      nextParagraphId: 0,
+      entries: [],
+    });
+    expect(beforeAnchor.fragment?.resolvedFloatingTables).toEqual([]);
+
+    const atAnchor = take(source, 30, beforeAnchor.nextCursor!, context);
+    expect(atAnchor.fragment?.rows[0]?.cells[0]?.contentRanges).toEqual([
+      { kind: 'paragraph', blockIndex: 2, lineStart: 0, lineEnd: 1 },
+    ]);
+    expect(atAnchor.floatingTablePlacements).toHaveLength(1);
+    expect(atAnchor.floatingTablePlacements?.[0]?.source.anchorBounds.yPt).toBe(20);
+    expect(structuredClone(atAnchor.floatingTableRegistryDelta)).toEqual(
+      atAnchor.floatingTableRegistryDelta,
+    );
+    expect(atAnchor.floatingTableRegistryDelta).toMatchObject({
+      coordinateSpace: 'logical-page-points',
+      flowDomainId: source.input.flowDomainId,
+      baseNextParagraphId: 0,
+      nextParagraphId: 1,
+      entries: [{ paragraphId: 0 }],
+    });
+  });
+
+  it('recomputes later mixed-axis placements after earlier anchor reflow', () => {
+    const nested = acquisition([row(0, 10)]);
+    const baseRow = row(0, 40);
+    const host = baseRow.cells[0]!;
+    const inputRow: TableRowLayoutInput = {
+      ...baseRow,
+      cells: [{
+        ...host,
+        blocks: [
+          { layout: paragraph('first-anchor', [20]), sourceBlockIndex: 1 },
+          { layout: paragraph('second-anchor', [20]), sourceBlockIndex: 3 },
+        ],
+      }],
+    };
+    const base = acquisition([inputRow]);
+    const positioning = Object.freeze({
+      leftFromTextPt: 0, rightFromTextPt: 0, topFromTextPt: 0, bottomFromTextPt: 0,
+      horzAnchor: 'page', horzSpecified: true, vertAnchor: 'text', xPt: 10, yPt: 0,
+    });
+    const source: RetainedTableAcquisition = Object.freeze({
+      ...base,
+      nestedById: Object.freeze({ [nested.layout.id]: nested }),
+      floatingTables: Object.freeze([0, 2].map((sourceBlockIndex, index) => Object.freeze({
+        hostCellId: host.id,
+        sourceBlockIndex,
+        anchorBlockIndex: index === 0 ? 1 : 3,
+        tableId: nested.layout.id,
+        overlap: 'never' as const,
+        positioning,
+      }))),
+    });
+    const context = {
+      floatingTableFrames: {
+        page: { xPt: 0, yPt: 0, widthPt: 200, heightPt: 120 },
+        margin: { xPt: 10, yPt: 10, widthPt: 180, heightPt: 100 },
+        column: { xPt: 10, yPt: 20, widthPt: 100, heightPt: 100 },
+      },
+      floatingTableRegistry: {
+        coordinateSpace: 'logical-page-points', flowDomainId: 'logical-page:0',
+        entries: Object.freeze([]), nextParagraphId: 0,
+      },
+      reacquirePageDependentBlock: (request: { sourceBlockIndex: number; acquired: ParagraphLayout }) => (
+        request.sourceBlockIndex === 1 ? paragraph('first-anchor-wrapped', [20, 20]) : request.acquired
+      ),
+    } as unknown as Partial<TableFragmentContext>;
+
+    const result = take(source, 100, startTableFragmentCursor(), context);
+
+    expect(result.floatingTablePlacements).toHaveLength(2);
+    expect(result.floatingTablePlacements?.map((item) => item.source.anchorBounds.yPt)).toEqual([
+      20, 60,
+    ]);
+    expect(result.floatingTablePlacements?.[1]?.yPt).toBe(60);
+    expect(result.floatingTableRegistryDelta?.entries.map((entry) => entry.paragraphId)).toEqual([
+      0, 1,
+    ]);
   });
 
   it('emits the largest fitting row prefix and preserves one column authority', () => {
@@ -629,35 +777,62 @@ describe('retained table pagination', () => {
   it('creates one page-local floating occurrence for each repeated-header occurrence', () => {
     const nested = acquisition([row(0, 10)]);
     const header = row(0, 20, { repeatedHeader: true });
-    const source = withNestedFloatingTable(acquisition([
+    const retained = withNestedFloatingTable(acquisition([
       header,
       row(1, 60),
       row(2, 60),
     ]), nested);
+    const source = Object.freeze({
+      ...retained,
+      floatingTables: Object.freeze(retained.floatingTables.map((placement) => Object.freeze({
+        ...placement,
+        positioning: Object.freeze({
+          ...placement.positioning,
+          horzAnchor: 'page', vertAnchor: 'page', xPt: 10, yPt: 20,
+        }),
+      }))),
+    });
+    const finalContext = (pageIndex: number) => ({
+      floatingTableFrames: {
+        page: { xPt: 0, yPt: 0, widthPt: 200, heightPt: 100 },
+        margin: { xPt: 10, yPt: 10, widthPt: 180, heightPt: 80 },
+        column: { xPt: 10, yPt: 10, widthPt: 100, heightPt: 80 },
+      },
+      floatingTableRegistry: {
+        coordinateSpace: 'logical-page-points',
+        flowDomainId: `logical-page:${pageIndex}`,
+        entries: Object.freeze([]), nextParagraphId: 0,
+      },
+      reacquirePageDependentBlock: (request: { acquired: ParagraphLayout }) => request.acquired,
+    }) as unknown as Partial<TableFragmentContext>;
 
     const first = take(source, 80, startTableFragmentCursor(), {
       page: { physicalPageIndex: 0, displayPageNumber: 9, occurrenceId: 'page-9' },
+      ...finalContext(0),
     });
     const second = take(source, 80, first.nextCursor!, {
       page: { physicalPageIndex: 1, displayPageNumber: 10, occurrenceId: 'page-10' },
+      ...finalContext(1),
     });
 
-    expect(first.fragment?.floatingTables).toHaveLength(1);
-    expect(second.fragment?.floatingTables).toHaveLength(1);
-    expect(first.fragment?.floatingTables[0]).toMatchObject({
+    expect(first.fragment?.resolvedFloatingTables).toHaveLength(1);
+    expect(second.fragment?.resolvedFloatingTables).toHaveLength(1);
+    expect(first.fragment?.resolvedFloatingTables[0]?.source).toMatchObject({
       ownership: 'source',
       occurrenceId: expect.stringContaining('page-9:'),
       physicalPageIndex: 0,
       displayPageNumber: 9,
     });
-    expect(second.fragment?.floatingTables[0]).toMatchObject({
+    expect(second.fragment?.resolvedFloatingTables[0]?.source).toMatchObject({
       ownership: 'repeated-header',
       occurrenceId: expect.stringContaining('page-10:'),
       physicalPageIndex: 1,
       displayPageNumber: 10,
     });
-    expect(first.fragment?.floatingTables[0]?.child).toBe(nested.layout);
-    expect(second.fragment?.floatingTables[0]?.child).toBe(nested.layout);
+    expect(first.fragment?.resolvedFloatingTables[0]?.child).toBe(nested.layout);
+    expect(second.fragment?.resolvedFloatingTables[0]?.child).toBe(nested.layout);
+    expect(first.floatingTableRegistryDelta?.entries).toHaveLength(1);
+    expect(second.floatingTableRegistryDelta?.entries).toHaveLength(1);
   });
 
 });

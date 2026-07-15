@@ -1,6 +1,8 @@
 import { resolveFloatOverlap, type FloatRect } from '../float-layout.js';
 import type {
   FloatRegistryEntryPt,
+  FloatRegistryDeltaPt,
+  FloatRegistrySnapshotPt,
   FloatingTablePlacementLayout,
   FloatingTablePositionInput,
   FloatingTableReferenceFramesPt,
@@ -8,6 +10,8 @@ import type {
 } from './types.js';
 
 export interface FloatingTablePlacementTransaction {
+  readonly coordinateSpace: FloatRegistrySnapshotPt['coordinateSpace'];
+  readonly flowDomainId: string;
   readonly base: readonly FloatRegistryEntryPt[];
   readonly delta: readonly FloatRegistryEntryPt[];
   readonly nextParagraphId: number;
@@ -145,9 +149,71 @@ function registryFloat(entry: FloatRegistryEntryPt): FloatRect {
   };
 }
 
+export function floatingTableRegistryDelta(
+  snapshot: FloatRegistrySnapshotPt,
+  entries: readonly FloatRegistryEntryPt[],
+  nextParagraphId: number,
+): FloatRegistryDeltaPt {
+  return Object.freeze({
+    coordinateSpace: snapshot.coordinateSpace,
+    flowDomainId: snapshot.flowDomainId,
+    baseNextParagraphId: snapshot.nextParagraphId,
+    nextParagraphId,
+    entries: Object.freeze([...entries]),
+  });
+}
+
+/** Convert the exact probed point-space delta into the renderer's scaled registry. */
+export function commitFloatingTableRegistryDelta(
+  delta: FloatRegistryDeltaPt,
+  current: Readonly<{
+    coordinateSpace: FloatRegistrySnapshotPt['coordinateSpace'];
+    flowDomainId: string;
+    nextParagraphId: number;
+    occurrenceIds: readonly string[];
+  }>,
+  scale: number,
+): Readonly<{ entries: readonly FloatRect[]; nextParagraphId: number }> {
+  if (current.coordinateSpace !== delta.coordinateSpace
+    || current.flowDomainId !== delta.flowDomainId
+    || current.nextParagraphId !== delta.baseNextParagraphId) {
+    throw new Error('Floating table registry delta base/domain mismatch');
+  }
+  const existingIds = new Set(current.occurrenceIds);
+  if (delta.entries.some((entry) => existingIds.has(entry.occurrenceId))) {
+    throw new Error('Floating table registry delta was already committed');
+  }
+  if (delta.nextParagraphId !== delta.baseNextParagraphId + delta.entries.length) {
+    throw new Error('Floating table registry delta sequence mismatch');
+  }
+  return Object.freeze({
+    entries: Object.freeze(delta.entries.map((entry) => {
+      const pointRect = registryFloat(entry);
+      return Object.freeze({
+        ...pointRect,
+        imageX: pointRect.imageX * scale,
+        imageY: pointRect.imageY * scale,
+        imageW: pointRect.imageW * scale,
+        imageH: pointRect.imageH * scale,
+        xLeft: pointRect.xLeft * scale,
+        xRight: pointRect.xRight * scale,
+        yTop: pointRect.yTop * scale,
+        yBottom: pointRect.yBottom * scale,
+        distLeft: pointRect.distLeft * scale,
+        distRight: pointRect.distRight * scale,
+        distTop: pointRect.distTop * scale,
+        distBottom: pointRect.distBottom * scale,
+      });
+    })),
+    nextParagraphId: delta.nextParagraphId,
+  });
+}
+
 export function beginFloatingTablePlacementTransaction(
   base: readonly FloatRegistryEntryPt[],
   nextParagraphId: number,
+  coordinateSpace: FloatRegistrySnapshotPt['coordinateSpace'] = 'logical-page-points',
+  flowDomainId = 'logical-page',
 ): FloatingTablePlacementTransaction {
   const ids = new Set<string>();
   for (const entry of base) {
@@ -157,6 +223,8 @@ export function beginFloatingTablePlacementTransaction(
     ids.add(entry.occurrenceId);
   }
   return Object.freeze({
+    coordinateSpace,
+    flowDomainId,
     base: Object.freeze([...base]),
     delta: Object.freeze([]),
     nextParagraphId,
@@ -203,9 +271,34 @@ export function resolveFloatingTablePlacementInTransaction(
   return Object.freeze({
     placement: finalPlacement,
     transaction: Object.freeze({
+      coordinateSpace: transaction.coordinateSpace,
+      flowDomainId: transaction.flowDomainId,
       base: transaction.base,
       delta: Object.freeze([...transaction.delta, entry]),
       nextParagraphId: transaction.nextParagraphId + 1,
     }),
   });
+}
+
+export function resolveFloatingTablePlacementsInFreshRegistry(
+  placements: readonly FloatingTablePlacementLayout[],
+  framesFor: (placement: FloatingTablePlacementLayout) => FloatingTableReferenceFramesPt,
+  coordinateSpace: FloatRegistrySnapshotPt['coordinateSpace'],
+  flowDomainId: string,
+): Readonly<{
+  placements: readonly ResolvedFloatingTablePlacementLayout[];
+  transaction: FloatingTablePlacementTransaction;
+}> {
+  let transaction = beginFloatingTablePlacementTransaction(
+    [], 0, coordinateSpace, flowDomainId,
+  );
+  const resolved: ResolvedFloatingTablePlacementLayout[] = [];
+  for (const placement of placements) {
+    const resolution = resolveFloatingTablePlacementInTransaction(
+      placement, framesFor(placement), transaction,
+    );
+    resolved.push(resolution.placement);
+    transaction = resolution.transaction;
+  }
+  return Object.freeze({ placements: Object.freeze(resolved), transaction });
 }

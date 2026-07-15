@@ -1,13 +1,16 @@
 import type { RetainedTableAcquisition } from './table-acquisition.js';
 import {
   beginFloatingTablePlacementTransaction,
+  floatingTableRegistryDelta,
   resolveFloatingTablePlacementInTransaction,
 } from './floating-table-transaction.js';
 import { sliceParagraphLayout } from './paragraph.js';
 import { layoutTable, measureTableCellBlockFlowHeightPt } from './table.js';
 import type {
   FlowBlockPlacement,
+  FloatRegistryDeltaPt,
   FloatRegistryEntryPt,
+  FloatRegistrySnapshotPt,
   FloatingTablePlacementLayout,
   FloatingTableReferenceFramesPt,
   LayoutServices,
@@ -112,12 +115,7 @@ export interface TableFragmentContext {
     margin: FloatingTableReferenceFramesPt['margin'];
     column: FloatingTableReferenceFramesPt['text'];
   }>;
-  readonly floatingTableRegistry?: Readonly<{
-    coordinateSpace: 'logical-points';
-    flowDomainId: string;
-    entries: readonly FloatRegistryEntryPt[];
-    nextParagraphId: number;
-  }>;
+  readonly floatingTableRegistry?: FloatRegistrySnapshotPt;
   readonly finalPlacementTranslationPt?: Readonly<{ xPt: number; yPt: number }>;
   /** Reacquire only content whose destination page can change its geometry. */
   readonly reacquirePageDependentBlock?: (
@@ -130,7 +128,7 @@ export interface TableFragmentResult {
   readonly nextCursor: TableFragmentCursor | null;
   readonly requiresFreshPage: boolean;
   readonly floatingTablePlacements?: readonly ResolvedFloatingTablePlacementLayout[];
-  readonly floatingTableRegistryDelta?: readonly FloatRegistryEntryPt[];
+  readonly floatingTableRegistryDelta?: FloatRegistryDeltaPt;
 }
 
 interface SelectedCell {
@@ -242,6 +240,36 @@ function ownsFinalFrameAxis(placement: FloatingTablePlacementLayout): boolean {
   return horizontal || vertical;
 }
 
+function remainingRowAtCursor(
+  row: TableRowLayoutInput,
+  cursor: TableFragmentCursor,
+): TableRowLayoutInput {
+  return {
+    ...row,
+    heightPt: null,
+    heightRule: 'auto',
+    cells: row.cells.map((cell, cellIndex) => {
+      const cellCursor = cursor.cells[cellIndex] ?? emptyCellCursor();
+      return {
+        ...cell,
+        blocks: cell.blocks.slice(cellCursor.blockIndex).map((block, blockOffset) => {
+          if (blockOffset !== 0
+            || cellCursor.paragraphLineStart === 0
+            || block.layout.kind !== 'paragraph') return block;
+          return {
+            ...block,
+            layout: paragraphSlice(
+              block.layout,
+              cellCursor.paragraphLineStart,
+              block.layout.lines.length,
+            ),
+          };
+        }),
+      };
+    }),
+  };
+}
+
 function finalFrameRow(
   source: RetainedTableAcquisition,
   row: TableRowLayoutInput,
@@ -250,6 +278,7 @@ function finalFrameRow(
   context: TableFragmentContext,
   registry: readonly FloatRegistryEntryPt[],
   nextParagraphId: number,
+  cursor: TableFragmentCursor,
   ownsAnchorStart: (
     occurrence: RetainedTableAcquisition['floatingTables'][number],
   ) => boolean,
@@ -278,10 +307,11 @@ function finalFrameRow(
       yPt: context.placement.cursor.yPt + rowOffsetPt,
     },
   };
+  const remainingRow = remainingRowAtCursor(row, cursor);
   const provisional = layoutTable({
     ...source.input,
     id: `${source.input.id}:float-probe:${context.page.occurrenceId}:${row.logicalRowIndex}`,
-    rows: [row],
+    rows: [remainingRow],
   }, rowPlacement, context.services).layout;
   const translation = context.finalPlacementTranslationPt ?? { xPt: 0, yPt: 0 };
   const placementFor = (
@@ -326,44 +356,54 @@ function finalFrameRow(
     });
   };
 
-  let transaction = beginFloatingTablePlacementTransaction(registry, nextParagraphId);
-  const resolved: ResolvedFloatingTablePlacementLayout[] = [];
-  for (const occurrence of occurrences) {
-    const placement = placementFor(occurrence, provisional, row);
-    if (!placement || !ownsFinalFrameAxis(placement)) continue;
-    const resolution = resolveFloatingTablePlacementInTransaction(placement, {
-      page: frames.page,
-      margin: frames.margin,
-      text: {
-        xPt: placement.columnBounds?.xPt ?? placement.anchorBounds.xPt,
-        yPt: placement.anchorBounds.yPt,
-        widthPt: placement.columnBounds?.widthPt ?? placement.anchorBounds.widthPt,
-        heightPt: placement.anchorBounds.heightPt,
-      },
-    }, transaction);
-    resolved.push(resolution.placement);
-    transaction = resolution.transaction;
-  }
-  if (resolved.length === 0) {
-    return { row, resolved, registry, nextParagraphId };
-  }
-
-  const wrappedRow: TableRowLayoutInput = {
+  const resolveCandidate = (candidate: TableRowLayoutInput) => {
+    const remainingCandidate = remainingRowAtCursor(candidate, cursor);
+    const laidOut = candidate === row ? provisional : layoutTable({
+      ...source.input,
+      id: `${source.input.id}:float-converge:${context.page.occurrenceId}:${row.logicalRowIndex}`,
+      rows: [remainingCandidate],
+    }, rowPlacement, context.services).layout;
+    let transaction = beginFloatingTablePlacementTransaction(
+      registry,
+      nextParagraphId,
+      context.floatingTableRegistry?.coordinateSpace ?? 'logical-page-points',
+      context.floatingTableRegistry?.flowDomainId ?? source.input.flowDomainId,
+    );
+    const resolved: ResolvedFloatingTablePlacementLayout[] = [];
+    for (const occurrence of occurrences) {
+      const placement = placementFor(occurrence, laidOut, remainingCandidate);
+      if (!placement || !ownsFinalFrameAxis(placement)) continue;
+      const resolution = resolveFloatingTablePlacementInTransaction(placement, {
+        page: frames.page,
+        margin: frames.margin,
+        text: {
+          xPt: placement.columnBounds?.xPt ?? placement.anchorBounds.xPt,
+          yPt: placement.anchorBounds.yPt,
+          widthPt: placement.columnBounds?.widthPt ?? placement.anchorBounds.widthPt,
+          heightPt: placement.anchorBounds.heightPt,
+        },
+      }, transaction);
+      resolved.push(resolution.placement);
+      transaction = resolution.transaction;
+    }
+    return { resolved: Object.freeze(resolved), transaction };
+  };
+  const reacquireCandidate = (
+    resolved: readonly ResolvedFloatingTablePlacementLayout[],
+  ): TableRowLayoutInput => ({
     ...row,
     cells: row.cells.map((cell, logicalCellIndex) => ({
       ...cell,
       blocks: cell.blocks.map((block) => {
-        const exclusions = resolved
-          .filter((placement) => (
-            placement.source.hostCellId === cell.id
-            && placement.source.anchorBlockIndex === block.sourceBlockIndex
-          ))
-          .map((placement) => Object.freeze({
-            xPt: placement.exclusionBounds.xPt - placement.source.anchorBounds.xPt,
-            yPt: placement.exclusionBounds.yPt - placement.source.anchorBounds.yPt,
-            widthPt: placement.exclusionBounds.widthPt,
-            heightPt: placement.exclusionBounds.heightPt,
-          }));
+        const exclusions = resolved.filter((placement) => (
+          placement.source.hostCellId === cell.id
+          && placement.source.anchorBlockIndex === block.sourceBlockIndex
+        )).map((placement) => Object.freeze({
+          xPt: placement.exclusionBounds.xPt - placement.source.anchorBounds.xPt,
+          yPt: placement.exclusionBounds.yPt - placement.source.anchorBounds.yPt,
+          widthPt: placement.exclusionBounds.widthPt,
+          heightPt: placement.exclusionBounds.heightPt,
+        }));
         if (exclusions.length === 0 || block.layout.kind !== 'paragraph') return block;
         return {
           ...block,
@@ -379,30 +419,64 @@ function finalFrameRow(
         };
       }),
     })),
-  };
-  const finalLayout = layoutTable({
-    ...source.input,
-    id: `${source.input.id}:float-final:${context.page.occurrenceId}:${row.logicalRowIndex}`,
-    rows: [wrappedRow],
-  }, rowPlacement, context.services).layout;
-  const finalResolved = resolved.map((placement) => {
-    const finalSource = placementFor(
-      source.floatingTables.find((candidate) => (
-        candidate.hostCellId === placement.source.hostCellId
-        && candidate.sourceBlockIndex === placement.source.sourceBlockIndex
-        && candidate.tableId === placement.source.tableId
-      ))!,
-      finalLayout,
-      wrappedRow,
-    );
-    return finalSource ? Object.freeze({ ...placement, source: finalSource }) : placement;
   });
-  return {
-    row: wrappedRow,
-    resolved: Object.freeze(finalResolved),
-    registry: Object.freeze([...transaction.base, ...transaction.delta]),
-    nextParagraphId: transaction.nextParagraphId,
-  };
+  const convergenceKey = (
+    candidate: TableRowLayoutInput,
+    resolved: readonly ResolvedFloatingTablePlacementLayout[],
+  ) => JSON.stringify({
+    blocks: candidate.cells.flatMap((cell) => cell.blocks.map((block) => ({
+      sourceBlockIndex: block.sourceBlockIndex,
+      advancePt: block.layout.advancePt,
+      lineCount: block.layout.kind === 'paragraph' ? block.layout.lines.length : null,
+    }))),
+    placements: resolved.map((placement) => ({
+      occurrenceId: placement.occurrenceId,
+      bounds: placement.bounds,
+      exclusionBounds: placement.exclusionBounds,
+      anchorBounds: placement.source.anchorBounds,
+    })),
+  });
+
+  let candidate = row;
+  let previousKey: string | null = null;
+  for (let iteration = 0; iteration < 4; iteration += 1) {
+    const resolution = resolveCandidate(candidate);
+    if (resolution.resolved.length === 0) {
+      return { row, resolved: [], registry, nextParagraphId };
+    }
+    const key = convergenceKey(candidate, resolution.resolved);
+    if (previousKey === key) {
+      return {
+        row: candidate,
+        resolved: resolution.resolved,
+        registry: Object.freeze([
+          ...resolution.transaction.base,
+          ...resolution.transaction.delta,
+        ]),
+        nextParagraphId: resolution.transaction.nextParagraphId,
+      };
+    }
+    previousKey = key;
+    candidate = reacquireCandidate(resolution.resolved);
+  }
+  throw new Error('Floating table final-frame reflow did not converge');
+}
+
+function selectedOwnsResolvedPlacement(
+  source: RetainedTableAcquisition,
+  selection: SelectedRow,
+  placement: ResolvedFloatingTablePlacementLayout,
+): boolean {
+  const sourceRow = source.input.rows[selection.logicalRowIndex];
+  const cellIndex = sourceRow?.cells.findIndex(
+    (cell) => cell.id === placement.source.hostCellId,
+  ) ?? -1;
+  return cellIndex >= 0 && (selection.ranges[cellIndex]?.some((range) => (
+    range.blockIndex === placement.source.anchorBlockIndex
+      && (range.kind === 'whole'
+        || (range.kind === 'paragraph' && range.lineStart === 0)
+        || (range.kind === 'nested-table' && range.childFragmentIndex === 0))
+  )) ?? false);
 }
 
 function selectedWholeRow(
@@ -775,7 +849,7 @@ export function takeTableFragment(
   const selected: SelectedRow[] = [];
   const registrySnapshot = context.floatingTableRegistry;
   if (registrySnapshot
-    && (registrySnapshot.coordinateSpace !== 'logical-points'
+    && (registrySnapshot.coordinateSpace !== 'logical-page-points'
       || registrySnapshot.flowDomainId.length === 0)) {
     throw new Error('Floating table registry coordinate/domain mismatch');
   }
@@ -801,6 +875,7 @@ export function takeTableFragment(
         context,
         floatRegistry,
         floatParagraphId,
+        startTableFragmentCursor(),
         () => true,
       );
       const header = preparedHeader.row;
@@ -842,6 +917,7 @@ export function takeTableFragment(
       context,
       floatRegistry,
       floatParagraphId,
+      rowCursor,
       (occurrence) => {
         const cellIndex = acquiredRow.cells.findIndex(
           (cell) => cell.id === occurrence.hostCellId,
@@ -921,14 +997,22 @@ export function takeTableFragment(
 
     const partial = partialRow(source, row, rowCursor, availablePt, context);
     if (partial.selected) {
+      const ownedResolved = preparedRow.resolved.filter((placement) => (
+        selectedOwnsResolvedPlacement(source, partial.selected!, placement)
+      ));
+      const ownedOccurrenceIds = new Set(ownedResolved.map((placement) => placement.occurrenceId));
+      const baseRegistryLength = floatRegistry.length;
+      const committedEntries = preparedRow.registry.slice(baseRegistryLength).filter(
+        (entry) => ownedOccurrenceIds.has(entry.occurrenceId),
+      );
       selected.push({
         ...partial.selected,
-        ...(preparedRow.resolved.length
-          ? { resolvedFloatingTables: preparedRow.resolved }
+        ...(ownedResolved.length
+          ? { resolvedFloatingTables: Object.freeze(ownedResolved) }
           : {}),
       });
-      floatRegistry = preparedRow.registry;
-      floatParagraphId = preparedRow.nextParagraphId;
+      floatRegistry = Object.freeze([...floatRegistry, ...committedEntries]);
+      floatParagraphId += committedEntries.length;
       nextCursor = partial.next.rowIndex >= source.input.rows.length ? null : partial.next;
     }
     break;
@@ -969,10 +1053,16 @@ export function takeTableFragment(
     nextCursor,
     requiresFreshPage: false,
     floatingTablePlacements: fragment.resolvedFloatingTables,
-    floatingTableRegistryDelta: Object.freeze(floatRegistry.slice(
-      registrySnapshot?.entries.length ?? 0,
-    ).filter((entry) => fragment.resolvedFloatingTables.some(
-      (placement) => placement.occurrenceId === entry.occurrenceId,
-    ))),
+    ...(registrySnapshot ? {
+      floatingTableRegistryDelta: floatingTableRegistryDelta(
+        registrySnapshot,
+        floatRegistry.slice(registrySnapshot.entries.length).filter((entry) => (
+          fragment.resolvedFloatingTables.some(
+            (placement) => placement.occurrenceId === entry.occurrenceId,
+          )
+        )),
+        registrySnapshot.nextParagraphId + fragment.resolvedFloatingTables.length,
+      ),
+    } : {}),
   };
 }

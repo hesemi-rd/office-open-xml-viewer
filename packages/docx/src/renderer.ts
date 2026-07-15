@@ -145,6 +145,10 @@ import type {
 } from './layout/types.js';
 import type { DocumentLayout as RetainedDocumentLayout } from './layout/types.js';
 import { normalizeLayoutOptions } from './layout/options.js';
+import {
+  commitFloatingTableRegistryDelta,
+  resolveFloatingTablePlacementsInFreshRegistry,
+} from './layout/floating-table-transaction.js';
 import type { LayoutOptions } from './layout/options.js';
 import {
   paginatedFlowHasPaginationDependentFields,
@@ -2055,6 +2059,41 @@ async function renderDocumentToCanvasLeased(
       const marginBottomPt = physical?.marginBottom ?? state.marginBottom;
       const dxPt = placement.xPt - fragment.flowBounds.xPt;
       const dyPt = placement.yPt - fragment.flowBounds.yPt;
+      if (physicalPage) {
+        const physicalOccurrences = [
+          ...retained.map((item) => item.source),
+          ...occurrences,
+        ].map((occurrence) => Object.freeze({
+          ...occurrence,
+          anchorBounds: Object.freeze({
+            ...occurrence.anchorBounds,
+            xPt: occurrence.anchorBounds.xPt + dxPt,
+            yPt: occurrence.anchorBounds.yPt + dyPt,
+          }),
+          ...(occurrence.columnBounds ? {
+            columnBounds: Object.freeze({
+              ...occurrence.columnBounds,
+              xPt: occurrence.columnBounds.xPt + dxPt,
+              yPt: occurrence.columnBounds.yPt + dyPt,
+            }),
+          } : {}),
+        }));
+        return resolveFloatingTablePlacementsInFreshRegistry(
+          physicalOccurrences,
+          (physicalOccurrence) => ({
+            page: { xPt: 0, yPt: 0, widthPt: pageWidthPt, heightPt: pageHeightPt },
+            margin: {
+              xPt: marginLeftPt,
+              yPt: marginTopPt,
+              widthPt: Math.max(0, pageWidthPt - marginLeftPt - marginRightPt),
+              heightPt: Math.max(0, pageHeightPt - marginTopPt - marginBottomPt),
+            },
+            text: physicalOccurrence.anchorBounds,
+          }),
+          'upright-physical-page-points',
+          `upright-physical-page:${state.pageIndex}`,
+        ).placements;
+      }
       return Object.freeze([...retained, ...occurrences.map((occurrence) => (
         resolveFloatingTablePlacement(occurrence, {
           page: { xPt: 0, yPt: 0, widthPt: pageWidthPt, heightPt: pageHeightPt },
@@ -7736,7 +7775,7 @@ export function splitTableAcrossPages(
           },
         },
         floatingTableRegistry: {
-          coordinateSpace: 'logical-points',
+          coordinateSpace: 'logical-page-points',
           flowDomainId: `logical-page:${physicalPageIndex}`,
           entries: Object.freeze(rowSplit.state.floats.map((float, index) => Object.freeze({
             kind: float.kind,
@@ -7814,30 +7853,19 @@ export function splitTableAcrossPages(
           fragment.rows[fragmentRowIndex]?.logicalRowIndex ?? 0,
       });
       pages[pages.length - 1]!.push(sliceEl);
-      const existingNestedFloatIds = new Set(
-        rowSplit.state.floats.map((float) => float.imageKey).filter(Boolean),
-      );
-      for (const placement of result.floatingTablePlacements ?? []) {
-        if (existingNestedFloatIds.has(placement.occurrenceId)) continue;
-        const positioning = placement.source.positioning;
-        const scale = rowSplit.state.scale;
-        rowSplit.state.floats.push({
-          kind: 'table', mode: 'square', imageKey: placement.occurrenceId,
-          imageX: placement.xPt * scale, imageY: placement.yPt * scale,
-          imageW: placement.bounds.widthPt * scale,
-          imageH: placement.bounds.heightPt * scale,
-          xLeft: placement.exclusionBounds.xPt * scale,
-          xRight: (placement.exclusionBounds.xPt + placement.exclusionBounds.widthPt) * scale,
-          yTop: placement.exclusionBounds.yPt * scale,
-          yBottom: (placement.exclusionBounds.yPt + placement.exclusionBounds.heightPt) * scale,
-          side: 'bothSides',
-          distLeft: positioning.leftFromTextPt * scale,
-          distRight: positioning.rightFromTextPt * scale,
-          distTop: positioning.topFromTextPt * scale,
-          distBottom: positioning.bottomFromTextPt * scale,
-          paraId: rowSplit.state.floatParaSeq++, drawn: true,
-        });
-        existingNestedFloatIds.add(placement.occurrenceId);
+      if (result.floatingTableRegistryDelta) {
+        const committed = commitFloatingTableRegistryDelta(
+          result.floatingTableRegistryDelta,
+          {
+            coordinateSpace: 'logical-page-points',
+            flowDomainId: `logical-page:${physicalPageIndex}`,
+            nextParagraphId: rowSplit.state.floatParaSeq,
+            occurrenceIds: rowSplit.state.floats.map((float) => float.imageKey).filter(Boolean),
+          },
+          rowSplit.state.scale,
+        );
+        rowSplit.state.floats.push(...committed.entries);
+        rowSplit.state.floatParaSeq = committed.nextParagraphId;
       }
       y += fragment.advancePt;
       emittedAny = true;
@@ -8008,7 +8036,7 @@ export function splitFloatTableAcrossPages(
           },
         },
         floatingTableRegistry: {
-          coordinateSpace: 'logical-points',
+          coordinateSpace: 'logical-page-points',
           flowDomainId: `logical-page:${destinationPage?.pageIndex ?? sliceOrdinal}`,
           entries: Object.freeze(probeState.floats.map((float, index) => Object.freeze({
             kind: float.kind,
@@ -8083,30 +8111,21 @@ export function splitFloatTableAcrossPages(
       );
       emitSlice?.(sliceEl);
       if (emitSlice) {
-        const existingNestedFloatIds = new Set(
-          retainedRecord.state.floats.map((float) => float.imageKey).filter(Boolean),
-        );
-        for (const placement of result.floatingTablePlacements ?? []) {
-          if (existingNestedFloatIds.has(placement.occurrenceId)) continue;
-          const positioning = placement.source.positioning;
-          const scale = retainedRecord.state.scale;
-          retainedRecord.state.floats.push({
-            kind: 'table', mode: 'square', imageKey: placement.occurrenceId,
-            imageX: placement.xPt * scale, imageY: placement.yPt * scale,
-            imageW: placement.bounds.widthPt * scale,
-            imageH: placement.bounds.heightPt * scale,
-            xLeft: placement.exclusionBounds.xPt * scale,
-            xRight: (placement.exclusionBounds.xPt + placement.exclusionBounds.widthPt) * scale,
-            yTop: placement.exclusionBounds.yPt * scale,
-            yBottom: (placement.exclusionBounds.yPt + placement.exclusionBounds.heightPt) * scale,
-            side: 'bothSides',
-            distLeft: positioning.leftFromTextPt * scale,
-            distRight: positioning.rightFromTextPt * scale,
-            distTop: positioning.topFromTextPt * scale,
-            distBottom: positioning.bottomFromTextPt * scale,
-            paraId: retainedRecord.state.floatParaSeq++, drawn: true,
-          });
-          existingNestedFloatIds.add(placement.occurrenceId);
+        if (result.floatingTableRegistryDelta) {
+          const destinationPageIndex = destinationPage?.pageIndex ?? sliceOrdinal;
+          const committed = commitFloatingTableRegistryDelta(
+            result.floatingTableRegistryDelta,
+            {
+              coordinateSpace: 'logical-page-points',
+              flowDomainId: `logical-page:${destinationPageIndex}`,
+              nextParagraphId: retainedRecord.state.floatParaSeq,
+              occurrenceIds: retainedRecord.state.floats
+                .map((float) => float.imageKey).filter(Boolean),
+            },
+            retainedRecord.state.scale,
+          );
+          retainedRecord.state.floats.push(...committed.entries);
+          retainedRecord.state.floatParaSeq = committed.nextParagraphId;
         }
       }
 

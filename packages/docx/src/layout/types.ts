@@ -630,6 +630,25 @@ export interface FloatRegistryEntryPt {
   readonly exclusionBounds: LayoutRect;
 }
 
+export type FloatRegistryCoordinateSpace =
+  | 'logical-page-points'
+  | 'upright-physical-page-points';
+
+export interface FloatRegistrySnapshotPt {
+  readonly coordinateSpace: FloatRegistryCoordinateSpace;
+  readonly flowDomainId: string;
+  readonly entries: readonly FloatRegistryEntryPt[];
+  readonly nextParagraphId: number;
+}
+
+export interface FloatRegistryDeltaPt {
+  readonly coordinateSpace: FloatRegistryCoordinateSpace;
+  readonly flowDomainId: string;
+  readonly baseNextParagraphId: number;
+  readonly nextParagraphId: number;
+  readonly entries: readonly FloatRegistryEntryPt[];
+}
+
 /** Paint-ready result of resolving a page-local floating-table occurrence. */
 export interface ResolvedFloatingTablePlacementLayout {
   readonly kind: 'resolved-floating-table-placement';
