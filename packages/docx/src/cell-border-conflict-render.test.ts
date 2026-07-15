@@ -181,7 +181,7 @@ describe('§17.4.66 — adjacent cell border conflict, end-to-end render', () =>
     expect(verticalAt(strokes, 20)).toHaveLength(1);
   });
 
-  it('§17.4.15: extends the shared grid when gridBefore exceeds tblGrid', async () => {
+  it('extends the inferred grid for a hand-built table without authored-grid metadata', async () => {
     const first = cell('first', {
       top: bs({ width: 1 }),
       left: bs({ width: 1 }),
@@ -194,9 +194,10 @@ describe('§17.4.66 — adjacent cell border conflict, end-to-end render', () =>
 
     const strokes = await render(t);
 
-    // The missing tracks are created at zero, then the first-row constraints
-    // and authored tblW are resolved by §17.18.87. The cell remains after all
-    // three skipped columns instead of being clamped back to column zero.
+    // The stable hand-built DocTable contract cannot state whether colWidths
+    // came from an authored tblGrid. Only this compatibility path infers the
+    // missing tracks; parsed documents retain authored-grid presence and apply
+    // §17.4.15 before entering the solver.
     expect(horizontalAt(strokes, 0)).toEqual(expect.arrayContaining([
       expect.objectContaining({ x1: 30, x2: 60 }),
     ]));

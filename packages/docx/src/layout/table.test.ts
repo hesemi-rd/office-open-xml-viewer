@@ -600,6 +600,157 @@ describe('retained table layout', () => {
     ]));
   });
 
+  it('applies the Word insideV conflict deviation when cells are spaced', async () => {
+    const tableInside = { widthPt: 4, color: '#ff0000', authoredStyle: 'thick' };
+    const conditionalInside = { widthPt: 1, color: '#0000ff', authoredStyle: 'single' };
+    const input = tableInput([{
+      id: 'row-0', source: { story: 'body', storyInstance: 'body', path: [0, 0] },
+      heightPt: 8, heightRule: 'exact', cellSpacingPt: 4,
+      cells: [
+        cellInput('cell-0', 0, [], {
+          borders: { ...noBorderInputs, insideV: conditionalInside },
+        }),
+        cellInput('cell-1', 1, [], {
+          borders: { ...noBorderInputs, insideV: conditionalInside },
+        }),
+      ],
+    }], [40, 60], { ...noBorderInputs, insideV: tableInside });
+    const services = createLayoutServices(document([]), { measureContext: measuringContext() });
+    const { layoutTable } = await import('./table.js');
+
+    const { layout } = layoutTable(input, placement(), services);
+
+    // [MS-OI29500] 2.1.138 keeps conditional insideV subject to the
+    // tcBorders/tblBorders conflict even with spacing. A cell candidate wins
+    // over the table candidate, so the shared-grid red rule is suppressed and
+    // the two inset blue cell edges remain.
+    expect(layout.borders.map((border) => ({
+      x: border.from.xPt,
+      color: border.color,
+    }))).toEqual(expect.arrayContaining([
+      { x: 48, color: '#0000ff' },
+      { x: 52, color: '#0000ff' },
+    ]));
+    expect(layout.borders.some((border) => border.color === '#ff0000')).toBe(false);
+  });
+
+  it('applies the Word insideH conflict deviation when rows are spaced', async () => {
+    const tableInside = { widthPt: 4, color: '#ff0000', authoredStyle: 'thick' };
+    const conditionalInside = { widthPt: 1, color: '#0000ff', authoredStyle: 'single' };
+    const rows = [0, 1].map((rowIndex) => ({
+      id: `row-${rowIndex}`,
+      source: { story: 'body' as const, storyInstance: 'body', path: [0, rowIndex] },
+      heightPt: 12, heightRule: 'exact' as const, cellSpacingPt: 4,
+      cells: [cellInput(`cell-${rowIndex}`, 0, [], {
+        borders: { ...noBorderInputs, insideH: conditionalInside },
+      })],
+    }));
+    const input = tableInput(rows, [40], { ...noBorderInputs, insideH: tableInside });
+    const services = createLayoutServices(document([]), { measureContext: measuringContext() });
+    const { layoutTable } = await import('./table.js');
+
+    const { layout } = layoutTable(input, placement(), services);
+    const blueRules = layout.borders.filter((border) => border.color === '#0000ff');
+
+    expect(blueRules).toHaveLength(2);
+    expect(new Set(blueRules.map((border) => border.from.yPt)).size).toBe(2);
+    expect(layout.borders.some((border) => border.color === '#ff0000')).toBe(false);
+  });
+
+  it('does not draw a spaced table insideV border through a spanning cell', async () => {
+    const tableInside = { widthPt: 1, color: '#ff0000', authoredStyle: 'single' };
+    const input = tableInput([{
+      id: 'row-0', source: { story: 'body', storyInstance: 'body', path: [0, 0] },
+      heightPt: 12, heightRule: 'exact', cellSpacingPt: 4,
+      cells: [cellInput('cell-0', 0, [], { columnSpan: 2 })],
+    }], [40, 60], { ...noBorderInputs, insideV: tableInside });
+    const services = createLayoutServices(document([]), { measureContext: measuringContext() });
+    const { layoutTable } = await import('./table.js');
+
+    const { layout } = layoutTable(input, placement(), services);
+
+    expect(layout.borders.filter((border) => border.color === '#ff0000')).toEqual([]);
+  });
+
+  it('keeps spaced table-property exception borders on the shared grid', async () => {
+    const tableInside = { widthPt: 1, color: '#ff0000', authoredStyle: 'single' };
+    const exceptionInside = { widthPt: 2, color: '#0000ff', authoredStyle: 'thick' };
+    const input = tableInput([{
+      id: 'row-0', source: { story: 'body', storyInstance: 'body', path: [0, 0] },
+      heightPt: 12, heightRule: 'exact', cellSpacingPt: 4,
+      exceptionBorders: { ...noBorderInputs, insideV: exceptionInside },
+      cells: [cellInput('cell-0', 0, []), cellInput('cell-1', 1, [])],
+    }], [40, 60], { ...noBorderInputs, insideV: tableInside });
+    const services = createLayoutServices(document([]), { measureContext: measuringContext() });
+    const { layoutTable } = await import('./table.js');
+
+    const { layout } = layoutTable(input, placement(), services);
+
+    expect(layout.borders.filter((border) => (
+      border.color === '#0000ff' || border.color === '#ff0000'
+    ))).toEqual([
+      expect.objectContaining({
+        color: '#0000ff', from: { xPt: 50, yPt: 20 }, to: { xPt: 50, yPt: 32 },
+      }),
+    ]);
+  });
+
+  it('keeps spaced horizontal table-property exception borders on the shared grid', async () => {
+    const tableInside = { widthPt: 1, color: '#ff0000', authoredStyle: 'single' };
+    const exceptionInside = { widthPt: 2, color: '#0000ff', authoredStyle: 'thick' };
+    const rows = [0, 1].map((rowIndex) => ({
+      id: `row-${rowIndex}`,
+      source: { story: 'body' as const, storyInstance: 'body', path: [0, rowIndex] },
+      heightPt: 12, heightRule: 'exact' as const, cellSpacingPt: 4,
+      exceptionBorders: { ...noBorderInputs, insideH: exceptionInside },
+      cells: [cellInput(`cell-${rowIndex}`, 0, [])],
+    }));
+    const input = tableInput(rows, [100], { ...noBorderInputs, insideH: tableInside });
+    const services = createLayoutServices(document([]), { measureContext: measuringContext() });
+    const { layoutTable } = await import('./table.js');
+
+    const { layout } = layoutTable(input, placement(), services);
+
+    expect(layout.borders.filter((border) => (
+      border.color === '#0000ff' || border.color === '#ff0000'
+    ))).toEqual([
+      expect.objectContaining({
+        color: '#0000ff', from: { xPt: 10, yPt: 32 }, to: { xPt: 110, yPt: 32 },
+      }),
+    ]);
+  });
+
+  it('does not draw a spaced table insideH border through a vertical merge', async () => {
+    const tableInside = { widthPt: 1, color: '#ff0000', authoredStyle: 'single' };
+    const input = tableInput([
+      {
+        id: 'row-0', source: { story: 'body', storyInstance: 'body', path: [0, 0] },
+        heightPt: 12, heightRule: 'exact', cellSpacingPt: 4,
+        cells: [
+          cellInput('cell-0', 0, [], { verticalMerge: 'restart' }),
+          cellInput('cell-1', 1, []),
+        ],
+      },
+      {
+        id: 'row-1', source: { story: 'body', storyInstance: 'body', path: [0, 1] },
+        heightPt: 12, heightRule: 'exact', cellSpacingPt: 4,
+        cells: [
+          cellInput('cell-2', 0, [], { verticalMerge: 'continue' }),
+          cellInput('cell-3', 1, []),
+        ],
+      },
+    ], [40, 60], { ...noBorderInputs, insideH: tableInside });
+    const services = createLayoutServices(document([]), { measureContext: measuringContext() });
+    const { layoutTable } = await import('./table.js');
+
+    const { layout } = layoutTable(input, placement(), services);
+    const inside = layout.borders.filter((border) => border.color === '#ff0000');
+
+    expect(inside).toEqual([
+      expect.objectContaining({ from: { xPt: 50, yPt: 32 }, to: { xPt: 110, yPt: 32 } }),
+    ]);
+  });
+
   it('retains both row borders when cell spacing begins at their shared boundary', async () => {
     const red = { widthPt: 1, color: '#ff0000', authoredStyle: 'single' };
     const blue = { widthPt: 1, color: '#0000ff', authoredStyle: 'single' };

@@ -2768,6 +2768,11 @@ pub struct TableRowLayoutAcquisitionWire {
     pub before_width: Option<TableWidthAcquisitionWire>,
     pub after_width: Option<TableWidthAcquisitionWire>,
     pub cell_spacing: Option<TableWidthAcquisitionWire>,
+    /// Effective whole-table/conditional table-style spacing for this row.
+    /// Direct row, exception, and table properties remain separate higher layers.
+    pub style_cell_spacing: Option<TableWidthAcquisitionWire>,
+    /// Effective whole-table/conditional table-style margins for this row.
+    pub style_cell_margins: Option<TableMarginAcquisitionWire>,
     pub exception: Option<TablePropertyExceptionAcquisitionWire>,
 }
 

@@ -1,6 +1,9 @@
 import { beforeAll, describe, expect, it } from 'vitest';
+import { DEFAULT_KINSOKU_RULES } from '@silurus/ooxml-core';
 import { layoutDocument } from './document-layout.js';
 import { createLayoutServices, resolveColumnWidths } from './renderer.js';
+import { measureParagraphIntrinsicWidths } from './layout/intrinsic-width.js';
+import type { ParagraphLayoutContext } from './layout-context.js';
 import type { TextLayoutService } from './layout/text.js';
 import type {
   BodyElement,
@@ -125,6 +128,68 @@ function columnState(
 }
 
 describe('table intrinsic content widths', () => {
+  const intrinsicContext = (overrides: Partial<ParagraphLayoutContext> = {}): ParagraphLayoutContext => ({
+    lineGrid: { active: false, pitchPt: null },
+    characterGrid: { active: false, deltaPt: 0 },
+    physicalIndentLeftPt: 0,
+    physicalIndentRightPt: 0,
+    firstIndentPt: 0,
+    lineSpacing: null,
+    spaceBeforePt: 0,
+    spaceAfterPt: 0,
+    baseRtl: false,
+    isJustified: false,
+    stretchLastLine: false,
+    tabStops: [],
+    hasRuby: false,
+    hasEastAsianText: true,
+    kinsoku: DEFAULT_KINSOKU_RULES,
+    defaultTabPt: 36,
+    ...overrides,
+  });
+
+  it('includes the character-grid pitch in minimum content width', () => {
+    const source = paragraph([textRun('漢字')]);
+
+    expect(measureParagraphIntrinsicWidths(
+      source,
+      intrinsicContext({ characterGrid: { active: true, deltaPt: 2 } }),
+      200,
+      { context: measuringContext(), fontFamilyClasses: {} },
+      { pageIndex: 0, totalPages: 1, documentHasEastAsianText: true },
+    )).toEqual({ minWidthPt: 7, maxWidthPt: 14 });
+  });
+
+  it('does not merge runs with different character-grid participation', () => {
+    const source = paragraph([
+      { ...textRun('漢'), snapToGrid: true },
+      { ...textRun('字'), snapToGrid: false },
+    ] as DocParagraph['runs']);
+
+    expect(measureParagraphIntrinsicWidths(
+      source,
+      intrinsicContext({ characterGrid: { active: true, deltaPt: 2 } }),
+      200,
+      { context: measuringContext(), fontFamilyClasses: {} },
+      { pageIndex: 0, totalPages: 1, documentHasEastAsianText: true },
+    )).toEqual({ minWidthPt: 7, maxWidthPt: 12 });
+  });
+
+  it('keeps adjacent tate-chu-yoko runs as separate one-em cells', () => {
+    const source = paragraph([
+      { ...textRun('12'), eastAsianVert: true },
+      { ...textRun('34'), eastAsianVert: true },
+    ] as DocParagraph['runs']);
+
+    expect(measureParagraphIntrinsicWidths(
+      source,
+      intrinsicContext(),
+      200,
+      { context: measuringContext(), fontFamilyClasses: {} },
+      { pageIndex: 0, totalPages: 1, documentHasEastAsianText: true, verticalCJK: true },
+    )).toEqual({ minWidthPt: 20, maxWidthPt: 20 });
+  });
+
   it('keeps an inline image as a minimum-content atom', () => {
     const source = table([row([cell([paragraph([{
       type: 'image', imagePath: 'word/media/image.png', mimeType: 'image/png',

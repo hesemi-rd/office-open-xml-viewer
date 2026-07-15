@@ -809,6 +809,9 @@ export interface TableRowExceptionInput {
   readonly preferredWidth: TablePreferredWidthConstraint | null;
   readonly layout: 'fixed' | 'autofit' | null;
   readonly justification: string | null;
+  /** Whether tblPrEx/tblInd was authored. A nil/zero indent must suppress the
+   * parent tblInd instead of being mistaken for omission. */
+  readonly indentAuthored: boolean;
   readonly indentPt: number | null;
   readonly borders: import('../types.js').TableBorders | null;
 }

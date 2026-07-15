@@ -7,6 +7,30 @@ import type {
 
 const EPSILON_PT = 1e-9;
 
+export interface TableCellHorizontalSpacingInsets {
+  readonly startPt: number;
+  readonly endPt: number;
+}
+
+/** §17.4.43/.44/.45 spacing lives inside the table grid: an outer edge owns
+ * the full spacing and two adjacent cells share one inner gap. This projection
+ * is shared by intrinsic constraints, child acquisition, and final cell boxes
+ * so each stage uses the same content width. */
+export function tableCellHorizontalSpacingInsets(
+  spacingPt: number,
+  columnStart: number,
+  columnSpan: number,
+  columnCount: number,
+): TableCellHorizontalSpacingInsets {
+  const spacing = Number.isFinite(spacingPt) ? Math.max(0, spacingPt) : 0;
+  const start = Math.max(0, columnStart);
+  const end = start + Math.max(1, columnSpan);
+  return {
+    startPt: start === 0 ? spacing : spacing / 2,
+    endPt: end >= Math.max(0, columnCount) ? spacing : spacing / 2,
+  };
+}
+
 function finiteNonNegative(value: number): number {
   return Number.isFinite(value) ? Math.max(0, value) : 0;
 }

@@ -193,4 +193,68 @@ describe('table column acquisition boundary', () => {
     expect(tableColumnLayoutInput(table, 200, () => ({ minWidthPt: 10, maxWidthPt: 20 })))
       .toMatchObject({ layout: 'fixed', tablePreferredWidthPt: 100 });
   });
+
+  it('uses the CT_TblWidth dxa default for an exception width with omitted type', () => {
+    const table = {
+      colWidths: [40],
+      rows: [{
+        cells: [{
+          content: [], colSpan: 1, vMerge: null, borders: emptyBorders(),
+          background: null, vAlign: 'top', widthPt: null,
+          __tableCellLayout: { preferredWidth: null, margins: null },
+        }],
+        gridBefore: 0, gridAfter: 0,
+        __tableRowLayout: {
+          height: null, beforeWidth: null, afterWidth: null, cellSpacing: null,
+          exception: {
+            preferredWidth: { kind: null, value: '1440' },
+            layout: null, justification: null, indent: null,
+            borders: null, cellMargins: null, cellSpacing: null,
+          },
+        },
+      }],
+      borders: emptyBorders(), cellMarginTop: 0, cellMarginRight: 0,
+      cellMarginBottom: 0, cellMarginLeft: 0, jc: 'left', layout: 'fixed',
+      __tableLayout: {
+        effectiveStyleId: null,
+        grid: { authored: true, columns: [{ width: '800' }], requiredColumnCount: 1 },
+        preferredWidth: { kind: 'dxa', value: '2000' },
+        layout: { kind: 'fixed' }, cellSpacing: null,
+      },
+    } as unknown as DocTable;
+
+    expect(tableColumnLayoutInput(table, 200, () => ({ minWidthPt: 10, maxWidthPt: 20 })))
+      .toMatchObject({ tablePreferredWidthPt: 72 });
+  });
+
+  it('ignores authored gridBefore/gridAfter values which do not fit the table grid', () => {
+    const table = {
+      colWidths: [20, 40],
+      rows: [{
+        cells: [{
+          content: [], colSpan: 2, vMerge: null, borders: emptyBorders(),
+          background: null, vAlign: 'top', widthPt: null,
+          __tableCellLayout: { preferredWidth: null, margins: null },
+        }],
+        gridBefore: 3, gridAfter: 1,
+        __tableRowLayout: {
+          height: null, beforeWidth: { kind: 'dxa', value: '100' },
+          afterWidth: { kind: 'dxa', value: '100' }, cellSpacing: null, exception: null,
+        },
+      }],
+      borders: emptyBorders(), cellMarginTop: 0, cellMarginRight: 0,
+      cellMarginBottom: 0, cellMarginLeft: 0, jc: 'left', layout: 'fixed',
+      __tableLayout: {
+        effectiveStyleId: null,
+        grid: { authored: true, columns: [{ width: '400' }, { width: '800' }], requiredColumnCount: 2 },
+        preferredWidth: null, layout: { kind: 'fixed' }, cellSpacing: null,
+      },
+    } as unknown as DocTable;
+
+    expect(tableColumnLayoutInput(table, 200, () => ({ minWidthPt: 0, maxWidthPt: 0 })))
+      .toMatchObject({
+        gridWidthsPt: [20, 40],
+        rows: [{ before: null, after: null, cells: [{ columnStart: 0, columnSpan: 2 }] }],
+      });
+  });
 });

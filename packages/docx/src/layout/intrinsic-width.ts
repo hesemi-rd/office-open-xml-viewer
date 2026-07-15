@@ -104,6 +104,21 @@ function compatibleTextKey(segment: LayoutTextSeg): string {
     segment.charSpacing ?? 0,
     segment.fitTextPerGapPx ?? null,
     segment.fitTextTrailingPadPx ?? null,
+    segment.fitTextRegionIndex ?? null,
+    segment.snapToCharacterGrid !== false,
+    segment.tateChuYoko ?? false,
+    // A tate-chu-yoko run is one authored one-em cell (§17.3.2.10). Two
+    // adjacent runs with identical fonts remain two cells, so their source-run
+    // boundary is semantic rather than a shaping-only seam.
+    segment.tateChuYoko ? (segment.sourceRunIndex ?? null) : null,
+    // Ruby belongs to its authored base run. Extending that base across a run
+    // seam would change the annotation's ownership during the intrinsic probe.
+    segment.ruby ? [
+      segment.sourceRunIndex ?? null,
+      segment.ruby.text,
+      segment.ruby.fontSizePt,
+      segment.ruby.hpsRaisePt ?? null,
+    ] : null,
     segment.verticalRun ?? false,
   ]);
 }
@@ -141,6 +156,7 @@ function measureTextRange(
   start: number,
   end: number,
   measurer: TextMeasurer,
+  gridDeltaPt: number,
 ): number {
   let widthPt = 0;
   for (const piece of pieces) {
@@ -157,7 +173,7 @@ function measureTextRange(
         measure: true,
         clusterGeometry: false,
       });
-      widthPt += segAdvanceWidth(candidate, shaped.advancePt, 0, 1);
+      widthPt += segAdvanceWidth(candidate, shaped.advancePt, gridDeltaPt, 1);
       continue;
     }
     measurer.context.font = buildFont(
@@ -171,7 +187,7 @@ function measureTextRange(
     widthPt += segAdvanceWidth(
       candidate,
       measurer.context.measureText(text).width,
-      0,
+      gridDeltaPt,
       1,
     );
   }
@@ -183,6 +199,7 @@ function minimumTextAtomWidthPt(
   context: ParagraphLayoutContext,
   measurer: TextMeasurer,
 ): number {
+  const gridDeltaPt = context.characterGrid.active ? context.characterGrid.deltaPt : 0;
   let maximumPt = 0;
   for (let segmentIndex = 0; segmentIndex < segments.length; segmentIndex += 1) {
     const segment = segments[segmentIndex];
@@ -212,7 +229,14 @@ function minimumTextAtomWidthPt(
       if (!hasCJKBreakOpportunity(trimmed)) {
         maximumPt = Math.max(
           maximumPt,
-          measureTextRange(pieces, joinedText, trimmedStart, trimmedEnd, measurer),
+          measureTextRange(
+            pieces,
+            joinedText,
+            trimmedStart,
+            trimmedEnd,
+            measurer,
+            gridDeltaPt,
+          ),
         );
         continue;
       }
@@ -250,7 +274,14 @@ function minimumTextAtomWidthPt(
       for (const unbreakable of atoms) {
         maximumPt = Math.max(
           maximumPt,
-          measureTextRange(pieces, joinedText, unbreakable.start, unbreakable.end, measurer),
+          measureTextRange(
+            pieces,
+            joinedText,
+            unbreakable.start,
+            unbreakable.end,
+            measurer,
+            gridDeltaPt,
+          ),
         );
       }
     }

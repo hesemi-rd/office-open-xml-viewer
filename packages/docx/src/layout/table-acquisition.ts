@@ -5,6 +5,7 @@ import {
 } from './table-cell-blocks.js';
 import type { ParagraphBorderEdges } from './paragraph-border-adjacency.js';
 import { layoutTable } from './table.js';
+import { tableCellHorizontalSpacingInsets } from './table-columns.js';
 import type {
   LayoutServices,
   ParagraphLayout,
@@ -80,7 +81,10 @@ export function acquireRetainedTableLayout<State>(
   const flowDomainId = `table:${sourcePath.join('.')}`;
   const format = dependencies.tableFormat(table);
   const bidiVisual = table.bidiVisual === true;
-  const tableIndentPt = format.firstRowException?.indentPt ?? table.tblInd ?? 0;
+  const firstRowException = format.firstRowException;
+  const tableIndentPt = firstRowException?.indentAuthored
+    ? (firstRowException.indentPt ?? 0)
+    : (table.tblInd ?? 0);
   const rows: TableLayoutInput['rows'] = table.rows.map((row, rowIndex) => {
     const rowFormat = format.rows[rowIndex];
     let columnStart = Math.max(0, Math.min(columnWidthsPt.length, row.gridBefore ?? 0));
@@ -100,6 +104,12 @@ export function acquireRetainedTableLayout<State>(
       const cellTotalWidthPt = columnWidthsPt
         .slice(currentColumnStart, currentColumnStart + columnSpan)
         .reduce((sum, width) => sum + width, 0);
+      const spacingInsets = tableCellHorizontalSpacingInsets(
+        rowFormat?.cellSpacingPt ?? 0,
+        currentColumnStart,
+        columnSpan,
+        columnWidthsPt.length,
+      );
       const cellPath = [...sourcePath, rowIndex, cellIndex];
       const acquired = cell.vMerge === false
         ? []
@@ -112,7 +122,11 @@ export function acquireRetainedTableLayout<State>(
           }, {
             resolveContentWidthPt: (_cell, _table, totalWidthPt) => Math.max(
               0,
-              totalWidthPt - formatMargins.left - formatMargins.right,
+              totalWidthPt
+                - spacingInsets.startPt
+                - spacingInsets.endPt
+                - formatMargins.left
+                - formatMargins.right,
             ),
             createCellState: dependencies.createCellState,
             acquireParagraph: (

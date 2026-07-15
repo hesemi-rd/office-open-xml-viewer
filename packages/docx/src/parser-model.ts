@@ -41,6 +41,7 @@ import {
   normalizeTextBoxInput,
   type NormalizedTextBoxParagraphInput,
 } from './layout/textbox-input.js';
+import { tableCellHorizontalSpacingInsets } from './layout/table-columns.js';
 
 export interface InternalRunFontSlots {
   readonly direct: TextFontSlots;
@@ -192,6 +193,8 @@ export interface TableRowLayoutAcquisitionWire {
   readonly beforeWidth: TableWidthAcquisitionWire | null;
   readonly afterWidth: TableWidthAcquisitionWire | null;
   readonly cellSpacing: TableWidthAcquisitionWire | null;
+  readonly styleCellSpacing?: TableWidthAcquisitionWire | null;
+  readonly styleCellMargins?: TableMarginAcquisitionWire | null;
   readonly exception: TablePropertyExceptionAcquisitionWire | null;
 }
 
@@ -260,20 +263,30 @@ function finiteTableLexicalNumber(value: string | null, allowPercent: boolean): 
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function effectiveTableWidthKind(width: TableLexicalWidth): string {
+  // ECMA-376 §17.4.87 makes the measurement syntax authoritative when it
+  // contradicts @type. Keeping this resolution here prevents each consumer
+  // from assigning different semantics to the same CT_TblWidth value.
+  return width.value?.trim().endsWith('%') ? 'pct' : (width.kind ?? 'dxa');
+}
+
 function tableWidthConstraintFromLexical(
   width: TableLexicalWidth | null | undefined,
 ): TablePreferredWidthConstraint | null {
   if (!width) return null;
-  if (width.kind === 'dxa') {
-    const value = finiteTableLexicalNumber(width.value, false);
+  const lexicalValue = width.value?.trim() ?? '';
+  // §17.4.87: omitted type defaults to dxa and omitted w defaults to zero.
+  const kind = effectiveTableWidthKind(width);
+  if (kind === 'dxa') {
+    const value = finiteTableLexicalNumber(width.value ?? '0', false);
     return value === null ? null : { kind: 'dxa', value: value / 20 };
   }
-  if (width.kind !== 'pct') return null;
-  const value = finiteTableLexicalNumber(width.value, true);
+  if (kind !== 'pct') return null;
+  const value = finiteTableLexicalNumber(width.value ?? '0', true);
   if (value === null) return null;
   return {
     kind: 'pct',
-    value: width.value?.trim().endsWith('%') ? value / 100 : value / 5000,
+    value: lexicalValue.endsWith('%') ? value / 100 : value / 5000,
   };
 }
 
@@ -313,16 +326,6 @@ function publicTableRowHeight(row: Readonly<DocTable['rows'][number]>): TableRow
   };
 }
 
-function firstTableDxaPt(
-  ...widths: readonly (TableWidthAcquisitionWire | null | undefined)[]
-): number | null {
-  for (const width of widths) {
-    const value = tableDxaPtFromLexical(width);
-    if (value !== null) return value;
-  }
-  return null;
-}
-
 function wordTableCellSpacingPt(
   ...widths: readonly (TableWidthAcquisitionWire | null | undefined)[]
 ): number | null {
@@ -330,41 +333,109 @@ function wordTableCellSpacingPt(
     if (!width) continue;
     // Word resolves authored pct/auto spacing to zero at that precedence scope
     // instead of exposing a lower scope ([MS-OI29500] 2.1.152–154).
-    if (width.kind === 'pct' || width.kind === 'auto') return 0;
+    const kind = effectiveTableWidthKind(width);
+    if (kind === 'pct' || kind === 'auto' || kind === 'nil') return 0;
     const valuePt = tableDxaPtFromLexical(width);
     if (valuePt !== null) return valuePt;
   }
   return null;
 }
 
-function physicalTableMarginCandidates(
-  margins: TableMarginAcquisitionWire | null | undefined,
-  edge: 'left' | 'right',
-  bidiVisual: boolean,
-): readonly (TableWidthAcquisitionWire | null | undefined)[] {
-  if (!margins) return [];
-  const logical = edge === 'left'
-    ? (bidiVisual ? margins.end : margins.start)
-    : (bidiVisual ? margins.start : margins.end);
-  return [margins[edge], logical];
+type TableMarginScope = 'cell' | 'exception' | 'table' | 'style';
+type TableMarginEdge = 'top' | 'bottom' | 'start' | 'end';
+
+function wordTableMarginPt(
+  width: TableWidthAcquisitionWire | null | undefined,
+  scope: TableMarginScope,
+  edge: TableMarginEdge,
+): number | null {
+  if (!width) return null;
+  const kind = effectiveTableWidthKind(width);
+  if (kind === 'dxa') return tableTwipsValuePt(width.value ?? '0');
+  // Individual-cell margin exceptions ignore pct/auto/nil. The default
+  // leading/trailing table margin differs in Word: pct/auto becomes zero
+  // ([MS-OI29500] 2.1.125/.146), while nil keeps ST_TblWidth's zero meaning.
+  if (scope === 'cell' || scope === 'exception') return null;
+  if (edge === 'start' || edge === 'end') {
+    if (kind === 'pct' || kind === 'auto' || kind === 'nil') return 0;
+  }
+  // Word ignores nil top/bottom margin elements ([MS-OI29500] 2.1.116/.177,
+  // also referenced by the corresponding default-margin sections).
+  return null;
 }
 
 function effectiveTableCellMargins(
   table: Readonly<DocTable>,
+  cell: Readonly<DocTable['rows'][number]['cells'][number]>,
+  hasPrivateCellWire: boolean,
   cellMargins: TableMarginAcquisitionWire | null | undefined,
   exceptionMargins: TableMarginAcquisitionWire | null | undefined,
+  tableMargins: TableMarginAcquisitionWire | null | undefined,
+  styleMargins: TableMarginAcquisitionWire | null | undefined,
 ): TableFormatInput['rows'][number]['cells'][number]['marginsPt'] {
   const bidi = table.bidiVisual === true;
+  const physical = (
+    margins: TableMarginAcquisitionWire | null | undefined,
+    edge: 'left' | 'right',
+  ): Readonly<{ width: TableWidthAcquisitionWire | null | undefined; edge: 'start' | 'end' }> => {
+    const logicalEdge = edge === 'left'
+      ? (bidi ? 'end' : 'start')
+      : (bidi ? 'start' : 'end');
+    return { width: margins?.[edge] ?? margins?.[logicalEdge], edge: logicalEdge };
+  };
+  const firstMargin = (
+    edge: TableMarginEdge,
+    ...candidates: readonly Readonly<{
+      width: TableWidthAcquisitionWire | null | undefined;
+      scope: TableMarginScope;
+      edge?: TableMarginEdge;
+    }>[]
+  ): number | null => {
+    for (const candidate of candidates) {
+      const value = wordTableMarginPt(candidate.width, candidate.scope, candidate.edge ?? edge);
+      if (value !== null) return value;
+    }
+    return null;
+  };
+  const cellLeft = physical(cellMargins, 'left');
+  const exceptionLeft = physical(exceptionMargins, 'left');
+  const tableLeft = physical(tableMargins, 'left');
+  const styleLeft = physical(styleMargins, 'left');
+  const cellRight = physical(cellMargins, 'right');
+  const exceptionRight = physical(exceptionMargins, 'right');
+  const tableRight = physical(tableMargins, 'right');
+  const styleRight = physical(styleMargins, 'right');
+  const publicCellMargin = (value: number | null | undefined): number | null => (
+    !hasPrivateCellWire && value != null && Number.isFinite(value) ? value : null
+  );
   return {
-    top: firstTableDxaPt(cellMargins?.top, exceptionMargins?.top) ?? table.cellMarginTop,
-    bottom: firstTableDxaPt(cellMargins?.bottom, exceptionMargins?.bottom) ?? table.cellMarginBottom,
-    left: firstTableDxaPt(
-      ...physicalTableMarginCandidates(cellMargins, 'left', bidi),
-      ...physicalTableMarginCandidates(exceptionMargins, 'left', bidi),
+    top: firstMargin('top',
+      { width: cellMargins?.top, scope: 'cell' },
+    ) ?? publicCellMargin(cell.marginTop) ?? firstMargin('top',
+      { width: exceptionMargins?.top, scope: 'exception' },
+      { width: tableMargins?.top, scope: 'table' },
+      { width: styleMargins?.top, scope: 'style' },
+    ) ?? table.cellMarginTop,
+    bottom: firstMargin('bottom',
+      { width: cellMargins?.bottom, scope: 'cell' },
+    ) ?? publicCellMargin(cell.marginBottom) ?? firstMargin('bottom',
+      { width: exceptionMargins?.bottom, scope: 'exception' },
+      { width: tableMargins?.bottom, scope: 'table' },
+      { width: styleMargins?.bottom, scope: 'style' },
+    ) ?? table.cellMarginBottom,
+    left: firstMargin(cellLeft.edge,
+      { ...cellLeft, scope: 'cell' },
+    ) ?? publicCellMargin(cell.marginLeft) ?? firstMargin(exceptionLeft.edge,
+      { ...exceptionLeft, scope: 'exception' },
+      { ...tableLeft, scope: 'table' },
+      { ...styleLeft, scope: 'style' },
     ) ?? table.cellMarginLeft,
-    right: firstTableDxaPt(
-      ...physicalTableMarginCandidates(cellMargins, 'right', bidi),
-      ...physicalTableMarginCandidates(exceptionMargins, 'right', bidi),
+    right: firstMargin(cellRight.edge,
+      { ...cellRight, scope: 'cell' },
+    ) ?? publicCellMargin(cell.marginRight) ?? firstMargin(exceptionRight.edge,
+      { ...exceptionRight, scope: 'exception' },
+      { ...tableRight, scope: 'table' },
+      { ...styleRight, scope: 'style' },
     ) ?? table.cellMarginRight,
   };
 }
@@ -373,14 +444,18 @@ function normalizedTableRowException(
   exception: TablePropertyExceptionAcquisitionWire | null | undefined,
 ): TableRowExceptionInput | null {
   if (!exception) return null;
+  const indentKind = exception.indent ? effectiveTableWidthKind(exception.indent) : null;
   return {
-    preferredWidthAuthored: exception.preferredWidth !== null,
+    preferredWidthAuthored: exception.preferredWidth != null,
     preferredWidth: tableWidthConstraintFromLexical(exception.preferredWidth),
     layout: exception.layout?.kind === 'fixed' || exception.layout?.kind === 'autofit'
       ? exception.layout.kind
       : null,
     justification: exception.justification,
-    indentPt: tableDxaPtFromLexical(exception.indent),
+    indentAuthored: exception.indent != null && (indentKind === 'dxa' || indentKind === 'nil'),
+    indentPt: indentKind === 'nil'
+      ? 0
+      : tableDxaPtFromLexical(exception.indent),
     borders: exception.borders,
   };
 }
@@ -399,14 +474,20 @@ export function tableFormatInput(table: Readonly<DocTable>): TableFormatInput {
         rowWire?.cellSpacing,
         exception?.cellSpacing,
         acquisition.table?.cellSpacing,
+        rowWire?.styleCellSpacing,
       ) ?? 0,
       justification: rowWire?.justification ?? exception?.justification ?? null,
       exception: normalizedTableRowException(exception),
-      cells: row.cells.map((_cell, cellIndex) => ({
+      cells: row.cells.map((cell, cellIndex) => ({
         marginsPt: effectiveTableCellMargins(
           table,
+          cell,
+          acquisition.rows[rowIndex]?.cells[cellIndex] !== null
+            && acquisition.rows[rowIndex]?.cells[cellIndex] !== undefined,
           acquisition.rows[rowIndex]?.cells[cellIndex]?.margins,
           exception?.cellMargins,
+          acquisition.table?.cellMargins,
+          rowWire?.styleCellMargins,
         ),
       })),
     };
@@ -487,13 +568,29 @@ export function tableColumnLayoutInput(
 ): TableColumnLayoutInput {
   const acquisition = tableAcquisitionInput(table);
   const format = tableFormatInput(table);
+  const gridWidthsPt = tableGridWidthsPt(table as DocTable, acquisition);
   const layoutKind = format.firstRowException?.layout === 'fixed'
     ? 'fixed'
     : (acquisition.table?.layout?.kind ?? table.layout);
+  const authoredGridCount = acquisition.table?.grid.authored
+    ? acquisition.table.grid.columns.length
+    : null;
+  const normalizedBeforeSpans = table.rows.map((row) => {
+    const requested = Math.max(0, row.gridBefore ?? 0);
+    return authoredGridCount !== null && requested > authoredGridCount ? 0 : requested;
+  });
+  const contentGridCount = Math.max(
+    authoredGridCount ?? 0,
+    acquisition.table?.grid.requiredColumnCount ?? 0,
+    ...table.rows.map((row, rowIndex) => (
+      (normalizedBeforeSpans[rowIndex] ?? 0)
+      + row.cells.reduce((total, cell) => total + Math.max(1, cell.colSpan), 0)
+    )),
+  );
   return {
     layout: layoutKind === 'fixed' ? 'fixed' : 'autofit',
     availableWidthPt: Math.max(0, maximumWidthPt),
-    gridWidthsPt: tableGridWidthsPt(table as DocTable, acquisition),
+    gridWidthsPt,
     tablePreferredWidthPt: tablePreferredWidthPt(
       table as DocTable,
       acquisition,
@@ -502,8 +599,14 @@ export function tableColumnLayoutInput(
     ),
     rows: table.rows.map((row, rowIndex) => {
       const rowInput = acquisition.rows[rowIndex];
-      const beforeSpan = Math.max(0, row.gridBefore ?? 0);
-      const afterSpan = Math.max(0, row.gridAfter ?? 0);
+      const beforeSpan = normalizedBeforeSpans[rowIndex] ?? 0;
+      const requestedAfterSpan = Math.max(0, row.gridAfter ?? 0);
+      const occupiedColumns = beforeSpan
+        + row.cells.reduce((total, cell) => total + Math.max(1, cell.colSpan), 0);
+      const afterSpan = authoredGridCount !== null
+        && occupiedColumns + requestedAfterSpan > contentGridCount
+        ? 0
+        : requestedAfterSpan;
       let columnStart = beforeSpan;
       return {
         before: beforeSpan > 0 ? {
@@ -520,13 +623,21 @@ export function tableColumnLayoutInput(
           const intrinsic = layoutKind === 'fixed'
             ? { minWidthPt: 0, maxWidthPt: 0 }
             : intrinsicWidths(cell);
+          const spacingInsets = tableCellHorizontalSpacingInsets(
+            format.rows[rowIndex]?.cellSpacingPt ?? 0,
+            columnStart,
+            span,
+            gridWidthsPt.length,
+          );
+          const horizontalSpacingPt = spacingInsets.startPt + spacingInsets.endPt;
           const result = {
             columnStart,
             columnSpan: span,
             preferredWidth: tableWidthConstraintFromLexical(wire?.preferredWidth)
               ?? publicTableCellConstraint(cell),
-            minContentWidthPt: Math.max(0, intrinsic.minWidthPt),
-            maxContentWidthPt: Math.max(intrinsic.minWidthPt, intrinsic.maxWidthPt),
+            minContentWidthPt: Math.max(0, intrinsic.minWidthPt) + horizontalSpacingPt,
+            maxContentWidthPt:
+              Math.max(intrinsic.minWidthPt, intrinsic.maxWidthPt) + horizontalSpacingPt,
           };
           columnStart += span;
           return result;

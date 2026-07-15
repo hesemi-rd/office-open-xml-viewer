@@ -2,6 +2,7 @@ import { resolveBorderConflict, type BorderCandidate } from '../cell-border-conf
 import { retainedBorderTreatment } from './border-treatment.js';
 import { paragraphGapPt } from './paragraph-spacing.js';
 import { snapshotPlainData } from './plain-data.js';
+import { tableCellHorizontalSpacingInsets } from './table-columns.js';
 import type {
   BlockLayoutResult,
   FlowBlockPlacement,
@@ -275,6 +276,18 @@ function toConflictCandidate(
   };
 }
 
+function firstAuthoredBorder(
+  ...borders: readonly (TableBorderInput | null)[]
+): TableBorderInput | null {
+  for (const border of borders) {
+    // Word treats `none` like omission while resolving cell -> style ->
+    // tblPrEx -> table borders; `nil` remains specified because it suppresses
+    // the final shared edge ([MS-OI29500] 2.1.169).
+    if (border && border.authoredStyle !== 'none') return border;
+  }
+  return null;
+}
+
 function physicalCellEdges(
   cell: TableCellLayoutInput,
   table: TableEdgeInputs,
@@ -290,17 +303,6 @@ function physicalCellEdges(
   bottom: BorderCandidate | null;
   left: BorderCandidate | null;
 }> {
-  const firstSpecified = (
-    ...borders: readonly (TableBorderInput | null)[]
-  ): TableBorderInput | null => {
-    for (const border of borders) {
-      // Word treats `none` like omission while resolving cell -> style ->
-      // tblPrEx -> table borders; `nil` remains specified because it suppresses
-      // the final shared edge ([MS-OI29500] 2.1.169).
-      if (border && border.authoredStyle !== 'none') return border;
-    }
-    return null;
-  };
   const cascade = (
     direct: TableBorderInput | null,
     cellInside: TableBorderInput | null,
@@ -310,12 +312,12 @@ function physicalCellEdges(
     tableInside: TableBorderInput | null,
     useInside: boolean,
   ): BorderCandidate | null => {
-    const resolvedCell = firstSpecified(direct, useInside ? cellInside : null);
+    const resolvedCell = firstAuthoredBorder(direct, useInside ? cellInside : null);
     if (resolvedCell) return toConflictCandidate(resolvedCell, 'cell');
     return toConflictCandidate(
       useInside
-        ? firstSpecified(exceptionInside, tableInside)
-        : firstSpecified(exceptionOuter, tableOuter),
+        ? firstAuthoredBorder(exceptionInside, tableInside)
+        : firstAuthoredBorder(exceptionOuter, tableOuter),
       'table',
     );
   };
@@ -409,6 +411,7 @@ function ownerGrid(
 function resolvedBoundaries(input: TableLayoutInput): Readonly<{
   horizontal: readonly (readonly (HorizontalBoundary | null)[])[];
   vertical: readonly (readonly (ResolvedBoundary | null)[])[];
+  occupancy: readonly (readonly number[])[];
 }> {
   const rowCount = input.rows.length;
   const columnCount = input.columnWidthsPt.length;
@@ -471,7 +474,7 @@ function resolvedBoundaries(input: TableLayoutInput): Readonly<{
       );
     })
   ));
-  return { horizontal, vertical };
+  return { horizontal, vertical, occupancy };
 }
 
 function borderSegment(
@@ -503,6 +506,23 @@ function visibleBorder(candidate: BorderCandidate | null): TableBorderInput | nu
   return border && border.authoredStyle !== 'nil' && border.authoredStyle !== 'none'
     ? border
     : null;
+}
+
+function authoredBorderParticipatesInConflict(border: TableBorderInput | null): boolean {
+  // Word treats `none` like omission in this cascade; `nil` is authored and
+  // participates by suppressing the complete edge ([MS-OI29500] 2.1.169).
+  return border !== null && border.authoredStyle !== 'none';
+}
+
+function authoredInsideBorderIsEffective(
+  direct: TableBorderInput | null,
+  inside: TableBorderInput | null,
+): boolean {
+  // Inline physical/logical cell edges are the higher style-cascade layer.
+  // `none` behaves as omission, while `nil` is an authored suppression and
+  // therefore prevents a conditional inside edge underneath from resurfacing.
+  return !authoredBorderParticipatesInConflict(direct)
+    && authoredBorderParticipatesInConflict(inside);
 }
 
 function materializeBorders(
@@ -557,11 +577,13 @@ function materializeBorders(
       input.columnWidthsPt.length,
       owner.input.columnStart + owner.input.columnSpan,
     ));
-    const logicalStartInsetPt = owner.input.columnStart === 0 ? spacingPt : spacingPt / 2;
-    const logicalEndInsetPt = owner.input.columnStart + owner.input.columnSpan
-        >= input.columnWidthsPt.length
-      ? spacingPt
-      : spacingPt / 2;
+    const { startPt: logicalStartInsetPt, endPt: logicalEndInsetPt } =
+      tableCellHorizontalSpacingInsets(
+        spacingPt,
+        owner.input.columnStart,
+        owner.input.columnSpan,
+        input.columnWidthsPt.length,
+      );
     const leftPt = Math.min(startXPt, endXPt)
       + (input.bidiVisual ? logicalEndInsetPt : logicalStartInsetPt);
     const rightPt = Math.max(startXPt, endXPt)
@@ -572,7 +594,7 @@ function materializeBorders(
     const edges = physicalCellEdges(
       owner.input,
       noTableEdges,
-      row.exceptionBorders,
+      null,
       owner.rowIndex,
       owner.lastRowIndex,
       input.rows.length,
@@ -592,18 +614,60 @@ function materializeBorders(
     if (aboveSpaced || belowSpaced) {
       const gridRow = belowSpaced ? boundary : boundary - 1;
       const tableXPt = rowXPt[gridRow] ?? 0;
-      const tableBorder = boundary === 0
-        ? input.borders.top
-        : boundary === input.rows.length
-          ? input.borders.bottom
-          : input.borders.insideH;
       const edge = boundary === 0
         ? 'top'
         : boundary === input.rows.length ? 'bottom' : 'between';
-      push(tableBorder, edge, { xPt: tableXPt, yPt: rowY(boundary) }, {
-        xPt: tableXPt + tableWidthPt,
-        yPt: rowY(boundary),
-      });
+      if (boundary === 0 || boundary === input.rows.length) {
+        const exceptionBorder = boundary === 0
+          ? input.rows[0]?.exceptionBorders?.top ?? null
+          : input.rows.at(-1)?.exceptionBorders?.bottom ?? null;
+        const tableBorder = firstAuthoredBorder(
+          exceptionBorder,
+          boundary === 0 ? input.borders.top : input.borders.bottom,
+        );
+        push(tableBorder, edge, { xPt: tableXPt, yPt: rowY(boundary) }, {
+          xPt: tableXPt + tableWidthPt,
+          yPt: rowY(boundary),
+        });
+      } else {
+        columns.forEach((horizontal, column) => {
+          const aboveOwner = boundaries.occupancy[boundary - 1]?.[column] ?? -1;
+          const belowOwner = boundaries.occupancy[boundary]?.[column] ?? -1;
+          const separatesOwners = aboveOwner !== belowOwner
+            && (aboveOwner >= 0 || belowOwner >= 0);
+          if (!horizontal || !separatesOwners) return;
+          const conditionalInsideOverridesTable = [
+            { side: horizontal.above, directEdge: 'bottom' as const },
+            { side: horizontal.below, directEdge: 'top' as const },
+          ].some(({ side, directEdge }) => {
+              const owner = side.owner;
+              if (!owner) return false;
+              return authoredInsideBorderIsEffective(
+                owner.input.borders[directEdge],
+                owner.input.borders.insideH,
+              );
+            });
+          if (conditionalInsideOverridesTable) return;
+          const startXPt = columnX(gridRow, column);
+          const endXPt = columnX(gridRow, column + 1);
+          const aboveTableBorder = firstAuthoredBorder(
+            input.rows[boundary - 1]?.exceptionBorders?.insideH ?? null,
+            input.borders.insideH,
+          );
+          const belowTableBorder = firstAuthoredBorder(
+            input.rows[boundary]?.exceptionBorders?.insideH ?? null,
+            input.borders.insideH,
+          );
+          const tableBorder = resolveBoundary(
+            toConflictCandidate(aboveTableBorder, 'table'),
+            toConflictCandidate(belowTableBorder, 'table'),
+            edge,
+          )?.border ?? null;
+          push(tableBorder, edge,
+            { xPt: Math.min(startXPt, endXPt), yPt: rowY(boundary) },
+            { xPt: Math.max(startXPt, endXPt), yPt: rowY(boundary) });
+        });
+      }
       columns.forEach((horizontal) => {
         if (!horizontal) return;
         pushDetachedHorizontal(horizontal.above, boundary, 'bottom', horizontal.edge);
@@ -707,23 +771,47 @@ function materializeBorders(
     });
   });
 
-  // Non-zero cell spacing disables border conflict (§17.4.38/.39). Table
-  // borders remain on the shared grid while every cell border is retained on
-  // its inset border box, so opposing borders cannot cover one another.
+  // Non-zero spacing separates opposing cell edge boxes. Table borders remain
+  // on the shared grid while cell edges are inset. Word's narrower exception
+  // keeps conditional tcBorders insideH/insideV in conflict with the matching
+  // table inside border ([MS-OI29500] 2.1.136/.138); those winners are already
+  // retained on the inset cell edges above/below.
   input.rows.forEach((row, rowIndex) => {
     if (effectiveCellSpacingPt(row) <= 0) return;
     const rowTopPt = rowY(rowIndex);
     const rowBottomPt = rowY(rowIndex + 1);
     const tableXPt = rowXPt[rowIndex] ?? 0;
-    push(input.borders.left, 'left', { xPt: tableXPt, yPt: rowTopPt }, {
+    push(firstAuthoredBorder(row.exceptionBorders?.left ?? null, input.borders.left),
+      'left', { xPt: tableXPt, yPt: rowTopPt }, {
       xPt: tableXPt, yPt: rowBottomPt,
     });
-    push(input.borders.right, 'right', { xPt: tableXPt + tableWidthPt, yPt: rowTopPt }, {
+    push(firstAuthoredBorder(row.exceptionBorders?.right ?? null, input.borders.right),
+      'right', { xPt: tableXPt + tableWidthPt, yPt: rowTopPt }, {
       xPt: tableXPt + tableWidthPt, yPt: rowBottomPt,
     });
+    const conditionalInsideVBoundaries = new Set<number>();
+    for (const cell of row.cells) {
+      if (authoredInsideBorderIsEffective(cell.borders.left, cell.borders.insideV)) {
+        conditionalInsideVBoundaries.add(cell.columnStart);
+      }
+      if (authoredInsideBorderIsEffective(cell.borders.right, cell.borders.insideV)) {
+        conditionalInsideVBoundaries.add(cell.columnStart + cell.columnSpan);
+      }
+    }
     for (let boundary = 1; boundary < input.columnWidthsPt.length; boundary += 1) {
+      const logicalBeforeOwner = boundaries.occupancy[rowIndex]?.[boundary - 1] ?? -1;
+      const logicalAfterOwner = boundaries.occupancy[rowIndex]?.[boundary] ?? -1;
+      const separatesOwners = logicalBeforeOwner !== logicalAfterOwner
+        && (logicalBeforeOwner >= 0 || logicalAfterOwner >= 0);
+      if (!separatesOwners) continue;
       const xPt = columnX(rowIndex, boundary);
-      push(input.borders.insideV, 'between', { xPt, yPt: rowTopPt }, { xPt, yPt: rowBottomPt });
+      if (!conditionalInsideVBoundaries.has(boundary)) {
+        push(firstAuthoredBorder(
+          row.exceptionBorders?.insideV ?? null,
+          input.borders.insideV,
+        ), 'between',
+          { xPt, yPt: rowTopPt }, { xPt, yPt: rowBottomPt });
+      }
     }
 
     const spacingPt = effectiveCellSpacingPt(row);
@@ -737,10 +825,13 @@ function materializeBorders(
         input.columnWidthsPt.length,
         cell.columnStart + cell.columnSpan,
       ));
-      const logicalStartInsetPt = cell.columnStart === 0 ? spacingPt : spacingPt / 2;
-      const logicalEndInsetPt = cell.columnStart + cell.columnSpan >= input.columnWidthsPt.length
-        ? spacingPt
-        : spacingPt / 2;
+      const { startPt: logicalStartInsetPt, endPt: logicalEndInsetPt } =
+        tableCellHorizontalSpacingInsets(
+          spacingPt,
+          cell.columnStart,
+          cell.columnSpan,
+          input.columnWidthsPt.length,
+        );
       const leftPt = Math.min(startXPt, endXPt)
         + (input.bidiVisual ? logicalEndInsetPt : logicalStartInsetPt);
       const rightPt = Math.max(startXPt, endXPt)
@@ -751,7 +842,7 @@ function materializeBorders(
       const edges = physicalCellEdges(
         cell,
         noTableEdges,
-        row.exceptionBorders,
+        null,
         rowIndex,
         lastRowIndex,
         input.rows.length,
@@ -901,10 +992,12 @@ export function layoutTable(
       );
       const gridLeftPt = Math.min(logicalStartX, logicalEndX);
       const gridRightPt = Math.max(logicalStartX, logicalEndX);
-      const physicalStartIsOuter = cell.columnStart === 0;
-      const physicalEndIsOuter = cell.columnStart + cell.columnSpan >= input.columnWidthsPt.length;
-      const startInsetPt = physicalStartIsOuter ? horizontalSpacingPt : horizontalSpacingPt / 2;
-      const endInsetPt = physicalEndIsOuter ? horizontalSpacingPt : horizontalSpacingPt / 2;
+      const { startPt: startInsetPt, endPt: endInsetPt } = tableCellHorizontalSpacingInsets(
+        horizontalSpacingPt,
+        cell.columnStart,
+        cell.columnSpan,
+        input.columnWidthsPt.length,
+      );
       const cellXPt = gridLeftPt + (input.bidiVisual ? endInsetPt : startInsetPt);
       const cellRightPt = gridRightPt - (input.bidiVisual ? startInsetPt : endInsetPt);
       const cellWidthPt = Math.max(0, cellRightPt - cellXPt);

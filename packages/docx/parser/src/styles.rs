@@ -301,6 +301,11 @@ pub struct CondFmt {
     /// ECMA-376 §17.7.6: the conditional block's `<w:pPr>` — paragraph defaults
     /// for cells covered by this condition (e.g. firstRow `<w:jc w:val="right"/>`).
     pub para: Option<ParaFmt>,
+    /// Row-wide table-style spacing remains lexical until the layout boundary
+    /// applies CT_TblWidth defaults and the documented Word deviations.
+    pub cell_spacing: Option<crate::types::TableWidthAcquisitionWire>,
+    /// Full-row conditional table margin layer (§17.7.6.3).
+    pub cell_margins: Option<crate::types::TableMarginAcquisitionWire>,
 }
 
 /// Fold an ordered list of conditional-format layers into one effective
@@ -327,6 +332,10 @@ pub fn merge_cond_layers(layers: &[&CondFmt]) -> CondFmt {
         if let Some(p) = &layer.para {
             apply_para(out.para.get_or_insert_with(ParaFmt::default), p);
         }
+        if layer.cell_spacing.is_some() {
+            out.cell_spacing = layer.cell_spacing.clone();
+        }
+        merge_table_margin_layer(&mut out.cell_margins, &layer.cell_margins);
     }
     out
 }
@@ -377,6 +386,11 @@ pub struct TableStyleDef {
     pub cell_margin_bottom: Option<f64>,
     pub cell_margin_left: Option<f64>,
     pub cell_margin_right: Option<f64>,
+    /// Lexical margin layer retained independently from the compatibility
+    /// numeric projection so start/end can be mapped after bidiVisual is known.
+    pub cell_margins: Option<crate::types::TableMarginAcquisitionWire>,
+    /// Whole-table style spacing, inherited through basedOn.
+    pub cell_spacing: Option<crate::types::TableWidthAcquisitionWire>,
 }
 
 #[derive(Default)]
@@ -575,6 +589,10 @@ impl StyleMap {
             if def.cell_margin_right.is_some() {
                 out.cell_margin_right = def.cell_margin_right;
             }
+            merge_table_margin_layer(&mut out.cell_margins, &def.cell_margins);
+            if def.cell_spacing.is_some() {
+                out.cell_spacing = def.cell_spacing.clone();
+            }
             // §17.7.6: a derived table style's whole-table rPr/pPr layers ON TOP
             // of the base style's. We fold each level into a single accumulated
             // RunFmt/ParaFmt with the standard merge semantics (later wins).
@@ -596,6 +614,10 @@ impl StyleMap {
                 if let Some(p) = &v.para {
                     apply_para(slot.para.get_or_insert_with(ParaFmt::default), p);
                 }
+                if v.cell_spacing.is_some() {
+                    slot.cell_spacing = v.cell_spacing.clone();
+                }
+                merge_table_margin_layer(&mut slot.cell_margins, &v.cell_margins);
             }
         }
         out
@@ -2152,6 +2174,52 @@ fn merge_raw_borders(dst: &mut RawTblBorders, src: &RawTblBorders) {
     }
 }
 
+fn table_width_wire(
+    node: Option<roxmltree::Node>,
+) -> Option<crate::types::TableWidthAcquisitionWire> {
+    node.map(|n| crate::types::TableWidthAcquisitionWire {
+        kind: attr_w(n, "type"),
+        value: attr_w(n, "w"),
+    })
+}
+
+fn table_margin_wire(node: roxmltree::Node) -> crate::types::TableMarginAcquisitionWire {
+    crate::types::TableMarginAcquisitionWire {
+        top: table_width_wire(child_w(node, "top")),
+        bottom: table_width_wire(child_w(node, "bottom")),
+        start: table_width_wire(child_w(node, "start")),
+        end: table_width_wire(child_w(node, "end")),
+        left: table_width_wire(child_w(node, "left")),
+        right: table_width_wire(child_w(node, "right")),
+    }
+}
+
+pub(crate) fn merge_table_margin_layer(
+    target: &mut Option<crate::types::TableMarginAcquisitionWire>,
+    source: &Option<crate::types::TableMarginAcquisitionWire>,
+) {
+    let Some(source) = source else { return };
+    let target = target.get_or_insert_with(Default::default);
+    if source.top.is_some() {
+        target.top = source.top.clone();
+    }
+    if source.bottom.is_some() {
+        target.bottom = source.bottom.clone();
+    }
+    if source.start.is_some() {
+        target.start = source.start.clone();
+    }
+    if source.end.is_some() {
+        target.end = source.end.clone();
+    }
+    if source.left.is_some() {
+        target.left = source.left.clone();
+    }
+    if source.right.is_some() {
+        target.right = source.right.clone();
+    }
+}
+
 fn parse_tbl_style_def(style_node: roxmltree::Node, based_on: Option<String>) -> TableStyleDef {
     let mut def = TableStyleDef {
         based_on,
@@ -2179,6 +2247,7 @@ fn parse_tbl_style_def(style_node: roxmltree::Node, based_on: Option<String>) ->
         // the base via `resolve_table_style`. §17.18.90 ST_TblWidth says
         // dxa = 1/20 pt; w:type other than dxa is ignored for margins.
         if let Some(m) = child_w(tbl_pr, "tblCellMar") {
+            def.cell_margins = Some(table_margin_wire(m));
             let edge = |name: &str| -> Option<f64> {
                 child_w(m, name)
                     .filter(|n| attr_w(*n, "type").map(|t| t == "dxa").unwrap_or(true))
@@ -2192,6 +2261,7 @@ fn parse_tbl_style_def(style_node: roxmltree::Node, based_on: Option<String>) ->
             def.cell_margin_left = edge("left").or_else(|| edge("start"));
             def.cell_margin_right = edge("right").or_else(|| edge("end"));
         }
+        def.cell_spacing = table_width_wire(child_w(tbl_pr, "tblCellSpacing"));
     }
     if let Some(tc_pr) = child_w(style_node, "tcPr") {
         def.cell_shd = shd_fill(tc_pr);
@@ -2225,6 +2295,8 @@ fn parse_tbl_style_def(style_node: roxmltree::Node, based_on: Option<String>) ->
             if let Some(borders) = child_w(tbl_pr, "tblBorders") {
                 merge_raw_borders(&mut cf.borders, &parse_raw_tbl_borders(borders));
             }
+            cf.cell_spacing = table_width_wire(child_w(tbl_pr, "tblCellSpacing"));
+            cf.cell_margins = child_w(tbl_pr, "tblCellMar").map(table_margin_wire);
         }
         // §17.7.6: the conditional block carries its own `<w:rPr>`/`<w:pPr>`
         // (e.g. firstRow `<w:color w:val="365F91"/>` + `<w:jc w:val="right"/>`).
