@@ -334,6 +334,14 @@ const textOf = (el: PaginatedBodyElement): string =>
         .join('')
     : '';
 
+const paragraphOccurrenceWithRun = (
+  page: PaginatedBodyElement[],
+  run: DocRun,
+): PaginatedBodyElement | undefined => page.find(
+  (element) => element.type === 'paragraph'
+    && (element as unknown as DocParagraph).runs.includes(run),
+);
+
 function retainedTableOn(page: PaginatedBodyElement[]) {
   const element = page.find((el) => el.type === 'table');
   if (!element) return undefined;
@@ -1236,7 +1244,13 @@ describe('computePages — anchored wrap-shape float exclusion (B: §20.4.2.16)'
 
     const pages = computePages(body, section(), makeCtx());
     expect(pages).toHaveLength(1);
-    expect(pages[0]).toContain(calloutAnchor as PaginatedBodyElement);
+    const occurrence = paragraphOccurrenceWithRun(
+      pages[0],
+      (calloutAnchor as unknown as DocParagraph).runs[0]!,
+    );
+    expect(occurrence).toBeDefined();
+    expect(occurrence).not.toBe(calloutAnchor);
+    expect(occurrence ? bodyFragmentFor(occurrence)?.fragment.source.path[0] : undefined).toBe(4);
   });
 
   it('does not count a front wrapNone shape as flow height when grouping following inline images', () => {
@@ -1251,7 +1265,15 @@ describe('computePages — anchored wrap-shape float exclusion (B: §20.4.2.16)'
 
     const pages = computePages(body, section(), makeCtx());
     expect(pages).toHaveLength(1);
-    expect(pages[0]).toContain(smallImage as PaginatedBodyElement);
+    const smallImageOccurrence = paragraphOccurrenceWithRun(
+      pages[0],
+      (smallImage as unknown as DocParagraph).runs[0]!,
+    );
+    expect(smallImageOccurrence).toBeDefined();
+    expect(smallImageOccurrence).not.toBe(smallImage);
+    expect(smallImageOccurrence
+      ? bodyFragmentFor(smallImageOccurrence)?.fragment.source.path[0]
+      : undefined).toBe(1);
     expect(pages[0].some((el) =>
       el.type === 'paragraph' &&
       (el as unknown as DocParagraph).runs.some((r) => r.type === 'image'),
@@ -1332,8 +1354,14 @@ describe('computePages — paragraph anchor before explicit page break (§20.4.3
 
     const pages = computePages(body, section(), makeCtx());
     expect(pages).toHaveLength(3);
-    expect(pages[0]).not.toContain(imagePara as PaginatedBodyElement);
-    expect(pages[1]).toContain(imagePara as PaginatedBodyElement);
+    const imageRun = (imagePara as unknown as DocParagraph).runs[0]!;
+    expect(paragraphOccurrenceWithRun(pages[0], imageRun)).toBeUndefined();
+    const imageOccurrence = paragraphOccurrenceWithRun(pages[1], imageRun);
+    expect(imageOccurrence).toBeDefined();
+    expect(imageOccurrence).not.toBe(imagePara);
+    expect(imageOccurrence
+      ? bodyFragmentFor(imageOccurrence)?.fragment.source.path[0]
+      : undefined).toBe(3);
     expect(pages[1]).toContain(anchorPara as PaginatedBodyElement);
     expect(textOf(pages[2][0])).toBe('after');
   });
