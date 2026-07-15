@@ -61,7 +61,9 @@ function paintTableContents(
 ): void {
   for (const row of node.rows) {
     for (const cell of row.cells) {
-      if (cell.verticalMerge === 'continue') continue;
+      const ownsContinuationPaint = 'visualMergeOwnership' in cell
+        && cell.visualMergeOwnership === 'continuation';
+      if (cell.verticalMerge === 'continue' && !ownsContinuationPaint) continue;
       if (cell.background) {
         context.ctx.fillStyle = cell.background.color;
         context.ctx.fillRect(

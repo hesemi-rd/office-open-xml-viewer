@@ -416,7 +416,11 @@ export function resolveFloatOverlap(
     'kind' | 'xLeft' | 'xRight' | 'yTop' | 'yBottom' | 'paraId'
   >[],
 ): { x: number; y: number } {
-  for (let guard = 0; guard < 16; guard++) {
+  // Each right/down move clears at least one current blocker permanently for a
+  // finite, static registry: x and y only increase, so a cleared exclusion edge
+  // can never become intersecting again. Therefore at most `floats.length`
+  // moves are possible; the extra iteration is the required postcondition check.
+  for (let moveCount = 0; moveCount <= floats.length; moveCount += 1) {
     const exL = x - dl, exR = x + w + dr, exT = y - dt, exB = y + h + db;
     // Which already-registered floats block the moving float:
     //   - allowOverlap === false (spec-mandated avoidance): scope by the moving
@@ -433,6 +437,9 @@ export function resolveFloatOverlap(
         rectsOverlap(exL, exR, exT, exB, f.xLeft, f.xRight, f.yTop, f.yBottom),
     );
     if (blockers.length === 0) return { x, y };
+    if (moveCount === floats.length) {
+      throw new Error('Float overlap resolution did not converge');
+    }
 
     // Horizontal: re-seat just right of the right-most blocker. Setting our
     // left exclusion edge (x - dl) flush against the blocker's right exclusion
@@ -450,7 +457,7 @@ export function resolveFloatOverlap(
     const maxBottom = Math.max(...blockers.map((f) => f.yBottom));
     y = maxBottom + dt;
   }
-  return { x, y };
+  throw new Error('Float overlap resolution did not converge');
 }
 
 /**

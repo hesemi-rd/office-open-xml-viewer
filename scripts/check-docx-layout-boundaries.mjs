@@ -1207,6 +1207,57 @@ function normalizedComputePagesHash(node, source) {
   const expectedConvergedSplitEmitter = convergedSplitCallbacks?.[1]
     ? printedSyntax(convergedSplitCallbacks[1], convergedSplitCallbacksSource)
     : '';
+  const exactSplitFloatLivePageSource = '() => pages.length - 1';
+  const splitFloatLivePageSource = ts.createSourceFile(
+    'compute-pages-a5-split-float-live-page-expected.ts',
+    `const callback = ${exactSplitFloatLivePageSource};`,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const splitFloatLivePageDeclaration = splitFloatLivePageSource.statements[0]
+    ?.declarationList?.declarations?.[0];
+  const splitFloatLivePageCallback = splitFloatLivePageDeclaration?.initializer;
+  const expectedSplitFloatLivePage = splitFloatLivePageCallback
+    ? printedSyntax(splitFloatLivePageCallback, splitFloatLivePageSource)
+    : '';
+  const splitFloatLivePageCalls = [];
+  const findSplitFloatLivePageCall = (current) => {
+    if (ts.isCallExpression(current)
+      && ts.isIdentifier(current.expression)
+      && current.expression.text === 'splitFloatTableAcrossPages'
+      && current.arguments.length >= 3) {
+      const resolver = current.arguments[current.arguments.length - 3];
+      const emitter = current.arguments[current.arguments.length - 2];
+      const livePage = current.arguments[current.arguments.length - 1];
+      if (printedSyntax(resolver, source) === expectedConvergedSplitResolver
+        && printedSyntax(emitter, source) === expectedConvergedSplitEmitter
+        && printedSyntax(livePage, source) === expectedSplitFloatLivePage) {
+        splitFloatLivePageCalls.push({ emitter, livePage });
+      }
+    }
+    ts.forEachChild(current, findSplitFloatLivePageCall);
+  };
+  findSplitFloatLivePageCall(node);
+  if (splitFloatLivePageCalls.length === 1) {
+    const { emitter, livePage } = splitFloatLivePageCalls[0];
+    const nodeStart = node.getStart(source);
+    const start = emitter.getEnd() - nodeStart;
+    const end = livePage.getEnd() - nodeStart;
+    const nodeText = node.getText(source);
+    const virtualText = nodeText.slice(0, start) + nodeText.slice(end);
+    const virtualSource = ts.createSourceFile(
+      'compute-pages-a5-split-float-live-page-virtual.ts',
+      virtualText,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const virtualNode = virtualSource.statements.find((candidate) => (
+      ts.isFunctionDeclaration(candidate) && candidate.name?.text === 'computePages'
+    ));
+    if (virtualNode) return normalizedComputePagesHash(virtualNode, virtualSource);
+  }
   const convergedSplitCalls = [];
   const findConvergedSplitCall = (current) => {
     if (ts.isCallExpression(current)

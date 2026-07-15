@@ -4379,6 +4379,7 @@ export function computePages(
                 );
               }),
             (sliceEl) => pushTagged(sliceEl),
+            () => pages.length - 1,
           );
           y = endY;
           measureState.y = bodyTopPt() + endY;
@@ -8290,6 +8291,9 @@ export function splitFloatTableAcrossPages(
   /** Push the fully-stamped accepted slice. Omitted (direct unit tests) ⇒ the
    *  slice is dropped and neither child nor parent registry delta is committed. */
   emitSlice?: (sliceEl: PaginatedBodyElement) => void,
+  /** Current live physical page. The compute paginator owns page advancement;
+   *  direct unit callers may omit it and retain slice-ordinal fallback. */
+  currentPhysicalPageIndex?: () => number,
 ): number {
   const retainedRecord = bodyFlowFragments.sourceIndices.retainedTableMeasureBySource
     .forTable(table);
@@ -8317,7 +8321,9 @@ export function splitFloatTableAcrossPages(
       }
       const occurrenceId = `${retained.input.id}:float-slice:${sliceOrdinal}:row:${cursor.rowIndex}:fragment:${cursor.rowFragmentIndex}`;
       const iteration = fieldAcquisitionContextOf(retainedServices);
-      const destinationPage = iteration.resolveTableOccurrencePage?.(occurrenceId);
+      const livePhysicalPageIndex = currentPhysicalPageIndex?.() ?? sliceOrdinal;
+      const destinationPage = iteration.resolveTableOccurrencePage?.(occurrenceId)
+        ?? iteration.resolveDestinationPage?.(livePhysicalPageIndex);
       const probeTp: TblpPr = firstSlice
         ? tp
         : { ...tp, vertAnchor: 'text', tblpY: 0, tblpYSpec: undefined };
@@ -8377,8 +8383,8 @@ export function splitFloatTableAcrossPages(
         compatibility: 'word',
         oversizedRowPolicy: 'atomic',
         page: {
-          physicalPageIndex: destinationPage?.pageIndex ?? sliceOrdinal,
-          displayPageNumber: destinationPage?.displayPageNumber ?? sliceOrdinal + 1,
+          physicalPageIndex: destinationPage?.pageIndex ?? livePhysicalPageIndex,
+          displayPageNumber: destinationPage?.displayPageNumber ?? livePhysicalPageIndex + 1,
           occurrenceId,
         },
         floatingTableFrames: {
@@ -8410,7 +8416,7 @@ export function splitFloatTableAcrossPages(
         },
         floatingTableRegistry: {
           coordinateSpace: 'logical-page-points',
-          flowDomainId: `logical-page:${destinationPage?.pageIndex ?? sliceOrdinal}`,
+          flowDomainId: `logical-page:${destinationPage?.pageIndex ?? livePhysicalPageIndex}`,
           entries: Object.freeze(externalRegistry.floats.map((float, index) => Object.freeze({
             kind: float.kind,
             occurrenceId: float.imageKey || `page-float:${index}`,

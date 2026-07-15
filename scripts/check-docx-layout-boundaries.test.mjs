@@ -277,9 +277,28 @@ function initializeComposedFittingOuterProbeRepository() {
   return { root, current };
 }
 
+function initializeSplitFloatLivePageRepository() {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-split-float-live-page-'));
+  const productionRoot = resolve(import.meta.dirname, '..');
+  const current = readFileSync(join(productionRoot, 'packages/docx/src/renderer.ts'), 'utf8');
+  const livePageCallback = '            () => pages.length - 1,\n';
+  assert.ok(current.includes(livePageCallback));
+  write(root, 'packages/docx/src/renderer.ts', current.replace(livePageCallback, ''));
+  write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
+  write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
+  git(root, 'init', '-b', 'main');
+  git(root, 'config', 'user.email', 'boundary-test@example.invalid');
+  git(root, 'config', 'user.name', 'Boundary Test');
+  git(root, 'add', '.');
+  git(root, 'commit', '-m', 'base before split float live page callback');
+  git(root, 'switch', '-c', 'a1');
+  establishA1Baseline(root);
+  return { root, current };
+}
+
 function priorSplitParentCommitSource(current) {
   const startMarker = '            (sliceTp, tableWidthPt, tableHeightPt, externalRegistry) =>';
-  const endMarker = '            (sliceEl) => pushTagged(sliceEl),\n          );';
+  const endMarker = '            (sliceEl) => pushTagged(sliceEl),\n            () => pages.length - 1,\n          );';
   const start = current.indexOf(startMarker);
   const end = current.indexOf(endMarker, start);
   assert.ok(start >= 0 && end > start);
@@ -1278,6 +1297,46 @@ test('rejects mutable body fragment receivers whose authority changes after init
   }
 });
 
+test('rejects late mutations of canonical body fragment sidecars', () => {
+  const mutations = [
+    `Object.assign(bodyFlowFragments.sourceIndices, {
+      retainedTableMeasureBySource: new WeakMap<object, unknown>(),
+    });`,
+    `Object.assign(bodyFlowFragments['sourceIndices'], {
+      retainedTableMeasureBySource: new WeakMap<object, unknown>(),
+    });`,
+    `Object.defineProperty(bodyFlowFragments.sourceIndices, 'retainedTableMeasureBySource', {
+      value: new WeakMap<object, unknown>(),
+    });`,
+    `bodyFlowFragments.sourceIndices.retainedTableMeasureBySource =
+      new WeakMap<object, unknown>();`,
+  ];
+  for (const mutation of mutations) {
+    const root = initializeRepository();
+    const retainedBody = (extra = '') => `
+      const bodyFlowFragments = Object.freeze(Object.assign(new WeakMap<object, unknown>(), {
+        sourceIndices: new WeakMap<object, number>(),
+        framePlacement: new WeakMap<object, unknown>(),
+      }));
+      ${extra}
+      function bodyFragmentFor(element: object) { return bodyFlowFragments.get(element); }
+      function renderBodyElements(elements: any[]) {
+        for (const el of elements) {
+          if (el.type === 'paragraph') bodyFragmentFor(el);
+        }
+      }
+    `;
+    write(root, 'packages/docx/src/renderer.ts', retainedBody());
+    establishA1Baseline(root);
+    write(root, 'packages/docx/src/renderer.ts', retainedBody(mutation));
+
+    const result = runChecker(root, '--base-ref', 'main');
+
+    assert.notEqual(result.status, 0, mutation);
+    assert.match(result.output, /BODY_PAINT_LAYOUT_CAPABILITY/, mutation);
+  }
+});
+
 test('rejects transitive layout acquisition from a local body paragraph paint helper', () => {
   const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-body-paint-transitive-'));
   write(
@@ -1611,6 +1670,28 @@ test('composes all exact A5 computePages normalizers over production A5 bases', 
   for (const ref of ['ec4e046', 'aa02bbc']) {
     const result = runChecker(productionRoot, '--base-ref', ref);
     assert.equal(result.status, 0, `${ref}: ${result.output}`);
+  }
+});
+
+test('allows only the live physical-page callback for split floating tables', () => {
+  const { root, current } = initializeSplitFloatLivePageRepository();
+  write(root, 'packages/docx/src/renderer.ts', current);
+  const result = runChecker(root, '--base-ref', 'main');
+  assert.equal(result.status, 0, result.output);
+});
+
+test('rejects altered or effectful split floating-table page callbacks', () => {
+  const variants = [
+    ['() => pages.length - 1', '() => pages.length'],
+    ['() => pages.length - 1', '() => { sideEffect(); return pages.length - 1; }'],
+  ];
+  for (const [expected, replacement] of variants) {
+    const { root, current } = initializeSplitFloatLivePageRepository();
+    assert.ok(current.includes(expected));
+    write(root, 'packages/docx/src/renderer.ts', current.replace(expected, replacement));
+    const result = runChecker(root, '--base-ref', 'main');
+    assert.notEqual(result.status, 0, `${expected} -> ${replacement}`);
+    assert.match(result.output, /LEGACY_DECLARATION_CHANGED|BASELINE_EXPANSION/);
   }
 });
 

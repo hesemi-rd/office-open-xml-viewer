@@ -520,6 +520,38 @@ describe('vertical outer floating tables retain the canonical logical paint doma
     expect(runs.filter((run) => run.text === 'OUTER-SLICE-2')).toHaveLength(1);
   });
 
+  it('stamps later-page split slices with their live page ownership without a PAGE map', () => {
+    const doc = documentWith(floatingTable([
+      { text: 'LATER-SLICE-1', heightPt: 90 },
+      { text: 'LATER-SLICE-2', heightPt: 90 },
+    ]));
+    doc.body.unshift(
+      { type: 'pageBreak' } as BodyElement,
+      { type: 'pageBreak' } as BodyElement,
+    );
+    const measure = recordingCanvas();
+    const pages = computePages(
+      doc.body,
+      __test_verticalLayoutSection(PHYSICAL_SECTION),
+      measure.canvas.getContext('2d') as CanvasRenderingContext2D,
+      doc.fontFamilyClasses,
+    );
+    const retainedSlices = pages.slice(2).map((page) => {
+      const table = page.find((element) => element.type === 'table');
+      const retained = table ? bodyFragmentFor(table) : undefined;
+      if (retained?.fragment.kind !== 'table') {
+        throw new Error('expected a retained later-page split float slice');
+      }
+      return retained.fragment as TableFragmentLayout;
+    });
+
+    expect(pages).toHaveLength(4);
+    expect(retainedSlices.map((fragment) => fragment.rows[0]?.physicalPageIndex))
+      .toEqual([2, 3]);
+    expect(retainedSlices.map((fragment) => fragment.rows[0]?.displayPageNumber))
+      .toEqual([3, 4]);
+  });
+
   it('commits a selected nested float before registering its split outer slice', async () => {
     const outer = floatingTable([
       { text: 'unused', heightPt: 90 },

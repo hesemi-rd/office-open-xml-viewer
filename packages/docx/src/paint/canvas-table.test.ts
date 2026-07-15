@@ -172,6 +172,45 @@ describe('paintTableLayout', () => {
     expect(JSON.stringify(node)).toBe(before);
   });
 
+  it('paints the page-local visual owner of a split vertical merge', async () => {
+    const operations: unknown[] = [];
+    const target = {
+      globalAlpha: 1, fillStyle: '', strokeStyle: '', lineWidth: 1,
+      font: '', textAlign: 'left' as CanvasTextAlign,
+      textBaseline: 'alphabetic' as CanvasTextBaseline,
+      direction: 'ltr' as CanvasDirection, letterSpacing: '0px',
+      fontKerning: 'auto' as CanvasFontKerning,
+      save() {}, restore() {}, beginPath() {}, rect() {}, clip() {},
+      translate() {}, rotate() {}, scale() {},
+      fillRect(x: number, y: number, width: number, height: number) {
+        operations.push(['fillRect', x, y, width, height, target.fillStyle]);
+      },
+      strokeRect() {}, setLineDash() {}, moveTo() {}, lineTo() {}, stroke() {},
+      fill() {}, drawImage() {},
+      fillText(text: string) { operations.push(['fillText', text]); },
+    } as unknown as PaintCanvas2D;
+    const source = tableLayout();
+    const sourceCell = source.rows[0]!.cells[0]!;
+    const continuation = {
+      ...source,
+      rows: [{
+        ...source.rows[0]!,
+        cells: [{
+          ...sourceCell,
+          verticalMerge: 'continue',
+          visualMergeOwnership: 'continuation',
+        }, ...source.rows[0]!.cells.slice(1)],
+      }],
+    } as unknown as TableLayout;
+    const { paintTableLayout } = await import('./canvas-table.js');
+
+    paintTableLayout(continuation, { ctx: target, scale: 1, dpr: 1, resources });
+
+    expect(operations).toContainEqual(['fillRect', 10, 20, 40, 16, '#abcdef']);
+    expect(operations).toContainEqual(['fillText', 'child']);
+    expect(continuation.rows[0]?.cells[0]?.verticalMerge).toBe('continue');
+  });
+
   it('reports text-run bounds in final CSS pixels after placed table transforms', async () => {
     const runs: Array<Readonly<{
       text: string;
