@@ -14,18 +14,13 @@
 
 import type { TblpPr } from './types.js';
 import type { RenderState } from './renderer.js';
-import type {
-  FloatingTablePlacementLayout,
-  FloatingTablePositionInput,
-  FloatingTableReferenceFramesPt,
-  LayoutRect,
-  ResolvedFloatingTablePlacementLayout,
-} from './layout/types.js';
+import { resolvePointSpaceFloatingTableBoxPt } from './layout/floating-table-transaction.js';
+export {
+  resolveFloatingTableBoxPt,
+  resolveFloatingTablePlacement,
+} from './layout/floating-table-transaction.js';
 import {
   frameXContainer,
-  resolveAlignedPosH,
-  resolveAlignedPosV,
-  clampAbsBoxIntoContainer,
   pushFloatRect,
 } from './frame-geometry.js';
 
@@ -37,184 +32,6 @@ export interface FloatTableBox {
   y: number;
   w: number;
   h: number;
-}
-
-function frameEndX(frame: LayoutRect): number {
-  return frame.xPt + frame.widthPt;
-}
-
-function frameEndY(frame: LayoutRect): number {
-  return frame.yPt + frame.heightPt;
-}
-
-function resolvePointSpaceFloatBox(
-  positioning: FloatingTablePositionInput,
-  frames: FloatingTableReferenceFramesPt,
-  widthPt: number,
-  heightPt: number,
-  skipVClamp = false,
-): FloatTableBox {
-  const horizontalFrame = positioning.horzSpecified
-    ? positioning.horzAnchor === 'page'
-      ? frames.page
-      : positioning.horzAnchor === 'margin'
-        ? frames.margin
-        : frames.text
-    : frames.text;
-  const verticalFrame = positioning.vertAnchor === 'page'
-    ? frames.page
-    : positioning.vertAnchor === 'margin'
-      ? frames.margin
-      : frames.text;
-  const x = positioning.xAlign
-    ? resolveAlignedPosH(
-        positioning.xAlign,
-        horizontalFrame.xPt,
-        frameEndX(horizontalFrame),
-        widthPt,
-      )
-    : horizontalFrame.xPt + positioning.xPt;
-  let y = positioning.yAlign && positioning.vertAnchor !== 'text'
-    ? resolveAlignedPosV(
-        positioning.yAlign,
-        { start: verticalFrame.yPt, end: frameEndY(verticalFrame) },
-        heightPt,
-      )
-    : verticalFrame.yPt + positioning.yPt;
-  if (!skipVClamp && (positioning.vertAnchor === 'page' || positioning.vertAnchor === 'margin')) {
-    y = clampAbsBoxIntoContainer(
-      y,
-      heightPt,
-      { start: verticalFrame.yPt, end: frameEndY(verticalFrame) },
-    );
-  }
-  return { x, y, w: widthPt, h: heightPt };
-}
-
-/** Resolve parser-independent §17.4.57 positioning facts in point space. */
-export function resolveFloatingTableBoxPt(
-  positioning: FloatingTablePositionInput,
-  frames: FloatingTableReferenceFramesPt,
-  widthPt: number,
-  heightPt: number,
-): FloatTableBox {
-  return resolvePointSpaceFloatBox(positioning, frames, widthPt, heightPt);
-}
-
-/** Register one point-space floating-table exclusion through the shared float registry. */
-export function registerFloatingTableBoxPt(
-  box: FloatTableBox,
-  positioning: FloatingTablePositionInput,
-  overlap: 'never' | 'overlap',
-  state: RenderState,
-  side = 'bothSides',
-): ReturnType<typeof pushFloatRect> {
-  const sc = state.scale;
-  return pushFloatRect(state, {
-    x: box.x * sc,
-    y: box.y * sc,
-    w: box.w * sc,
-    h: box.h * sc,
-    dl: positioning.leftFromTextPt * sc,
-    dr: positioning.rightFromTextPt * sc,
-    dt: positioning.topFromTextPt * sc,
-    db: positioning.bottomFromTextPt * sc,
-    kind: 'table',
-    mode: 'square',
-    side,
-    imageKey: '',
-    drawn: true,
-    paraId: state.floatParaSeq++,
-    avoidOverlap: true,
-    allowOverlap: overlap !== 'never',
-  });
-}
-
-/** Resolve retained §17.4.57 facts against explicit page-local reference frames. */
-export function resolveFloatingTablePlacement(
-  placement: FloatingTablePlacementLayout,
-  frames: FloatingTableReferenceFramesPt,
-): ResolvedFloatingTablePlacementLayout {
-  const widthPt = placement.child.columnWidthsPt.reduce((sum, width) => sum + width, 0);
-  const heightPt = placement.child.advancePt;
-  const rawBox = resolveFloatingTableBoxPt(
-    placement.positioning,
-    frames,
-    widthPt,
-    heightPt,
-  );
-  const usesTextX = !placement.positioning.horzSpecified
-    || (placement.positioning.horzAnchor !== 'page'
-      && placement.positioning.horzAnchor !== 'margin');
-  const usesTextY = placement.positioning.vertAnchor !== 'page'
-    && placement.positioning.vertAnchor !== 'margin';
-  const box = {
-    ...rawBox,
-    x: usesTextX && placement.acquiredTextOffsetPt
-      ? frames.text.xPt + placement.acquiredTextOffsetPt.xPt
-      : rawBox.x,
-    y: usesTextY && placement.acquiredTextOffsetPt
-      ? frames.text.yPt + placement.acquiredTextOffsetPt.yPt
-      : rawBox.y,
-  };
-  const { positioning } = placement;
-  const bounds = Object.freeze({
-    xPt: box.x,
-    yPt: box.y,
-    widthPt: box.w,
-    heightPt: box.h,
-  });
-  const exclusionBounds = Object.freeze({
-    xPt: box.x - positioning.leftFromTextPt,
-    yPt: box.y - positioning.topFromTextPt,
-    widthPt: box.w + positioning.leftFromTextPt + positioning.rightFromTextPt,
-    heightPt: box.h + positioning.topFromTextPt + positioning.bottomFromTextPt,
-  });
-  return Object.freeze({
-    kind: 'resolved-floating-table-placement',
-    occurrenceId: placement.occurrenceId,
-    xPt: box.x,
-    yPt: box.y,
-    bounds,
-    exclusionBounds,
-    overlap: placement.overlap,
-    child: placement.child,
-    source: placement,
-  });
-}
-
-/** Register the retained exclusion and return the collision-adjusted paint box. */
-export function registerResolvedFloatingTablePlacement(
-  placement: ResolvedFloatingTablePlacementLayout,
-  state: RenderState,
-): ResolvedFloatingTablePlacementLayout {
-  const sc = state.scale;
-  const positioning = placement.source.positioning;
-  const rect = registerFloatingTableBoxPt({
-    x: placement.xPt,
-    y: placement.yPt,
-    w: placement.bounds.widthPt,
-    h: placement.bounds.heightPt,
-  }, positioning, placement.overlap, state);
-  const xPt = rect.imageX / sc;
-  const yPt = rect.imageY / sc;
-  return Object.freeze({
-    ...placement,
-    xPt,
-    yPt,
-    bounds: Object.freeze({
-      xPt,
-      yPt,
-      widthPt: placement.bounds.widthPt,
-      heightPt: placement.bounds.heightPt,
-    }),
-    exclusionBounds: Object.freeze({
-      xPt: rect.xLeft / sc,
-      yPt: rect.yTop / sc,
-      widthPt: (rect.xRight - rect.xLeft) / sc,
-      heightPt: (rect.yBottom - rect.yTop) / sc,
-    }),
-  });
 }
 
 /**
@@ -247,7 +64,7 @@ export function computeFloatTableBox(
 ): FloatTableBox {
   const sc = state.scale;
   const textBand = frameXContainer('text', state);
-  return resolvePointSpaceFloatBox({
+  return resolvePointSpaceFloatingTableBoxPt({
     leftFromTextPt: tp.leftFromText * sc,
     rightFromTextPt: tp.rightFromText * sc,
     topFromTextPt: tp.topFromText * sc,

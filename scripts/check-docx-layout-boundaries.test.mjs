@@ -78,6 +78,92 @@ function initializeComputePagesTableStampRepository() {
   return root;
 }
 
+const computeTableLayoutCommonTail = `
+  const colWidths = resolveColumnWidths(table, contentWPt1, state).map((w) => w * scale);
+  const tableW = colWidths.reduce((s, w) => s + w, 0);
+  const rowContentHeights = resolveTableRowContentHeights(table, colWidths, scale, (cell, cellW) =>
+    measureCellContentHeightPx(cell, table, cellW, scale, state),
+  );
+  const rowHeights = applyTableRowBoundaryFootprints(table, rowContentHeights, scale);
+  return { colWidths, tableW, rowContentHeights, rowHeights };
+}
+`;
+
+const computeTableLayoutStampBaseline = `
+export function computePages() { return []; }
+export function computeTableLayout(table: any, contentWPx: number, state: any) {
+  const { scale } = state;
+  const contentHeightsFromResolved = (rowHeights: number[]): number[] => {
+    const footprints = applyTableRowBoundaryFootprints(table, new Array<number>(table.rows.length).fill(0), scale);
+    return rowHeights.map((height, index) => height - (footprints[index] ?? 0));
+  };
+  const stamped = table as PaginatedBodyElement;
+  const contentWPt1 = contentWPx / scale;
+  const placedFragment = bodyFlowFragments.get(table as object);
+  const fragmentBandPt = tableFragmentBandPt.get(table as object);
+  if (tableReuseEnabled && placedFragment !== undefined && placedFragment.fragment.kind === 'table' && fragmentBandPt !== undefined && placedFragment.fragment.rows.length === table.rows.length && Math.abs(fragmentBandPt - contentWPt1) <= 1e-6 * Math.max(1, Math.abs(contentWPt1))) {
+    const fragment = placedFragment.fragment;
+    const colWidths = fragment.columnWidthsPt.map((w) => w * scale);
+    const rowHeights = fragment.rows.map((r) => r.heightPt * scale);
+    return { colWidths, tableW: colWidths.reduce((s, w) => s + w, 0), rowContentHeights: contentHeightsFromResolved(rowHeights), rowHeights };
+  }
+  const reuseInputs = stamped.tableLayoutInputs;
+  const reuse = tableReuseEnabled && reuseInputs !== undefined && stamped.tableColWidthsPt !== undefined && stamped.tableRowHeightsPt !== undefined && reuseInputs.scale === 1 && stamped.tableRowHeightsPt.length === table.rows.length && Math.abs(reuseInputs.contentWPt - contentWPt1) <= 1e-6 * Math.max(1, Math.abs(contentWPt1));
+  if (reuse) {
+    const colWidths = (stamped.tableColWidthsPt as number[]).map((w) => w * scale);
+    const rowHeights = (stamped.tableRowHeightsPt as number[]).map((h) => h * scale);
+    return { colWidths, tableW: colWidths.reduce((s, w) => s + w, 0), rowContentHeights: contentHeightsFromResolved(rowHeights), rowHeights };
+  }
+${computeTableLayoutCommonTail.slice(1)}`;
+
+const computeTableLayoutRetainedMigration = `
+export function computePages() { return []; }
+export function computeTableLayout(table: any, contentWPx: number, state: any) {
+  const { scale } = state;
+  const contentWPt1 = contentWPx / scale;
+  if (state.retainedTableAcquisition && bodySourceIndexFor(table) !== undefined) {
+    const retained = computeTablePtLayout(state, table, contentWPt1);
+    const colWidths = retained.colWidthsPt.map((width) => width * scale);
+    const rowHeights = retained.rowHeightsPt.map((height) => height * scale);
+    return {
+      colWidths,
+      tableW: colWidths.reduce((sum, width) => sum + width, 0),
+      rowContentHeights: retained.rowContentHeightsPt.map((height) => height * scale),
+      rowHeights,
+    };
+  }
+${computeTableLayoutCommonTail.slice(1)}`;
+
+function initializeComputeTableLayoutRepository() {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-compute-table-layout-'));
+  write(root, 'packages/docx/src/renderer.ts', computeTableLayoutStampBaseline);
+  write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
+  write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
+  git(root, 'init', '-b', 'main');
+  git(root, 'config', 'user.email', 'boundary-test@example.invalid');
+  git(root, 'config', 'user.name', 'Boundary Test');
+  git(root, 'add', '.');
+  git(root, 'commit', '-m', 'base');
+  git(root, 'switch', '-c', 'a1');
+  establishA1Baseline(root);
+  return root;
+}
+
+function removeComputeTableLayoutStampCounts(root) {
+  const baselinePath = join(root, 'scripts/docx-layout-boundary-baseline.json');
+  const baseline = JSON.parse(readFileSync(baselinePath, 'utf8'));
+  for (const symbol of [
+    'tableReuseEnabled',
+    'tableColWidthsPt',
+    'tableRowHeightsPt',
+    'tableLayoutInputs',
+  ]) {
+    delete baseline.legacySymbolCounts[`packages/docx/src/renderer.ts#${symbol}`];
+  }
+  baseline.migrationIdentifierCounts = {};
+  writeFileSync(baselinePath, `${JSON.stringify(baseline, null, 2)}\n`);
+}
+
 function removeComputePagesTableStampCounts(root) {
   const baselinePath = join(root, 'scripts/docx-layout-boundary-baseline.json');
   const baseline = JSON.parse(readFileSync(baselinePath, 'utf8'));
@@ -1138,6 +1224,50 @@ test('allows only the exact A5 retained slice size replacement inside computePag
   const result = runChecker(root, '--base-ref', 'main');
 
   assert.equal(result.status, 0, result.output);
+});
+
+test('allows only the exact A5 retained body prefix inside computeTableLayout', () => {
+  const root = initializeComputeTableLayoutRepository();
+  write(root, 'packages/docx/src/renderer.ts', computeTableLayoutRetainedMigration);
+  removeComputeTableLayoutStampCounts(root);
+
+  const result = runChecker(root, '--base-ref', 'main');
+
+  assert.equal(result.status, 0, result.output);
+});
+
+test('rejects partial, duplicated, altered, or adjacent A5 computeTableLayout edits', () => {
+  const variants = [
+    computeTableLayoutRetainedMigration.replace(
+      'state.retainedTableAcquisition',
+      'state.retainedTablePainter',
+    ),
+    computeTableLayoutRetainedMigration.replace(
+      'bodySourceIndexFor(table)',
+      'bodySourceIndexFor(state)',
+    ),
+    computeTableLayoutRetainedMigration.replace(
+      '  const colWidths = resolveColumnWidths',
+      '  const duplicate = computeTablePtLayout(state, table, contentWPt1);\n  const colWidths = resolveColumnWidths',
+    ),
+    computeTableLayoutRetainedMigration.replace(
+      'tableW: colWidths.reduce((sum, width) => sum + width, 0),',
+      'tableW: colWidths.reduce((sum, width) => sum + width, 1),',
+    ),
+    computeTableLayoutRetainedMigration.replace(
+      '  const colWidths = resolveColumnWidths',
+      '  state.unrelated = true;\n  const colWidths = resolveColumnWidths',
+    ),
+  ];
+
+  for (const source of variants) {
+    const root = initializeComputeTableLayoutRepository();
+    write(root, 'packages/docx/src/renderer.ts', source);
+    removeComputeTableLayoutStampCounts(root);
+    const result = runChecker(root, '--base-ref', 'main');
+    assert.notEqual(result.status, 0, source);
+    assert.match(result.output, /LEGACY_DECLARATION_CHANGED|BASELINE_EXPANSION/);
+  }
 });
 
 test('rejects partial, duplicated, altered, or adjacent A5 computePages edits', () => {

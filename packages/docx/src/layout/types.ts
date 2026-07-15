@@ -608,6 +608,8 @@ export interface FloatingTablePlacementLayout {
   readonly overlap: 'never' | 'overlap';
   readonly positioning: FloatingTablePositionInput;
   readonly acquiredTextOffsetPt?: Readonly<{ xPt: number; yPt: number }>;
+  /** Final host-cell text column, distinct from the paragraph's vertical anchor. */
+  readonly columnBounds?: LayoutRect;
   readonly anchorBounds: LayoutRect;
   readonly child: TableLayout;
 }
@@ -617,6 +619,15 @@ export interface FloatingTableReferenceFramesPt {
   readonly page: LayoutRect;
   readonly margin: LayoutRect;
   readonly text: LayoutRect;
+}
+
+/** Point-space snapshot used while final table-fragment float placement is probed. */
+export interface FloatRegistryEntryPt {
+  readonly kind: 'table' | 'shape' | 'frame';
+  readonly occurrenceId: string;
+  readonly paragraphId: number;
+  readonly bounds: LayoutRect;
+  readonly exclusionBounds: LayoutRect;
 }
 
 /** Paint-ready result of resolving a page-local floating-table occurrence. */

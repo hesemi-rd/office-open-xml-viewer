@@ -15,6 +15,11 @@ import type {
   TableRowLayoutInput,
 } from './types.js';
 import { layoutParagraph } from './paragraph.js';
+import {
+  retainTableEnvelope,
+  retainedTableEnvelopeFor,
+  retainedTableSliceSize,
+} from './retained-table-fragments.js';
 
 const noBorders: TableEdgeInputs = {
   top: null, right: null, bottom: null, left: null, insideH: null, insideV: null,
@@ -177,6 +182,131 @@ function take(
 }
 
 describe('retained table pagination', () => {
+  it('keeps retained envelope geometry immutable and isolated by weak object identity', () => {
+    const first = {};
+    const second = {};
+    const layout = acquisition([row(0, 20)]).layout;
+    const placement = { fragment: layout, xPt: 5, yPt: 7, widthPt: 100 };
+
+    retainTableEnvelope(first, placement);
+
+    placement.xPt = 99;
+    expect(retainedTableEnvelopeFor(first)).toEqual({
+      fragment: layout, xPt: 5, yPt: 7, widthPt: 100,
+    });
+    expect(Object.isFrozen(retainedTableEnvelopeFor(first))).toBe(true);
+    expect(retainedTableEnvelopeFor(second)).toBeUndefined();
+    expect(retainedTableSliceSize(first, 2)).toEqual({ widthPx: 200, heightPx: 40 });
+  });
+
+  it.each(['page', 'margin'] as const)(
+    'reflows a %s-relative nested float before committing row selection',
+    (anchor) => {
+    const nested = acquisition([row(0, 30)]);
+    const initial = acquisition([
+      row(0, 20, {
+        cantSplit: true,
+        paragraph: paragraph('page-anchor', [20]),
+      }),
+    ]);
+    const source = withNestedFloatingTable(initial, nested);
+    const positioning = {
+      ...source.floatingTables[0]!.positioning,
+      horzAnchor: anchor,
+      vertAnchor: anchor,
+      xPt: 10,
+      yPt: 20,
+    };
+    const pageRelative = Object.freeze({
+      ...source,
+      floatingTables: Object.freeze([Object.freeze({
+        ...source.floatingTables[0]!, positioning: Object.freeze(positioning),
+      })]),
+    });
+    const committed: unknown[] = [];
+    const wrapped = paragraph('page-anchor-wrapped', [20, 20, 20]);
+    const finalFloatContext = {
+      floatingTableFrames: {
+        page: { xPt: 0, yPt: 0, widthPt: 200, heightPt: 100 },
+        margin: { xPt: 10, yPt: 10, widthPt: 180, heightPt: 80 },
+        column: { xPt: 10, yPt: 10, widthPt: 100, heightPt: 80 },
+      },
+      floatingTableRegistry: {
+        coordinateSpace: 'logical-points',
+        flowDomainId: pageRelative.input.flowDomainId,
+        entries: Object.freeze([]),
+        nextParagraphId: 0,
+      },
+      finalPlacementTranslationPt: { xPt: 0, yPt: 0 },
+      reacquirePageDependentBlock: (request: {
+        acquired: ParagraphLayout | TableLayoutInput;
+        floatingTableExclusions?: readonly unknown[];
+      }) => request.floatingTableExclusions?.length ? wrapped : request.acquired,
+    } as unknown as Partial<TableFragmentContext>;
+
+    const rejected = take(pageRelative, 50, startTableFragmentCursor(), finalFloatContext);
+
+    expect(rejected.fragment).toBeNull();
+    expect(rejected.requiresFreshPage).toBe(true);
+    committed.push(...(rejected.floatingTablePlacements ?? []));
+    expect(committed).toEqual([]);
+
+    const accepted = take(pageRelative, 100, startTableFragmentCursor(), finalFloatContext);
+    expect(accepted.fragment?.advancePt).toBe(60);
+    expect(accepted.fragment?.rows[0]?.cells[0]?.blocks[0]?.layout).toMatchObject({
+      id: wrapped.id,
+      lines: { length: 3 },
+    });
+    committed.push(...(accepted.floatingTablePlacements ?? []));
+    expect(committed).toHaveLength(1);
+    expect(accepted.fragment?.floatingTables).toEqual([]);
+    expect(accepted.fragment?.resolvedFloatingTables[0]).toBe(
+      accepted.floatingTablePlacements?.[0],
+    );
+    expect(Object.isFrozen(accepted.floatingTablePlacements?.[0]?.bounds)).toBe(true);
+    expect(JSON.parse(JSON.stringify(accepted.fragment))).toEqual(accepted.fragment);
+    },
+  );
+
+  it('does not resolve or commit a final-frame float on a paragraph continuation', () => {
+    const nested = acquisition([row(0, 10)]);
+    const source = withNestedFloatingTable(acquisition([
+      row(0, 40, { paragraph: paragraph('continued-anchor', [20, 20]) }),
+    ]), nested);
+    const pageRelative = Object.freeze({
+      ...source,
+      floatingTables: Object.freeze([Object.freeze({
+        ...source.floatingTables[0]!,
+        positioning: Object.freeze({
+          ...source.floatingTables[0]!.positioning,
+          horzAnchor: 'page', vertAnchor: 'page', xPt: 10, yPt: 20,
+        }),
+      })]),
+    });
+    const context = {
+      floatingTableFrames: {
+        page: { xPt: 0, yPt: 0, widthPt: 200, heightPt: 100 },
+        margin: { xPt: 10, yPt: 10, widthPt: 180, heightPt: 80 },
+        column: { xPt: 10, yPt: 10, widthPt: 100, heightPt: 80 },
+      },
+      floatingTableRegistry: {
+        coordinateSpace: 'logical-points',
+        flowDomainId: pageRelative.input.flowDomainId,
+        entries: Object.freeze([]), nextParagraphId: 0,
+      },
+      finalPlacementTranslationPt: { xPt: 0, yPt: 0 },
+      reacquirePageDependentBlock: (request: { acquired: ParagraphLayout }) => request.acquired,
+    } as unknown as Partial<TableFragmentContext>;
+
+    const first = take(pageRelative, 20, startTableFragmentCursor(), context);
+    const continuation = take(pageRelative, 20, first.nextCursor!, context);
+
+    expect(first.floatingTablePlacements).toHaveLength(1);
+    expect(continuation.floatingTablePlacements).toEqual([]);
+    expect(continuation.fragment?.floatingTables).toEqual([]);
+    expect(continuation.fragment?.resolvedFloatingTables).toEqual([]);
+  });
+
   it('emits the largest fitting row prefix and preserves one column authority', () => {
     const source = acquisition([row(0, 30), row(1, 30), row(2, 30)]);
 

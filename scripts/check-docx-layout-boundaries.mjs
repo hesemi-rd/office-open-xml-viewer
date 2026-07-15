@@ -943,6 +943,18 @@ function normalizedNodeHash(node, source) {
   return createHash('sha256').update(normalized).digest('hex');
 }
 
+function normalizedSyntaxHash(node, source) {
+  const shape = (current) => {
+    const text = ts.isIdentifier(current) || ts.isLiteralExpression(current)
+      ? current.getText(source)
+      : undefined;
+    const children = [];
+    current.forEachChild((child) => children.push(shape(child)));
+    return [ts.SyntaxKind[current.kind], text, ...children];
+  };
+  return createHash('sha256').update(JSON.stringify(shape(node))).digest('hex');
+}
+
 /** A2 permits one mechanically constrained edit to computePages: append the
  * two dependency parameters, then append those identifiers to its existing
  * buildMeasureState call. A5 additionally replaces the exact floating-slice
@@ -1026,6 +1038,119 @@ function normalizedComputePagesHash(node, source) {
     return [ts.SyntaxKind[current.kind], text, ...children];
   };
   return createHash('sha256').update(JSON.stringify(shape(node))).digest('hex');
+}
+
+/** A5 removes the body-table stamp/reuse prefix while leaving the B1
+ * header/footer fallback byte-identical. Normalize only that complete replacement. */
+function normalizedComputeTableLayoutHash(node, source) {
+  if (!ts.isFunctionDeclaration(node) || !node.body) return normalizedSyntaxHash(node, source);
+  const compact = (value) => value.replace(/\s+/g, '');
+  const statements = node.body.statements;
+  const b1Index = statements.findIndex((statement) => (
+    ts.isVariableStatement(statement)
+    && compact(statement.getText(source)).startsWith(
+      'constcolWidths=resolveColumnWidths(table,contentWPt1,state).map(',
+    )
+  ));
+  if (b1Index < 0) return normalizedSyntaxHash(node, source);
+  const retainedPrefix = compact(statements.slice(0, b1Index)
+    .map((statement) => statement.getText(source)).join(''));
+  const exactRetainedPrefix = compact(`
+    const { scale } = state;
+    const contentWPt1 = contentWPx / scale;
+    if (state.retainedTableAcquisition && bodySourceIndexFor(table) !== undefined) {
+      const retained = computeTablePtLayout(state, table, contentWPt1);
+      const colWidths = retained.colWidthsPt.map((width) => width * scale);
+      const rowHeights = retained.rowHeightsPt.map((height) => height * scale);
+      return {
+        colWidths,
+        tableW: colWidths.reduce((sum, width) => sum + width, 0),
+        rowContentHeights: retained.rowContentHeightsPt.map((height) => height * scale),
+        rowHeights,
+      };
+    }
+  `);
+  if (retainedPrefix !== exactRetainedPrefix) {
+    if (retainedPrefix.includes('computeTablePtLayout')) {
+      return createHash('sha256')
+        .update(`invalid-a5-retained-prefix:${retainedPrefix}`)
+        .digest('hex');
+    }
+    return normalizedSyntaxHash(node, source);
+  }
+  const legacyPrefix = `
+    const { scale } = state;
+    const contentHeightsFromResolved = (rowHeights: number[]): number[] => {
+      const footprints = applyTableRowBoundaryFootprints(
+        table,
+        new Array<number>(table.rows.length).fill(0),
+        scale,
+      );
+      return rowHeights.map((height, index) => height - (footprints[index] ?? 0));
+    };
+    const stamped = table as PaginatedBodyElement;
+    const contentWPt1 = contentWPx / scale;
+    const placedFragment = bodyFlowFragments.get(table as object);
+    const fragmentBandPt = tableFragmentBandPt.get(table as object);
+    if (
+      tableReuseEnabled &&
+      placedFragment !== undefined &&
+      placedFragment.fragment.kind === 'table' &&
+      fragmentBandPt !== undefined &&
+      placedFragment.fragment.rows.length === table.rows.length &&
+      Math.abs(fragmentBandPt - contentWPt1) <= 1e-6 * Math.max(1, Math.abs(contentWPt1))
+    ) {
+      const fragment = placedFragment.fragment;
+      const colWidths = fragment.columnWidthsPt.map((w) => w * scale);
+      const rowHeights = fragment.rows.map((r) => r.heightPt * scale);
+      return {
+        colWidths,
+        tableW: colWidths.reduce((s, w) => s + w, 0),
+        rowContentHeights: contentHeightsFromResolved(rowHeights),
+        rowHeights,
+      };
+    }
+    const reuseInputs = stamped.tableLayoutInputs;
+    const reuse =
+      tableReuseEnabled &&
+      reuseInputs !== undefined &&
+      stamped.tableColWidthsPt !== undefined &&
+      stamped.tableRowHeightsPt !== undefined &&
+      reuseInputs.scale === 1 &&
+      stamped.tableRowHeightsPt.length === table.rows.length &&
+      Math.abs(reuseInputs.contentWPt - contentWPt1) <= 1e-6 * Math.max(1, Math.abs(contentWPt1));
+    if (reuse) {
+      const colWidths = (stamped.tableColWidthsPt as number[]).map((w) => w * scale);
+      const rowHeights = (stamped.tableRowHeightsPt as number[]).map((h) => h * scale);
+      return {
+        colWidths,
+        tableW: colWidths.reduce((s, w) => s + w, 0),
+        rowContentHeights: contentHeightsFromResolved(rowHeights),
+        rowHeights,
+      };
+    }
+  `;
+  const first = statements[0];
+  const b1 = statements[b1Index];
+  if (!first || !b1) return normalizedSyntaxHash(node, source);
+  const nodeStart = node.getStart(source);
+  const nodeText = node.getText(source);
+  const virtualText = nodeText.slice(0, first.getStart(source) - nodeStart)
+    + legacyPrefix
+    + nodeText.slice(b1.getStart(source) - nodeStart);
+  const virtualSource = ts.createSourceFile(
+    'compute-table-layout-a5-virtual.ts',
+    virtualText,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const virtualNode = virtualSource.statements.find((statement) => (
+    ts.isFunctionDeclaration(statement) && statement.name?.text === 'computeTableLayout'
+  ));
+  return virtualNode
+    ? normalizedSyntaxHash(virtualNode, virtualSource)
+    : normalizedSyntaxHash(node, source);
 }
 
 /** A3 deletes the production-wide fragment flag after retained table paint is
@@ -1227,6 +1352,8 @@ function declarationInventory(root) {
         if (LEGACY_SYMBOLS.includes(name)) {
           legacyDeclarationHashes[key] = name === 'computePages'
             ? normalizedComputePagesHash(statement, source)
+            : name === 'computeTableLayout'
+              ? normalizedComputeTableLayoutHash(statement, source)
             : name === 'isFragmentPaintableTable'
               ? normalizedIsFragmentPaintableTableHash(statement, source)
             : name === 'renderShapeText'
@@ -1305,6 +1432,11 @@ function mergeBaseBaseline(root, baseRef) {
     if (computePages) {
       value.legacyDeclarationHashes[`${DOCX_SOURCE}/renderer.ts#FunctionDeclaration#computePages`]
         = normalizedComputePagesHash(computePages, source);
+    }
+    const computeTableLayout = declaration('computeTableLayout');
+    if (computeTableLayout) {
+      value.legacyDeclarationHashes[`${DOCX_SOURCE}/renderer.ts#FunctionDeclaration#computeTableLayout`]
+        = normalizedComputeTableLayoutHash(computeTableLayout, source);
     }
     const renderShapeText = declaration('renderShapeText');
     if (renderShapeText) {
@@ -1567,6 +1699,7 @@ export function checkDocxLayoutBoundaries(options) {
   const headBaseline = readBaseline(baselinePath);
   const normalizedDeclarationKeys = [
     `${DOCX_SOURCE}/renderer.ts#FunctionDeclaration#computePages`,
+    `${DOCX_SOURCE}/renderer.ts#FunctionDeclaration#computeTableLayout`,
     `${DOCX_SOURCE}/renderer.ts#FunctionDeclaration#isFragmentPaintableTable`,
     `${DOCX_SOURCE}/renderer.ts#FunctionDeclaration#renderShapeText`,
   ];

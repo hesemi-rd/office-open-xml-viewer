@@ -1,11 +1,18 @@
 import type { RetainedTableAcquisition } from './table-acquisition.js';
+import {
+  beginFloatingTablePlacementTransaction,
+  resolveFloatingTablePlacementInTransaction,
+} from './floating-table-transaction.js';
 import { sliceParagraphLayout } from './paragraph.js';
 import { layoutTable, measureTableCellBlockFlowHeightPt } from './table.js';
 import type {
   FlowBlockPlacement,
+  FloatRegistryEntryPt,
   FloatingTablePlacementLayout,
+  FloatingTableReferenceFramesPt,
   LayoutServices,
   ParagraphLayout,
+  ResolvedFloatingTablePlacementLayout,
   TableCellBlockInput,
   TableCellLayout,
   TableCellLayoutInput,
@@ -53,6 +60,7 @@ export interface TableRowFragmentLayout extends TableRowLayout {
 export interface TableFragmentLayout extends TableLayout {
   readonly rows: readonly TableRowFragmentLayout[];
   readonly floatingTables: readonly FloatingTablePlacementLayout[];
+  readonly resolvedFloatingTables: readonly ResolvedFloatingTablePlacementLayout[];
 }
 
 interface TableCellFragmentCursor {
@@ -81,6 +89,13 @@ export interface PageDependentTableBlockRequest {
   readonly ownership: TableFragmentOwnership;
   readonly page: TableFragmentPageContext;
   readonly acquired: ParagraphLayout | TableLayout;
+  /** Anchor-local point-space exclusions used by final-frame nested floats. */
+  readonly floatingTableExclusions?: readonly Readonly<{
+    xPt: number;
+    yPt: number;
+    widthPt: number;
+    heightPt: number;
+  }>[];
 }
 
 export interface TableFragmentContext {
@@ -92,6 +107,18 @@ export interface TableFragmentContext {
   /** Deterministic policy for floating rows taller than a fresh page band. */
   readonly oversizedRowPolicy?: 'split' | 'atomic';
   readonly page: TableFragmentPageContext;
+  readonly floatingTableFrames?: Readonly<{
+    page: FloatingTableReferenceFramesPt['page'];
+    margin: FloatingTableReferenceFramesPt['margin'];
+    column: FloatingTableReferenceFramesPt['text'];
+  }>;
+  readonly floatingTableRegistry?: Readonly<{
+    coordinateSpace: 'logical-points';
+    flowDomainId: string;
+    entries: readonly FloatRegistryEntryPt[];
+    nextParagraphId: number;
+  }>;
+  readonly finalPlacementTranslationPt?: Readonly<{ xPt: number; yPt: number }>;
   /** Reacquire only content whose destination page can change its geometry. */
   readonly reacquirePageDependentBlock?: (
     request: PageDependentTableBlockRequest,
@@ -102,6 +129,8 @@ export interface TableFragmentResult {
   readonly fragment: TableFragmentLayout | null;
   readonly nextCursor: TableFragmentCursor | null;
   readonly requiresFreshPage: boolean;
+  readonly floatingTablePlacements?: readonly ResolvedFloatingTablePlacementLayout[];
+  readonly floatingTableRegistryDelta?: readonly FloatRegistryEntryPt[];
 }
 
 interface SelectedCell {
@@ -118,6 +147,7 @@ interface SelectedRow {
   readonly ownership: TableFragmentOwnership;
   readonly ranges: readonly (readonly BlockContinuationRange[])[];
   readonly clipAtPageEnd?: boolean;
+  readonly resolvedFloatingTables?: readonly ResolvedFloatingTablePlacementLayout[];
 }
 
 const EPSILON_PT = 0.0001;
@@ -203,11 +233,184 @@ function rowForOccurrence(
   };
 }
 
+function ownsFinalFrameAxis(placement: FloatingTablePlacementLayout): boolean {
+  const horizontal = placement.positioning.horzSpecified
+    && (placement.positioning.horzAnchor === 'page'
+      || placement.positioning.horzAnchor === 'margin');
+  const vertical = placement.positioning.vertAnchor === 'page'
+    || placement.positioning.vertAnchor === 'margin';
+  return horizontal || vertical;
+}
+
+function finalFrameRow(
+  source: RetainedTableAcquisition,
+  row: TableRowLayoutInput,
+  ownership: TableFragmentOwnership,
+  rowOffsetPt: number,
+  context: TableFragmentContext,
+  registry: readonly FloatRegistryEntryPt[],
+  nextParagraphId: number,
+  ownsAnchorStart: (
+    occurrence: RetainedTableAcquisition['floatingTables'][number],
+  ) => boolean,
+): Readonly<{
+  row: TableRowLayoutInput;
+  resolved: readonly ResolvedFloatingTablePlacementLayout[];
+  registry: readonly FloatRegistryEntryPt[];
+  nextParagraphId: number;
+}> {
+  const frames = context.floatingTableFrames;
+  const reacquire = context.reacquirePageDependentBlock;
+  const sourceRow = source.input.rows[row.logicalRowIndex];
+  if (!frames || !reacquire || !sourceRow) {
+    return { row, resolved: [], registry, nextParagraphId };
+  }
+  const occurrences = source.floatingTables.filter((occurrence) => (
+    sourceRow.cells.some((cell) => cell.id === occurrence.hostCellId)
+    && ownsAnchorStart(occurrence)
+  ));
+  if (occurrences.length === 0) return { row, resolved: [], registry, nextParagraphId };
+
+  const rowPlacement: FlowBlockPlacement = {
+    ...context.placement,
+    cursor: {
+      ...context.placement.cursor,
+      yPt: context.placement.cursor.yPt + rowOffsetPt,
+    },
+  };
+  const provisional = layoutTable({
+    ...source.input,
+    id: `${source.input.id}:float-probe:${context.page.occurrenceId}:${row.logicalRowIndex}`,
+    rows: [row],
+  }, rowPlacement, context.services).layout;
+  const translation = context.finalPlacementTranslationPt ?? { xPt: 0, yPt: 0 };
+  const placementFor = (
+    occurrence: RetainedTableAcquisition['floatingTables'][number],
+    laidOut: TableLayout,
+    rowInput: TableRowLayoutInput,
+  ): FloatingTablePlacementLayout | null => {
+    const cellIndex = rowInput.cells.findIndex((cell) => cell.id === occurrence.hostCellId);
+    const laidOutCell = laidOut.rows[0]?.cells[cellIndex];
+    const selectedCell = rowInput.cells[cellIndex];
+    const blockIndex = selectedCell?.blocks.findIndex((block) => (
+      block.sourceBlockIndex === occurrence.anchorBlockIndex
+    )) ?? -1;
+    const anchorBlock = blockIndex < 0 ? undefined : laidOutCell?.blocks[blockIndex];
+    const child = source.nestedById[occurrence.tableId]?.layout;
+    if (!laidOutCell || !anchorBlock || !child) return null;
+    return Object.freeze({
+      kind: 'floating-table-placement' as const,
+      occurrenceId: [
+        context.page.occurrenceId,
+        occurrence.hostCellId,
+        occurrence.sourceBlockIndex,
+        occurrence.tableId,
+      ].join(':'),
+      ownership,
+      physicalPageIndex: context.page.physicalPageIndex,
+      displayPageNumber: context.page.displayPageNumber,
+      ...occurrence,
+      columnBounds: Object.freeze({
+        xPt: laidOutCell.contentBounds.xPt + translation.xPt,
+        yPt: laidOutCell.contentBounds.yPt + translation.yPt,
+        widthPt: laidOutCell.contentBounds.widthPt,
+        heightPt: laidOutCell.contentBounds.heightPt,
+      }),
+      anchorBounds: Object.freeze({
+        xPt: laidOutCell.contentBounds.xPt + translation.xPt,
+        yPt: laidOutCell.flowBounds.yPt + anchorBlock.offsetPt + translation.yPt,
+        widthPt: anchorBlock.layout.flowBounds.widthPt,
+        heightPt: anchorBlock.layout.flowBounds.heightPt,
+      }),
+      child,
+    });
+  };
+
+  let transaction = beginFloatingTablePlacementTransaction(registry, nextParagraphId);
+  const resolved: ResolvedFloatingTablePlacementLayout[] = [];
+  for (const occurrence of occurrences) {
+    const placement = placementFor(occurrence, provisional, row);
+    if (!placement || !ownsFinalFrameAxis(placement)) continue;
+    const resolution = resolveFloatingTablePlacementInTransaction(placement, {
+      page: frames.page,
+      margin: frames.margin,
+      text: {
+        xPt: placement.columnBounds?.xPt ?? placement.anchorBounds.xPt,
+        yPt: placement.anchorBounds.yPt,
+        widthPt: placement.columnBounds?.widthPt ?? placement.anchorBounds.widthPt,
+        heightPt: placement.anchorBounds.heightPt,
+      },
+    }, transaction);
+    resolved.push(resolution.placement);
+    transaction = resolution.transaction;
+  }
+  if (resolved.length === 0) {
+    return { row, resolved, registry, nextParagraphId };
+  }
+
+  const wrappedRow: TableRowLayoutInput = {
+    ...row,
+    cells: row.cells.map((cell, logicalCellIndex) => ({
+      ...cell,
+      blocks: cell.blocks.map((block) => {
+        const exclusions = resolved
+          .filter((placement) => (
+            placement.source.hostCellId === cell.id
+            && placement.source.anchorBlockIndex === block.sourceBlockIndex
+          ))
+          .map((placement) => Object.freeze({
+            xPt: placement.exclusionBounds.xPt - placement.source.anchorBounds.xPt,
+            yPt: placement.exclusionBounds.yPt - placement.source.anchorBounds.yPt,
+            widthPt: placement.exclusionBounds.widthPt,
+            heightPt: placement.exclusionBounds.heightPt,
+          }));
+        if (exclusions.length === 0 || block.layout.kind !== 'paragraph') return block;
+        return {
+          ...block,
+          layout: reacquire({
+            logicalRowIndex: row.logicalRowIndex,
+            logicalCellIndex,
+            sourceBlockIndex: block.sourceBlockIndex,
+            ownership,
+            page: context.page,
+            acquired: block.layout,
+            floatingTableExclusions: Object.freeze(exclusions),
+          }),
+        };
+      }),
+    })),
+  };
+  const finalLayout = layoutTable({
+    ...source.input,
+    id: `${source.input.id}:float-final:${context.page.occurrenceId}:${row.logicalRowIndex}`,
+    rows: [wrappedRow],
+  }, rowPlacement, context.services).layout;
+  const finalResolved = resolved.map((placement) => {
+    const finalSource = placementFor(
+      source.floatingTables.find((candidate) => (
+        candidate.hostCellId === placement.source.hostCellId
+        && candidate.sourceBlockIndex === placement.source.sourceBlockIndex
+        && candidate.tableId === placement.source.tableId
+      ))!,
+      finalLayout,
+      wrappedRow,
+    );
+    return finalSource ? Object.freeze({ ...placement, source: finalSource }) : placement;
+  });
+  return {
+    row: wrappedRow,
+    resolved: Object.freeze(finalResolved),
+    registry: Object.freeze([...transaction.base, ...transaction.delta]),
+    nextParagraphId: transaction.nextParagraphId,
+  };
+}
+
 function selectedWholeRow(
   row: TableRowLayoutInput,
   ownership: TableFragmentOwnership,
   fragmentIndex = 0,
   clipAtPageEnd = false,
+  resolvedFloatingTables: readonly ResolvedFloatingTablePlacementLayout[] = [],
 ): SelectedRow {
   return {
     input: row,
@@ -216,6 +419,7 @@ function selectedWholeRow(
     ownership,
     ranges: rowRanges(row),
     ...(clipAtPageEnd ? { clipAtPageEnd: true } : {}),
+    ...(resolvedFloatingTables.length ? { resolvedFloatingTables } : {}),
   };
 }
 
@@ -527,6 +731,12 @@ function materializeFragment(
       })];
     });
   });
+  const resolvedFloatingTables = Object.freeze(selected.flatMap(
+    (selection) => selection.resolvedFloatingTables ?? [],
+  ));
+  const resolvedOccurrenceIds = new Set(
+    resolvedFloatingTables.map((placement) => placement.occurrenceId),
+  );
   // Column measurement is acquisition-owned. A fragment may rebuild row and
   // border geometry, but must retain the one authoritative width vector.
   const clipAtPageEnd = selected.some((row) => row.clipAtPageEnd === true);
@@ -546,7 +756,10 @@ function materializeFragment(
     } : {}),
     columnWidthsPt: source.layout.columnWidthsPt,
     rows: Object.freeze(rows),
-    floatingTables: Object.freeze(floatingTables),
+    floatingTables: Object.freeze(floatingTables.filter(
+      (placement) => !resolvedOccurrenceIds.has(placement.occurrenceId),
+    )),
+    resolvedFloatingTables,
   });
 }
 
@@ -560,21 +773,50 @@ export function takeTableFragment(
   }
 
   const selected: SelectedRow[] = [];
+  const registrySnapshot = context.floatingTableRegistry;
+  if (registrySnapshot
+    && (registrySnapshot.coordinateSpace !== 'logical-points'
+      || registrySnapshot.flowDomainId.length === 0)) {
+    throw new Error('Floating table registry coordinate/domain mismatch');
+  }
+  let floatRegistry = Object.freeze([
+    ...(registrySnapshot?.entries ?? []),
+  ]) as readonly FloatRegistryEntryPt[];
+  let floatParagraphId = registrySnapshot?.nextParagraphId ?? 0;
   let availablePt = Math.max(0, context.availableHeightPt);
   const headerCount = leadingHeaderCount(source.input);
   if (cursor.rowIndex >= headerCount && cursor.rowIndex > 0 && headerCount > 0) {
     for (let rowIndex = 0; rowIndex < headerCount; rowIndex += 1) {
-      const header = rowForOccurrence(
+      const acquiredHeader = rowForOccurrence(
         source,
         source.input.rows[rowIndex]!,
         'repeated-header',
         context,
       );
+      const preparedHeader = finalFrameRow(
+        source,
+        acquiredHeader,
+        'repeated-header',
+        context.availableHeightPt - availablePt,
+        context,
+        floatRegistry,
+        floatParagraphId,
+        () => true,
+      );
+      const header = preparedHeader.row;
       const heightPt = paginationRowHeightForOccurrence(source, header, rowIndex, context);
       if (heightPt > availablePt + EPSILON_PT) {
         return { fragment: null, nextCursor: cursor, requiresFreshPage: true };
       }
-      selected.push(selectedWholeRow(header, 'repeated-header'));
+      selected.push(selectedWholeRow(
+        header,
+        'repeated-header',
+        0,
+        false,
+        preparedHeader.resolved,
+      ));
+      floatRegistry = preparedHeader.registry;
+      floatParagraphId = preparedHeader.nextParagraphId;
       availablePt -= heightPt;
     }
   }
@@ -583,12 +825,45 @@ export function takeTableFragment(
   let rowIndex = cursor.rowIndex;
   while (rowIndex < source.input.rows.length) {
     const ownership: TableFragmentOwnership = 'source';
-    const row = rowForOccurrence(source, source.input.rows[rowIndex]!, ownership, context);
+    const acquiredRow = rowForOccurrence(
+      source,
+      source.input.rows[rowIndex]!,
+      ownership,
+      context,
+    );
+    const rowCursor = rowIndex === cursor.rowIndex
+      ? cursor
+      : Object.freeze({ rowIndex, rowFragmentIndex: 0, cells: Object.freeze([]) });
+    const preparedRow = finalFrameRow(
+      source,
+      acquiredRow,
+      ownership,
+      context.availableHeightPt - availablePt,
+      context,
+      floatRegistry,
+      floatParagraphId,
+      (occurrence) => {
+        const cellIndex = acquiredRow.cells.findIndex(
+          (cell) => cell.id === occurrence.hostCellId,
+        );
+        const anchorBlockOffset = acquiredRow.cells[cellIndex]?.blocks.findIndex(
+          (block) => block.sourceBlockIndex === occurrence.anchorBlockIndex,
+        ) ?? -1;
+        if (anchorBlockOffset < 0) return false;
+        const cellCursor = rowCursor.cells[cellIndex] ?? emptyCellCursor();
+        return cellCursor.blockIndex < anchorBlockOffset
+          || (cellCursor.blockIndex === anchorBlockOffset
+            && cellCursor.paragraphLineStart === 0);
+      },
+    );
+    const row = preparedRow.row;
     const wholeHeightPt = paginationRowHeightForOccurrence(source, row, rowIndex, context);
     const canTakeWhole = rowIndex !== cursor.rowIndex || cursor.rowFragmentIndex === 0;
     if (canTakeWhole) {
       if (wholeHeightPt <= availablePt + EPSILON_PT) {
-        selected.push(selectedWholeRow(row, 'source'));
+        selected.push(selectedWholeRow(row, 'source', 0, false, preparedRow.resolved));
+        floatRegistry = preparedRow.registry;
+        floatParagraphId = preparedRow.nextParagraphId;
         availablePt -= wholeHeightPt;
         rowIndex += 1;
         nextCursor = rowIndex < source.input.rows.length
@@ -614,7 +889,9 @@ export function takeTableFragment(
       // fresh page and clips its overflow instead of synthesizing a continuation.
       if (context.compatibility === 'word'
         && context.availableHeightPt + EPSILON_PT >= context.freshPageHeightPt) {
-        selected.push(selectedWholeRow(row, 'source', 0, true));
+        selected.push(selectedWholeRow(row, 'source', 0, true, preparedRow.resolved));
+        floatRegistry = preparedRow.registry;
+        floatParagraphId = preparedRow.nextParagraphId;
         nextCursor = rowIndex + 1 < source.input.rows.length
           ? Object.freeze({ rowIndex: rowIndex + 1, rowFragmentIndex: 0, cells: Object.freeze([]) })
           : null;
@@ -633,18 +910,25 @@ export function takeTableFragment(
       && selected.every((item) => item.ownership === 'repeated-header')
       && context.availableHeightPt + EPSILON_PT >= context.freshPageHeightPt
       && wholeHeightPt > context.freshPageHeightPt + EPSILON_PT) {
-      selected.push(selectedWholeRow(row, 'source'));
+      selected.push(selectedWholeRow(row, 'source', 0, false, preparedRow.resolved));
+      floatRegistry = preparedRow.registry;
+      floatParagraphId = preparedRow.nextParagraphId;
       nextCursor = rowIndex + 1 < source.input.rows.length
         ? Object.freeze({ rowIndex: rowIndex + 1, rowFragmentIndex: 0, cells: Object.freeze([]) })
         : null;
       break;
     }
 
-    const partial = partialRow(source, row, rowIndex === cursor.rowIndex
-      ? cursor
-      : Object.freeze({ rowIndex, rowFragmentIndex: 0, cells: Object.freeze([]) }), availablePt, context);
+    const partial = partialRow(source, row, rowCursor, availablePt, context);
     if (partial.selected) {
-      selected.push(partial.selected);
+      selected.push({
+        ...partial.selected,
+        ...(preparedRow.resolved.length
+          ? { resolvedFloatingTables: preparedRow.resolved }
+          : {}),
+      });
+      floatRegistry = preparedRow.registry;
+      floatParagraphId = preparedRow.nextParagraphId;
       nextCursor = partial.next.rowIndex >= source.input.rows.length ? null : partial.next;
     }
     break;
@@ -684,5 +968,11 @@ export function takeTableFragment(
     fragment,
     nextCursor,
     requiresFreshPage: false,
+    floatingTablePlacements: fragment.resolvedFloatingTables,
+    floatingTableRegistryDelta: Object.freeze(floatRegistry.slice(
+      registrySnapshot?.entries.length ?? 0,
+    ).filter((entry) => fragment.resolvedFloatingTables.some(
+      (placement) => placement.occurrenceId === entry.occurrenceId,
+    ))),
   };
 }

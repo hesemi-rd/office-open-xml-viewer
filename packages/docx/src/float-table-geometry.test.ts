@@ -4,7 +4,6 @@ import {
   registerTableFloat,
   floatTableWrapSide,
   resolveFloatingTablePlacement,
-  registerResolvedFloatingTablePlacement,
 } from './float-table-geometry.js';
 import type { FloatTableBox } from './float-table-geometry.js';
 import type { TblpPr } from './types.js';
@@ -14,6 +13,10 @@ import type {
   FloatingTableReferenceFramesPt,
   TableLayout,
 } from './layout/types.js';
+import {
+  beginFloatingTablePlacementTransaction,
+  resolveFloatingTablePlacementInTransaction,
+} from './layout/floating-table-transaction.js';
 
 // Table-driven geometry assertions for floating tables (ECMA-376 §17.4.57
 // `<w:tblpPr>` / §17.4.56 `<w:tblOverlap>`). The VRT does not cover the
@@ -470,6 +473,52 @@ const retainedReferenceFrames: FloatingTableReferenceFramesPt = Object.freeze({
 });
 
 describe('retained floating table placement (§17.4.57)', () => {
+  it('resolves multiple floats in source order without mutating or duplicating the base snapshot', () => {
+    const first = Object.freeze({
+      ...retainedFloatingPlacement({
+        horzAnchor: 'page', vertAnchor: 'page', xPt: 100, yPt: 100,
+      }),
+      occurrenceId: 'first',
+    });
+    const second = Object.freeze({
+      ...retainedFloatingPlacement({
+        horzAnchor: 'page', vertAnchor: 'page', xPt: 100, yPt: 100,
+      }),
+      occurrenceId: 'second',
+    });
+    const base = Object.freeze([]);
+    const started = beginFloatingTablePlacementTransaction(base, 7);
+    const firstResolution = resolveFloatingTablePlacementInTransaction(
+      first,
+      retainedReferenceFrames,
+      started,
+    );
+    const secondResolution = resolveFloatingTablePlacementInTransaction(
+      second,
+      retainedReferenceFrames,
+      firstResolution.transaction,
+    );
+    const duplicateProbe = resolveFloatingTablePlacementInTransaction(
+      second,
+      retainedReferenceFrames,
+      secondResolution.transaction,
+    );
+
+    expect(base).toEqual([]);
+    expect(secondResolution.transaction.delta.map((entry) => entry.occurrenceId)).toEqual([
+      'first', 'second',
+    ]);
+    expect(secondResolution.placement.xPt).toBeGreaterThan(
+      firstResolution.placement.exclusionBounds.xPt
+        + firstResolution.placement.exclusionBounds.widthPt,
+    );
+    expect(duplicateProbe.transaction).toBe(secondResolution.transaction);
+    expect(duplicateProbe.placement.bounds).toBe(
+      secondResolution.transaction.delta[1]!.bounds,
+    );
+    expect(secondResolution.transaction.nextParagraphId).toBe(9);
+  });
+
   it('resolves text-relative offsets and exclusion padding entirely in point space', () => {
     const placement = retainedFloatingPlacement();
 
@@ -535,35 +584,6 @@ describe('retained floating table placement (§17.4.57)', () => {
 
     expect(resolved.bounds.widthPt).toBe(80);
     expect(resolved.bounds.heightPt).toBe(40);
-  });
-
-  it('registers one exclusion and returns the overlap-adjusted paint position', () => {
-    const blocker: FloatRect = {
-      kind: 'table', mode: 'square', imageKey: '',
-      imageX: 120, imageY: 256, imageW: 100, imageH: 40,
-      xLeft: 120, xRight: 220, yTop: 256, yBottom: 296,
-      side: 'bothSides', distLeft: 0, distRight: 0, distTop: 0, distBottom: 0,
-      paraId: 0, drawn: true,
-    };
-    const state = makeState({ floats: [blocker], floatParaSeq: 1 });
-    const initial = resolveFloatingTablePlacement(
-      retainedFloatingPlacement(),
-      retainedReferenceFrames,
-    );
-
-    const registered = registerResolvedFloatingTablePlacement(initial, state as never);
-
-    expect(state.floats).toHaveLength(2);
-    expect(state.floatParaSeq).toBe(2);
-    expect(registered.xPt).toBe(state.floats[1]!.imageX);
-    expect(registered.yPt).toBe(state.floats[1]!.imageY);
-    expect(registered.xPt).toBeGreaterThanOrEqual(blocker.xRight);
-    expect(registered.exclusionBounds).toEqual({
-      xPt: state.floats[1]!.xLeft,
-      yPt: state.floats[1]!.yTop,
-      widthPt: state.floats[1]!.xRight - state.floats[1]!.xLeft,
-      heightPt: state.floats[1]!.yBottom - state.floats[1]!.yTop,
-    });
   });
 
   it('reuses the acquisition-time text-anchor offset after overlap resolution', () => {
