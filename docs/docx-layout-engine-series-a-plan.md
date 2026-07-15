@@ -728,22 +728,21 @@ export interface TableFragmentLayout { readonly tableId: LayoutNodeId; readonly 
 export function takeTableFragment(acquisition: RetainedTableAcquisition, cursor: TableFragmentCursor, context: TableFragmentContext): TableFragmentResult;
 ```
 
-**Paused implementation checkpoint (2026-07-15):** Parser row facts, immutable
-table acquisition, page-local retained pagination, repeated-header/page-field
-occurrences, retained body/floating paint, and removal of the old
-`TableFragment` model, runtime stamps, reuse flag, and split fallbacks are in
-place. Nested text-anchored floating tables share one collision-adjusted box for
-layout and paint. Resume with two deliberately unfinished review items before
-the A5 gate: (1) resolve page/margin-anchored nested-table exclusions from final
-page/column frames and reacquire the anchor paragraph before row selection,
-without mutating the live float registry during fit probes; (2) migrate the
-seven remaining old-suite contracts covering nested structured cloning,
-independent layout runs, page-local border footprints, flow-versus-ink
-allocation, repeated-header boundary fit, and split-row boundary advance.
-Checkpoint verification: TypeScript build and 82 focused retained-table tests
-pass; no PR or merge has been created for A5.
+**Implementation checkpoint (2026-07-15):** Floating and page-split tables now
+consume occurrence-owned retained acquisitions and emit immutable fragment
+views. Parser nodes remain semantic inputs rather than layout result carriers;
+this prevents repeated body occurrences and independent layout sessions from
+aliasing geometry through object identity. Page-dependent header and continued
+paragraph occurrences are reacquired with the destination page context, while
+fit probes use a transaction that cannot mutate the live float registry.
+Exact-height rows retain the specified track and clip overflowing ink, and
+vertical-merge continuation keeps its semantic role while paint consumes a
+fragment-local visual-ownership view. The legacy fragment model, runtime
+stamps, reuse flag, split fallbacks, and alternate paint gates are removed.
+Independent whole-change review found no remaining critical, important, or
+minor findings after remediation; PR creation and merge remain pending.
 
-- [ ] **Step 1: Write failing continuation and floating tests**
+- [x] **Step 1: Write failing continuation and floating tests**
 
 Cover the full `CT_OnOff` matrix and style cascade for `tblHeader`/`cantSplit`,
 `exact × cantSplit`, leading and non-leading headers, mid-cell paragraph
@@ -764,7 +763,7 @@ clipped per `[MS-OI29500]` 2.1.120. Floating headers repeat because §17.4.49 do
 not exclude floating tables. Replace midpoint wrap-side selection with the
 existing widest-free-gap geometry.
 
-- [ ] **Step 2: Run tests to verify Red**
+- [x] **Step 2: Run tests to verify Red**
 
 Run:
 
@@ -774,7 +773,7 @@ pnpm vitest run packages/docx/src/layout/table-pagination.test.ts packages/docx/
 
 Expected: legacy-gated floating cases do not produce `TableLayout` continuations.
 
-- [ ] **Step 3: Implement splits as immutable views over retained geometry**
+- [x] **Step 3: Implement splits as immutable views over retained geometry**
 
 Retain the plain `TableLayoutInput` beside its final A4 `TableLayout`; recursively
 retain nested acquisitions by layout ID. Split only at row, cell-block,
@@ -797,7 +796,7 @@ Delete `tableRequiresLegacyPaint`, `isFragmentPaintableTable`,
 `tableReuseEnabled`, `renderTableFragment`, and the legacy table-paint selection.
 Leave one `layoutTable` and one `paintTableLayout` production route.
 
-- [ ] **Step 4: Verify Green and prove one route**
+- [x] **Step 4: Verify Green and prove one route**
 
 Run:
 
