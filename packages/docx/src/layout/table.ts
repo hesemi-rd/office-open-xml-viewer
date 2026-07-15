@@ -488,23 +488,6 @@ function resolvedBoundaries(input: TableLayoutInput): Readonly<{
   return { horizontal, vertical, occupancy };
 }
 
-function horizontalBoundaryWidthsPt(
-  horizontal: ReturnType<typeof resolvedBoundaries>['horizontal'],
-): readonly number[] {
-  return horizontal.map((columns) => columns.reduce((maximum, boundary) => {
-    if (!boundary) return maximum;
-    const resolved = resolveBoundary(
-      boundary.above.border,
-      boundary.below.border,
-      boundary.edge,
-    )?.border;
-    if (!resolved || resolved.authoredStyle === 'nil' || resolved.authoredStyle === 'none') {
-      return maximum;
-    }
-    return Math.max(maximum, resolved.widthPt);
-  }, 0));
-}
-
 function borderSegment(
   resolved: ResolvedBoundary,
   from: Readonly<{ xPt: number; yPt: number }>,
@@ -971,19 +954,10 @@ export function layoutTable(
   }));
   const resolvedRows = resolveRowHeights(input.rows, flows);
   const boundaries = resolvedBoundaries(input);
-  const horizontalBoundaryWidths = horizontalBoundaryWidthsPt(boundaries.horizontal);
-  // §17.4.80 exact height is the complete row box. Auto/atLeast tracks run
-  // between horizontal rule centres, so each owns half of its top and bottom
-  // page-local winning rule. Recomputing this after fragment selection is what
-  // makes a new outer edge participate in page fit without stale source-table
-  // footprints.
-  const rowHeightsPt = resolvedRows.heights.map((heightPt, rowIndex) => (
-    input.rows[rowIndex]?.heightRule === 'exact'
-      ? heightPt
-      : heightPt
-        + (horizontalBoundaryWidths[rowIndex] ?? 0) / 2
-        + (horizontalBoundaryWidths[rowIndex + 1] ?? 0) / 2
-  ));
+  // ECMA-376 §17.4.80 owns row-track height. Collapsed rules are centred on
+  // those tracks, so their overhang contributes to inkBounds, never flow fit or
+  // advance; each page-local fragment still resolves its own winning segments.
+  const rowHeightsPt = resolvedRows.heights;
   const widthPt = input.columnWidthsPt.reduce((sum, width) => sum + width, 0);
   const heightPt = rowHeightsPt.reduce((sum, height) => sum + height, 0);
   const yPt = placement.cursor.yPt;
