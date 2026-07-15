@@ -110,44 +110,12 @@ export function collectBodyFrameGroups(
 
 const bodyFrameGroups = new WeakMap<DocParagraph, BodyFrameGroup>();
 const bodyParagraphBorderEdges = new WeakMap<DocParagraph, ParagraphBorderEdges>();
-const bodySourceIndices = new WeakMap<object, number>();
-
-function registerBodySourceIdentity(value: unknown, sourceIndex: number, seen: WeakSet<object>): void {
-  if (!value || typeof value !== 'object' || seen.has(value)) return;
-  seen.add(value);
-  const object = value as object;
-  if (!bodySourceIndices.has(object)) bodySourceIndices.set(object, sourceIndex);
-  if (Array.isArray(value)) {
-    value.forEach((item) => registerBodySourceIdentity(item, sourceIndex, seen));
-    return;
-  }
-  Object.values(value).forEach((item) => registerBodySourceIdentity(item, sourceIndex, seen));
-}
-
-function sourceIndexFromIdentity(value: unknown, seen: WeakSet<object>): number | undefined {
-  if (!value || typeof value !== 'object' || seen.has(value)) return undefined;
-  seen.add(value);
-  const object = value as object;
-  const direct = bodySourceIndices.get(object);
-  if (direct !== undefined) return direct;
-  const values = Array.isArray(value) ? value : Object.values(value);
-  for (const item of values) {
-    const nested = sourceIndexFromIdentity(item, seen);
-    if (nested !== undefined) return nested;
-  }
-  return undefined;
-}
 
 /** Prepare body identity/adjacency metadata independently of layout services. */
 export function prepareBodyFrameMetadata(body: readonly BodyElement[]): void {
   const groups = collectBodyFrameGroups(body);
   for (let index = 0; index < body.length; index += 1) {
     const element = body[index]!;
-    // Pagination emits shallow/sliced table clones inside the frozen kernel.
-    // Register their retained child identities at the document-session seam so
-    // fragment acquisition can recover the source path without threading `i`
-    // through computePages.
-    registerBodySourceIdentity(element, index, new WeakSet());
     if (element.type !== 'paragraph') continue;
     const group = groups.get(element);
     if (group) bodyFrameGroups.set(element, group);
@@ -168,9 +136,6 @@ export function prepareBodyFrameMetadata(body: readonly BodyElement[]): void {
 
 export const bodyFrameGroupFor = (paragraph: DocParagraph): BodyFrameGroup | undefined =>
   bodyFrameGroups.get(paragraph);
-
-export const bodySourceIndexFor = (element: object): number | undefined =>
-  sourceIndexFromIdentity(element, new WeakSet());
 
 export const bodyParagraphBorderEdgesFor = (
   paragraph: DocParagraph,

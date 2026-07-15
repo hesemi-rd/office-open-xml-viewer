@@ -277,6 +277,120 @@ function initializeComposedFittingOuterProbeRepository() {
   return { root, current };
 }
 
+function priorOccurrenceOwnerSource(current) {
+  const replacements = [
+    ['computeTableRowHeights(ms, t, colWPt, j)', 'computeTableRowHeights(ms, t, colWPt)'],
+    [
+      'estimateTableHeight(measureState, nxt as unknown as DocTable, colW(), startIdx)',
+      'estimateTableHeight(measureState, nxt as unknown as DocTable, colW())',
+    ],
+    [
+      'measureState, para, i, colW, suppressBefore, colX,',
+      'measureState, para, colW, suppressBefore, colX,',
+    ],
+    [
+      'attachBodyParagraphFragment(el as PaginatedElementWithLines, para, measureState, i, {',
+      'attachBodyParagraphFragment(el as PaginatedElementWithLines, para, measureState, {',
+    ],
+    ['computeTableLayout(tbl, cW, measureState, i)', 'computeTableLayout(tbl, cW, measureState)'],
+    ['            const retainedRecord = retainedTableRecord(measureState, i);\n', ''],
+    [
+      `              const prepared = prepareFittingOuterFragment(
+                tbl, i, retainedRecord, finalState, box,
+              );`,
+      `              const prepared = bodyFlowFragments.sourceIndices.retainedTableMeasureBySource
+                .prepareFittingOuterFragment(tbl, finalState, box);`,
+    ],
+    [
+      `            first.contentWPt,
+            i,
+            retainedTableRecord(measureState, i),
+            measureState,
+            undefined,
+            acceptedPrepared,`,
+      `            first.contentWPt,
+            undefined,
+            acceptedPrepared,`,
+    ],
+    [
+      '            { sourceIndex: i, record: retainedTableRecord(measureState, i), state: measureState },\n',
+      '',
+    ],
+    ['computeTablePtLayout(measureState, tbl, bandPt, i)', 'computeTablePtLayout(measureState, tbl, bandPt)'],
+    [
+      `          bandPt,
+          i,
+          retainedTableRecord(measureState, i),
+          measureState,
+          {`,
+      `          bandPt,
+          {`,
+    ],
+    [
+      'computeTablePtLayout(measureState, tbl, tblContentWPt, i)',
+      'computeTablePtLayout(measureState, tbl, tblContentWPt)',
+    ],
+    [
+      `        tableContentH,
+        measureState,
+        i,
+        true,`,
+      `        tableContentH,
+        measureState,
+        true,`,
+    ],
+    [
+      `              tblContentWPt,
+              measureState,
+              i,
+              {`,
+      `              tblContentWPt,
+              measureState,
+              {`,
+    ],
+    ['                fragment: meta.fragment,\n', ''],
+    [
+      `          () => currentSectionFrame.textDirection,
+          i,
+        );`,
+      `          () => currentSectionFrame.textDirection,
+        );`,
+    ],
+    [
+      `          tblContentWPt,
+          measureState,
+          i,
+          {`,
+      `          tblContentWPt,
+          measureState,
+          {`,
+    ],
+  ];
+  let prior = current;
+  for (const [expected, replacement] of replacements) {
+    assert.equal(prior.split(expected).length, 2, expected);
+    prior = prior.replace(expected, replacement);
+  }
+  return prior;
+}
+
+function initializeOccurrenceOwnerRepository() {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-occurrence-owner-'));
+  const productionRoot = resolve(import.meta.dirname, '..');
+  const current = readFileSync(join(productionRoot, 'packages/docx/src/renderer.ts'), 'utf8');
+  write(root, 'packages/docx/src/renderer.ts', priorOccurrenceOwnerSource(current));
+  write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
+  write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
+  git(root, 'init', '-b', 'main');
+  git(root, 'config', 'user.email', 'boundary-test@example.invalid');
+  git(root, 'config', 'user.name', 'Boundary Test');
+  git(root, 'add', '.');
+  git(root, 'commit', '-m', 'base before occurrence-owned table state');
+  git(root, 'switch', '-c', 'a1');
+  establishA1Baseline(root);
+  return { root, current };
+}
+
 function initializeSplitFloatLivePageRepository() {
   const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-split-float-live-page-'));
   const productionRoot = resolve(import.meta.dirname, '..');
@@ -298,7 +412,10 @@ function initializeSplitFloatLivePageRepository() {
 
 function priorSplitParentCommitSource(current) {
   const startMarker = '            (sliceTp, tableWidthPt, tableHeightPt, externalRegistry) =>';
-  const endMarker = '            (sliceEl) => pushTagged(sliceEl),\n            () => pages.length - 1,\n          );';
+  const endMarker = `            (sliceEl) => pushTagged(sliceEl),
+            () => pages.length - 1,
+            { sourceIndex: i, record: retainedTableRecord(measureState, i), state: measureState },
+          );`;
   const start = current.indexOf(startMarker);
   const end = current.indexOf(endMarker, start);
   assert.ok(start >= 0 && end > start);
@@ -317,6 +434,7 @@ function priorSplitParentCommitSource(current) {
                 );
               });
             },
+            { sourceIndex: i, record: retainedTableRecord(measureState, i), state: measureState },
           );
 `;
   return current.slice(0, start) + legacy + current.slice(end + endMarker.length);
@@ -1670,6 +1788,47 @@ test('composes all exact A5 computePages normalizers over production A5 bases', 
   for (const ref of ['ec4e046', 'aa02bbc']) {
     const result = runChecker(productionRoot, '--base-ref', ref);
     assert.equal(result.status, 0, `${ref}: ${result.output}`);
+  }
+});
+
+test('allows only the exact occurrence-owned table state threading', () => {
+  const { root, current } = initializeOccurrenceOwnerRepository();
+  write(root, 'packages/docx/src/renderer.ts', current);
+
+  const result = runChecker(root, '--base-ref', 'main');
+
+  assert.equal(result.status, 0, result.output);
+});
+
+test('rejects altered, duplicated, or adjacent occurrence-owner edits', () => {
+  const variants = [
+    [
+      '{ sourceIndex: i, record: retainedTableRecord(measureState, i), state: measureState }',
+      '{ sourceIndex: i + 1, record: retainedTableRecord(measureState, i), state: measureState }',
+    ],
+    [
+      '            const retainedRecord = retainedTableRecord(measureState, i);\n',
+      `            const retainedRecord = retainedTableRecord(measureState, i);
+            retainedTableRecord(measureState, i);
+`,
+    ],
+    [
+      `            () => pages.length - 1,
+            { sourceIndex: i, record: retainedTableRecord(measureState, i), state: measureState },
+`,
+      `            () => pages.length - 1,
+            sideEffect(),
+            { sourceIndex: i, record: retainedTableRecord(measureState, i), state: measureState },
+`,
+    ],
+  ];
+  for (const [expected, replacement] of variants) {
+    const { root, current } = initializeOccurrenceOwnerRepository();
+    assert.ok(current.includes(expected), expected);
+    write(root, 'packages/docx/src/renderer.ts', current.replace(expected, replacement));
+    const result = runChecker(root, '--base-ref', 'main');
+    assert.notEqual(result.status, 0, `${expected} -> ${replacement}`);
+    assert.match(result.output, /LEGACY_DECLARATION_CHANGED|BASELINE_EXPANSION/);
   }
 });
 

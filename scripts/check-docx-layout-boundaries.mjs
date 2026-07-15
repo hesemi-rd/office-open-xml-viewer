@@ -38,6 +38,14 @@ const FINAL_RENDERER_DECLARATIONS = new Set([
   'normalizeRenderOptions',
 ]);
 
+const A5_STATE_OWNER_DECLARATIONS = new Set([
+  'RetainedTableRecord',
+  'commitFloatRegistryDelta',
+  'prepareFittingOuterFragment',
+  'reacquirePageBlock',
+  'retainedTableRecord',
+]);
+
 const PLANNED_NON_LAYOUT_MODULES = new Set([
   `${DOCX_SOURCE}/parser-model.ts`,
 ]);
@@ -528,6 +536,66 @@ function assertBodyPaintConsumesRetainedLayout(root) {
     return null;
   };
 
+  const canonicalBodyFragmentSidecarPath = (expression) => {
+    const path = [];
+    let current = unwrapExpression(expression);
+    while (ts.isPropertyAccessExpression(current) || ts.isElementAccessExpression(current)) {
+      const name = ts.isPropertyAccessExpression(current)
+        ? current.name.text
+        : current.argumentExpression
+          ? staticString(current.argumentExpression)
+          : null;
+      if (name === null) return null;
+      path.unshift(name);
+      current = unwrapExpression(current.expression);
+    }
+    return ts.isIdentifier(current)
+      && current.text === 'bodyFlowFragments'
+      && isCanonicalBodyFragmentReceiver(current)
+      && (path[0] === 'sourceIndices' || path[0] === 'framePlacement')
+      ? path
+      : null;
+  };
+  const assignmentOperators = new Set([
+    ts.SyntaxKind.EqualsToken,
+    ts.SyntaxKind.PlusEqualsToken,
+    ts.SyntaxKind.MinusEqualsToken,
+    ts.SyntaxKind.AsteriskEqualsToken,
+    ts.SyntaxKind.AsteriskAsteriskEqualsToken,
+    ts.SyntaxKind.SlashEqualsToken,
+    ts.SyntaxKind.PercentEqualsToken,
+    ts.SyntaxKind.LessThanLessThanEqualsToken,
+    ts.SyntaxKind.GreaterThanGreaterThanEqualsToken,
+    ts.SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken,
+    ts.SyntaxKind.AmpersandEqualsToken,
+    ts.SyntaxKind.BarEqualsToken,
+    ts.SyntaxKind.CaretEqualsToken,
+    ts.SyntaxKind.BarBarEqualsToken,
+    ts.SyntaxKind.AmpersandAmpersandEqualsToken,
+    ts.SyntaxKind.QuestionQuestionEqualsToken,
+  ]);
+  const lateSidecarMutations = [];
+  const findLateSidecarMutations = (current) => {
+    if (ts.isCallExpression(current)
+      && (isGlobalObjectCall(current, 'assign') || isGlobalObjectCall(current, 'defineProperty'))
+      && current.arguments[0]
+      && canonicalBodyFragmentSidecarPath(current.arguments[0])) {
+      lateSidecarMutations.push(current.getText(source));
+    } else if (ts.isBinaryExpression(current)
+      && assignmentOperators.has(current.operatorToken.kind)
+      && canonicalBodyFragmentSidecarPath(current.left)) {
+      lateSidecarMutations.push(current.getText(source));
+    }
+    ts.forEachChild(current, findLateSidecarMutations);
+  };
+  findLateSidecarMutations(source);
+  if (lateSidecarMutations.length > 0) {
+    fail(
+      'BODY_PAINT_LAYOUT_CAPABILITY',
+      `${DOCX_SOURCE}/renderer.ts mutates canonical body fragment sidecar after initialization`,
+    );
+  }
+
   let resolveCallTarget;
   const resolveObjectProperty = (expression, propertyName, resolving) => {
     const value = unwrapExpression(expression);
@@ -963,6 +1031,132 @@ function normalizedSyntaxHash(node, source) {
 function normalizedComputePagesHash(node, source) {
   const compactText = (current, currentSource) =>
     current.getText(currentSource).replace(/\s+/g, '');
+  const occurrenceOwnerReplacements = [
+    ['computeTableRowHeights(ms, t, colWPt, j)', 'computeTableRowHeights(ms, t, colWPt)'],
+    [
+      'estimateTableHeight(measureState, nxt as unknown as DocTable, colW(), startIdx)',
+      'estimateTableHeight(measureState, nxt as unknown as DocTable, colW())',
+    ],
+    [
+      'measureState, para, i, colW, suppressBefore, colX,',
+      'measureState, para, colW, suppressBefore, colX,',
+    ],
+    [
+      'attachBodyParagraphFragment(el as PaginatedElementWithLines, para, measureState, i, {',
+      'attachBodyParagraphFragment(el as PaginatedElementWithLines, para, measureState, {',
+    ],
+    ['computeTableLayout(tbl, cW, measureState, i)', 'computeTableLayout(tbl, cW, measureState)'],
+    ['            const retainedRecord = retainedTableRecord(measureState, i);\n', ''],
+    [
+      `              const prepared = prepareFittingOuterFragment(
+                tbl, i, retainedRecord, finalState, box,
+              );`,
+      `              const prepared = bodyFlowFragments.sourceIndices.retainedTableMeasureBySource
+                .prepareFittingOuterFragment(tbl, finalState, box);`,
+    ],
+    [
+      `            first.contentWPt,
+            i,
+            retainedTableRecord(measureState, i),
+            measureState,
+            undefined,
+            acceptedPrepared,`,
+      `            first.contentWPt,
+            undefined,
+            acceptedPrepared,`,
+    ],
+    [
+      '            { sourceIndex: i, record: retainedTableRecord(measureState, i), state: measureState },\n',
+      '',
+    ],
+    ['computeTablePtLayout(measureState, tbl, bandPt, i)', 'computeTablePtLayout(measureState, tbl, bandPt)'],
+    [
+      `          bandPt,
+          i,
+          retainedTableRecord(measureState, i),
+          measureState,
+          {`,
+      `          bandPt,
+          {`,
+    ],
+    [
+      'computeTablePtLayout(measureState, tbl, tblContentWPt, i)',
+      'computeTablePtLayout(measureState, tbl, tblContentWPt)',
+    ],
+    [
+      `        tableContentH,
+        measureState,
+        i,
+        true,`,
+      `        tableContentH,
+        measureState,
+        true,`,
+    ],
+    [
+      `              tblContentWPt,
+              measureState,
+              i,
+              {`,
+      `              tblContentWPt,
+              measureState,
+              {`,
+    ],
+    ['                fragment: meta.fragment,\n', ''],
+    [
+      `          () => currentSectionFrame.textDirection,
+          i,
+        );`,
+      `          () => currentSectionFrame.textDirection,
+        );`,
+    ],
+    [
+      `          tblContentWPt,
+          measureState,
+          i,
+          {`,
+      `          tblContentWPt,
+          measureState,
+          {`,
+    ],
+  ];
+  const currentOccurrenceOwnerText = node.getText(source);
+  const priorFittingProbeOccurrenceReplacements = occurrenceOwnerReplacements.filter(
+    (_replacement, index) => ![4, 5, 6, 7].includes(index),
+  );
+  const hasExactPriorFittingProbe = currentOccurrenceOwnerText.includes(
+    'const layout = computeTableLayout(tbl, cW, measureState);',
+  ) && currentOccurrenceOwnerText.includes(
+    'stampTableLayout(\n            el as PaginatedBodyElement,\n            first.layout.colWidths,',
+  );
+  const selectedOccurrenceOwnerReplacements = hasExactPriorFittingProbe
+    ? priorFittingProbeOccurrenceReplacements
+    : occurrenceOwnerReplacements;
+  let occurrenceOwnerText = currentOccurrenceOwnerText;
+  let hasExactOccurrenceOwnerThreading = occurrenceOwnerText.includes(
+    '{ sourceIndex: i, record: retainedTableRecord(measureState, i), state: measureState }',
+  );
+  if (hasExactOccurrenceOwnerThreading) {
+    for (const [current, previous] of selectedOccurrenceOwnerReplacements) {
+      if (occurrenceOwnerText.split(current).length !== 2) {
+        hasExactOccurrenceOwnerThreading = false;
+        break;
+      }
+      occurrenceOwnerText = occurrenceOwnerText.replace(current, previous);
+    }
+  }
+  if (hasExactOccurrenceOwnerThreading) {
+    const virtualSource = ts.createSourceFile(
+      'compute-pages-a5-occurrence-owner-virtual.ts',
+      occurrenceOwnerText,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const virtualNode = virtualSource.statements.find((candidate) => (
+      ts.isFunctionDeclaration(candidate) && candidate.name?.text === 'computePages'
+    ));
+    if (virtualNode) return normalizedComputePagesHash(virtualNode, virtualSource);
+  }
   const exactFittingOuterProbe = `
     const measureFloat = () =>
       withColumnBand(() => {
@@ -1657,7 +1851,7 @@ function normalizedComputeTableLayoutHash(node, source) {
   if (b1Index < 0) return normalizedSyntaxHash(node, source);
   const retainedPrefix = compact(statements.slice(0, b1Index)
     .map((statement) => statement.getText(source)).join(''));
-  const exactRetainedPrefix = compact(`
+  const sourceKeyedRetainedPrefix = compact(`
     const { scale } = state;
     const contentWPt1 = contentWPx / scale;
     if (state.retainedTableAcquisition && bodySourceIndexFor(table) !== undefined) {
@@ -1672,7 +1866,23 @@ function normalizedComputeTableLayoutHash(node, source) {
       };
     }
   `);
-  if (retainedPrefix !== exactRetainedPrefix) {
+  const occurrenceOwnedRetainedPrefix = compact(`
+    const { scale } = state;
+    const contentWPt1 = contentWPx / scale;
+    if (state.retainedTableAcquisition && sourceIndex !== undefined) {
+      const retained = computeTablePtLayout(state, table, contentWPt1, sourceIndex);
+      const colWidths = retained.colWidthsPt.map((width) => width * scale);
+      const rowHeights = retained.rowHeightsPt.map((height) => height * scale);
+      return {
+        colWidths,
+        tableW: colWidths.reduce((sum, width) => sum + width, 0),
+        rowContentHeights: retained.rowContentHeightsPt.map((height) => height * scale),
+        rowHeights,
+      };
+    }
+  `);
+  const occurrenceOwned = retainedPrefix === occurrenceOwnedRetainedPrefix;
+  if (retainedPrefix !== sourceKeyedRetainedPrefix && !occurrenceOwned) {
     if (retainedPrefix.includes('computeTablePtLayout')) {
       return createHash('sha256')
         .update(`invalid-a5-retained-prefix:${retainedPrefix}`)
@@ -1737,9 +1947,14 @@ function normalizedComputeTableLayoutHash(node, source) {
   if (!first || !b1) return normalizedSyntaxHash(node, source);
   const nodeStart = node.getStart(source);
   const nodeText = node.getText(source);
-  const virtualText = nodeText.slice(0, first.getStart(source) - nodeStart)
+  let virtualText = nodeText.slice(0, first.getStart(source) - nodeStart)
     + legacyPrefix
     + nodeText.slice(b1.getStart(source) - nodeStart);
+  if (occurrenceOwned) {
+    const exactParameter = ',\n  sourceIndex?: number,\n): {';
+    if (virtualText.split(exactParameter).length !== 2) return normalizedSyntaxHash(node, source);
+    virtualText = virtualText.replace(exactParameter, '\n): {');
+  }
   const virtualSource = ts.createSourceFile(
     'compute-table-layout-a5-virtual.ts',
     virtualText,
@@ -1949,7 +2164,7 @@ function declarationInventory(root) {
         // The final renderer surface is fixed up front, so staged PRs may add
         // those named adapters without opening a route for arbitrary helpers.
         const plannedRendererAdapter = file === `${DOCX_SOURCE}/renderer.ts`
-          && FINAL_RENDERER_DECLARATIONS.has(name);
+          && (FINAL_RENDERER_DECLARATIONS.has(name) || A5_STATE_OWNER_DECLARATIONS.has(name));
         if (!migrationOwner && !plannedRendererAdapter) nonLayoutDeclarationKeys.push(key);
         if (LEGACY_SYMBOLS.includes(name)) {
           legacyDeclarationHashes[key] = name === 'computePages'

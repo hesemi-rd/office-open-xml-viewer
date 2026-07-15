@@ -3,7 +3,6 @@ import {
   bodyFragmentFor,
   computePages,
   renderDocumentToCanvas,
-  splitFloatTableAcrossPages,
   __test_verticalLayoutSection,
   type DocxTextRunInfo,
 } from './renderer.js';
@@ -715,143 +714,76 @@ describe('vertical outer floating tables retain the canonical logical paint doma
     expect(runs.filter((run) => run.text === 'C')).toHaveLength(1);
   });
 
-  it('does not advance for a provisional fresh-page result that fits after slice reseating', () => {
+  it('keeps a provisionally deferred float on the current page after slice reseating', () => {
     const doc = freshPageSensitiveSplitDocument();
     const measure = recordingCanvas();
-    computePages(
+    const pages = computePages(
       doc.body,
       __test_verticalLayoutSection(PHYSICAL_SECTION),
       measure.canvas.getContext('2d') as CanvasRenderingContext2D,
       doc.fontFamilyClasses,
     );
-    const table = doc.body[1] as unknown as DocTable;
-    let advanceCalls = 0;
-    const emitted: BodyElement[] = [];
-    const events: string[] = [];
-    const registries: string[] = [];
-    let registryCountAtFirstEmit = 0;
-    let advanceCallsAtFirstEmit = -1;
+    const outerFragments = pages.flatMap((page, pageIndex) => page.flatMap((element) => {
+      if (element.type !== 'table') return [];
+      const retained = bodyFragmentFor(element);
+      if (retained?.fragment.kind !== 'table' || retained.fragment.source.path[0] !== 1) return [];
+      return [{ pageIndex, fragment: retained.fragment as TableFragmentLayout }];
+    }));
 
-    splitFloatTableAcrossPages(
-      table,
-      table.tblpPr!,
-      [120],
-      [20, 20],
-      80,
-      240,
-      () => 0,
-      () => 0,
-      () => 110,
-      () => {
-        advanceCalls += 1;
-        events.push('advance');
-      },
-      (_sliceTp, tableWidthPt, tableHeightPt, externalRegistry) => {
-        registries.push(JSON.stringify(externalRegistry));
-        return { x: 20, y: 110, w: tableWidthPt, h: tableHeightPt };
-      },
-      (slice) => {
-        if (emitted.length === 0) {
-          registryCountAtFirstEmit = registries.length;
-          advanceCallsAtFirstEmit = advanceCalls;
-        }
-        events.push('emit');
-        emitted.push(slice as unknown as BodyElement);
-      },
-    );
-
-    expect(events[0]).toBe('emit');
-    expect(advanceCallsAtFirstEmit).toBe(0);
-    expect(advanceCalls).toBe(1);
-    expect(emitted).toHaveLength(2);
-    expect(registryCountAtFirstEmit).toBeGreaterThan(1);
-    expect(new Set(registries.slice(0, registryCountAtFirstEmit))).toHaveLength(1);
-    const first = bodyFragmentFor(emitted[0]!);
-    expect(first?.fragment.kind === 'table'
-      ? (first.fragment as TableFragmentLayout).rows.map((row) => row.logicalRowIndex)
-      : []).toEqual([0]);
+    expect(pages).toHaveLength(1);
+    expect(outerFragments).toHaveLength(1);
+    expect(outerFragments[0]?.pageIndex).toBe(0);
+    expect(outerFragments[0]?.fragment.rows.map((row) => row.logicalRowIndex)).toEqual([0, 1]);
   });
 
   it('advances exactly once only after a true fresh-page outcome is validated', () => {
     const doc = freshPageSensitiveSplitDocument();
+    const outer = doc.body[1] as unknown as DocTable;
+    outer.tblpPr = { ...outer.tblpPr!, tblpY: 80 };
     const measure = recordingCanvas();
-    computePages(
+    const pages = computePages(
       doc.body,
       __test_verticalLayoutSection(PHYSICAL_SECTION),
       measure.canvas.getContext('2d') as CanvasRenderingContext2D,
       doc.fontFamilyClasses,
     );
-    const table = doc.body[1] as unknown as DocTable;
-    const events: string[] = [];
-    const emitted: BodyElement[] = [];
-    let resolverCalls = 0;
-    let resolverCallsAtAdvance = -1;
-    let advanceCalls = 0;
+    const outerPlacements = pages.flatMap((page, pageIndex) => page.flatMap((element) => {
+      if (element.type !== 'table') return [];
+      const retained = bodyFragmentFor(element);
+      if (retained?.fragment.kind !== 'table' || retained.fragment.source.path[0] !== 1) return [];
+      return [{ pageIndex, fragment: retained.fragment as TableFragmentLayout }];
+    }));
 
-    splitFloatTableAcrossPages(
-      table,
-      table.tblpPr!,
-      [120],
-      [20, 20],
-      80,
-      240,
-      () => 0,
-      () => 0,
-      () => 110,
-      () => {
-        resolverCallsAtAdvance = resolverCalls;
-        advanceCalls += 1;
-        events.push('advance');
-      },
-      (_sliceTp, tableWidthPt, tableHeightPt) => {
-        resolverCalls += 1;
-        return { x: 80, y: 110, w: tableWidthPt, h: tableHeightPt };
-      },
-      (slice) => {
-        events.push('emit');
-        emitted.push(slice as unknown as BodyElement);
-      },
-    );
-
-    expect(resolverCallsAtAdvance).toBeGreaterThan(0);
-    expect(advanceCalls).toBe(1);
-    expect(events).toEqual(['advance', 'emit']);
-    expect(emitted).toHaveLength(1);
+    expect(pages).toHaveLength(2);
+    expect(outerPlacements).toHaveLength(1);
+    expect(outerPlacements[0]?.pageIndex).toBe(1);
+    expect(outerPlacements[0]?.fragment.rows.map((row) => row.logicalRowIndex)).toEqual([0, 1]);
+    expect(pages[0]?.some((element) => element.type === 'table'
+      && bodyFragmentFor(element)?.fragment.source.path[0] === 1)).toBe(false);
   });
 
-  it('rejects a split parent frame that does not converge within four passes', () => {
+  it('converges split parent frames through production pagination', () => {
     const doc = documentWith(floatingTable([
-      { text: 'FIRST', heightPt: 140 },
-      { text: 'SECOND', heightPt: 20 },
+      { text: 'FIRST', heightPt: 100 },
+      { text: 'SECOND', heightPt: 100 },
     ]));
+    const table = doc.body[0] as unknown as DocTable;
+    table.tblpPr = { ...table.tblpPr!, tblpY: 100 };
     const measure = recordingCanvas();
-    computePages(
+    const pages = computePages(
       doc.body,
       __test_verticalLayoutSection(PHYSICAL_SECTION),
       measure.canvas.getContext('2d') as CanvasRenderingContext2D,
       doc.fontFamilyClasses,
     );
-    const table = doc.body[0] as unknown as DocTable;
-    let pass = 0;
+    const rowSlices = pages.flatMap((page) => page.flatMap((element) => {
+      if (element.type !== 'table') return [];
+      const retained = bodyFragmentFor(element);
+      if (retained?.fragment.kind !== 'table') return [];
+      return [(retained.fragment as TableFragmentLayout).rows.map((row) => row.logicalRowIndex)];
+    }));
 
-    expect(() => splitFloatTableAcrossPages(
-      table,
-      table.tblpPr!,
-      [120],
-      [140, 20],
-      0,
-      240,
-      () => 0,
-      () => 0,
-      () => 146,
-      () => {},
-      (_sliceTp, tableWidthPt, tableHeightPt) => ({
-        x: pass++ % 2 === 0 ? 20 : 40,
-        y: 30,
-        w: tableWidthPt,
-        h: tableHeightPt,
-      }),
-    )).toThrow('Split outer table final-frame probe did not converge');
-    expect(pass).toBe(4);
+    expect(pages).toHaveLength(2);
+    expect(rowSlices).toEqual([[0], [1]]);
   });
 });

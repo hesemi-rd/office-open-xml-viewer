@@ -16,11 +16,6 @@ import type {
 } from './types.js';
 import { layoutParagraph } from './paragraph.js';
 import { validateFloatingTableRegistryDelta } from './floating-table-transaction.js';
-import {
-  retainTableEnvelope,
-  retainedTableEnvelopeFor,
-  retainedTableSliceSize,
-} from './retained-table-fragments.js';
 
 const noBorders: TableEdgeInputs = {
   top: null, right: null, bottom: null, left: null, insideH: null, insideV: null,
@@ -229,21 +224,22 @@ function take(
 }
 
 describe('retained table pagination', () => {
-  it('keeps retained envelope geometry immutable and isolated by weak object identity', () => {
-    const first = {};
-    const second = {};
+  it('keeps placed table geometry self-contained and clone-safe', () => {
     const layout = acquisition([row(0, 20)]).layout;
-    const placement = { fragment: layout, xPt: 5, yPt: 7, widthPt: 100 };
-
-    retainTableEnvelope(first, placement);
-
-    placement.xPt = 99;
-    expect(retainedTableEnvelopeFor(first)).toEqual({
-      fragment: layout, xPt: 5, yPt: 7, widthPt: 100,
+    const placement = Object.freeze({
+      fragment: layout,
+      columnIndex: 0,
+      xPt: 5,
+      yPt: 7,
+      widthPt: 100,
+      heightPt: layout.advancePt,
     });
-    expect(Object.isFrozen(retainedTableEnvelopeFor(first))).toBe(true);
-    expect(retainedTableEnvelopeFor(second)).toBeUndefined();
-    expect(retainedTableSliceSize(first, 2)).toEqual({ widthPx: 200, heightPx: 40 });
+
+    expect(placement.fragment).toBe(layout);
+    expect(placement).toEqual(expect.objectContaining({
+      xPt: 5, yPt: 7, widthPt: 100, heightPt: 20,
+    }));
+    expect(() => structuredClone(placement)).not.toThrow();
   });
 
   it.each(['page', 'margin'] as const)(

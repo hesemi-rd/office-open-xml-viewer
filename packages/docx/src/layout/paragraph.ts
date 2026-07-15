@@ -66,7 +66,6 @@ import {
 export {
   bodyFrameGroupFor,
   bodyParagraphBorderEdgesFor,
-  bodySourceIndexFor,
   collectBodyFrameGroups,
   prepareBodyFrameMetadata,
 } from './frame.js';

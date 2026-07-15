@@ -305,10 +305,6 @@ import {
   type PageDependentTableBlockRequest,
   type TableFragmentLayout,
 } from './layout/table-pagination.js';
-import {
-  retainTableEnvelope,
-  retainedTableEnvelopeFor,
-} from './layout/retained-table-fragments.js';
 import { paragraphGapAdjustment, paragraphGapPt } from './layout/paragraph-spacing.js';
 import { imageResourceKey } from './layout/source-key.js';
 import {
@@ -321,7 +317,6 @@ import {
   acquireShapeTextBoxLayout,
   bodyFrameGroupFor,
   bodyParagraphBorderEdgesFor,
-  bodySourceIndexFor,
   paragraphLayoutFromMeasurement,
   sliceParagraphLayout,
 } from './layout/paragraph.js';
@@ -681,6 +676,13 @@ export async function prepareMathRuns(
   return { records, drawables };
 }
 
+interface RetainedTableRecord {
+  readonly sourceIndex: number;
+  readonly acquisition: RetainedTableAcquisition;
+  readonly contentWidthPt: number;
+  readonly anchorYPt: number;
+}
+
 export interface RenderState extends DeferredFrontPaintState {
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
   scale: number;    // px per pt
@@ -770,9 +772,9 @@ export interface RenderState extends DeferredFrontPaintState {
   ) => readonly ResolvedFloatingTablePlacementLayout[];
   /** Renderer authorities injected into the pure recursive table acquisition. */
   retainedTableAcquisition?: RetainedTableAcquisitionDependencies<RenderState>;
-  /** Final-width retained tables keyed by stable body source identity until the
-   * existing attachment seam consumes them. */
-  retainedTablesBySourceIndex?: Map<number, RetainedTableAcquisition>;
+  /** Each body occurrence owns its acquisition and pagination context for this
+   * render session. Parser objects may legally occur more than once. */
+  retainedTablesBySourceIndex?: Map<number, RetainedTableRecord>;
   /** ECMA-376 §17.15.1.58–.60 — resolved Japanese line-breaking rules
    *  (kinsoku enabled flag + line-start/line-end forbidden character sets).
    *  Default is the application's Japanese kinsoku table with kinsoku ON. */
@@ -3324,7 +3326,7 @@ export function computePages(
       } else if (e.type === 'table') {
         const t = e as unknown as DocTable;
         if (t.tblpPr) continue; // floating table: out of flow
-        total += computeTableRowHeights(ms, t, colWPt).reduce((s, x) => s + x, 0);
+        total += computeTableRowHeights(ms, t, colWPt, j).reduce((s, x) => s + x, 0);
         prevAfter = 0;
         prevP = null;
       }
@@ -3433,7 +3435,7 @@ export function computePages(
           nxt as unknown as DocTable, uprightTableBandPt(), measureState,
         ).reduce((s, w) => s + w, 0);
       }
-      return estimateTableHeight(measureState, nxt as unknown as DocTable, colW());
+      return estimateTableHeight(measureState, nxt as unknown as DocTable, colW(), startIdx);
     }
     return 0;
   };
@@ -4069,7 +4071,7 @@ export function computePages(
       const splitFitHeight = bottomLimit === effContentH() ? fitHeightForBreak : fitHeight;
       if (splitFitHeight > remainingH && splittable) {
         const placed = splitParagraphAcrossPages(
-          measureState, para, colW, suppressBefore, colX,
+          measureState, para, i, colW, suppressBefore, colX,
           y, pageContentH, pages,
           // Overflow during the split advances to the next column first, then a
           // new page (newspaper fill). The just-filled column's bottom is folded
@@ -4106,7 +4108,7 @@ export function computePages(
         // (measured at its FINAL placement, `measureState.y`, after any relocation).
         // M-1: hand it the fit-decision measurement; it is reused only if the final
         // placement still matches (no relocation), else remeasured.
-        attachBodyParagraphFragment(el as PaginatedElementWithLines, para, measureState, {
+        attachBodyParagraphFragment(el as PaginatedElementWithLines, para, measureState, i, {
           paragraphXPt: colX(),
           availableWidthPt: colW(),
           suppressSpaceBefore: suppressBefore,
@@ -4182,7 +4184,7 @@ export function computePages(
         const measureFloat = () =>
           withColumnBand(() => {
             const cW = colW() * measureState.scale;
-            const layout = computeTableLayout(tbl, cW, measureState);
+            const layout = computeTableLayout(tbl, cW, measureState, i);
             const physicalPageIndex = pages.length - 1;
             const pageContext = measureState.layoutServices
               ? fieldAcquisitionContextOf(measureState.layoutServices)
@@ -4194,14 +4196,16 @@ export function computePages(
               displayPageNumber: pageContext?.displayPageNumber ?? physicalPageIndex + 1,
               pageNumberFormat: pageContext?.pageNumberFormat ?? measureState.pageNumberFormat,
             };
+            const retainedRecord = retainedTableRecord(measureState, i);
             let finalHeightPt = layout.rowHeights.reduce((sum, height) => sum + height, 0);
             let box = computeFloatTableBox(
               tp, finalState, finalState.y, layout.tableW, finalHeightPt, false,
               { allowOverlap: tbl.overlap !== 'never' },
             );
             for (let pass = 0; pass < 4; pass += 1) {
-              const prepared = bodyFlowFragments.sourceIndices.retainedTableMeasureBySource
-                .prepareFittingOuterFragment(tbl, finalState, box);
+              const prepared = prepareFittingOuterFragment(
+                tbl, i, retainedRecord, finalState, box,
+              );
               if (!prepared.fragment) {
                 const rawBox = computeFloatTableBox(
                   tp, finalState, finalState.y, layout.tableW, finalHeightPt, true,
@@ -4380,6 +4384,7 @@ export function computePages(
               }),
             (sliceEl) => pushTagged(sliceEl),
             () => pages.length - 1,
+            { sourceIndex: i, record: retainedTableRecord(measureState, i), state: measureState },
           );
           y = endY;
           measureState.y = bodyTopPt() + endY;
@@ -4418,6 +4423,9 @@ export function computePages(
             first.layout.colWidths,
             first.layout.rowHeights,
             first.contentWPt,
+            i,
+            retainedTableRecord(measureState, i),
+            measureState,
             undefined,
             acceptedPrepared,
           );
@@ -4476,7 +4484,7 @@ export function computePages(
       if (verticalUpright()) {
         const bandPt = uprightTableBandPt();
         const { colWidthsPt, rowHeightsPt } =
-          computeTablePtLayout(measureState, tbl, bandPt);
+          computeTablePtLayout(measureState, tbl, bandPt, i);
         const h = colWidthsPt.reduce((s, w) => s + w, 0);
         const tableEl = { ...tbl, type: 'table' } as PaginatedBodyElement;
         if (y + h > effContentH() - tblReservePt && y > colTopY) nextColumnOrPage(i);
@@ -4485,6 +4493,9 @@ export function computePages(
           colWidthsPt,
           rowHeightsPt,
           bandPt,
+          i,
+          retainedTableRecord(measureState, i),
+          measureState,
           {
             ...measureState,
             pageIndex: pages.length - 1,
@@ -4507,7 +4518,7 @@ export function computePages(
         colWidthsPt: tblColWidthsPt,
         rowContentHeightsPt: measuredRowContentHs,
         rowHeightsPt: measuredRowHs,
-      } = computeTablePtLayout(measureState, tbl, tblContentWPt);
+      } = computeTablePtLayout(measureState, tbl, tblContentWPt, i);
       const tblWidthPt = tblColWidthsPt.reduce((sum, width) => sum + width, 0);
 
       // §17.4.57: a floating table reserves a page-scoped exclusion band for
@@ -4569,6 +4580,7 @@ export function computePages(
         tblColWidthsPt,
         tableContentH,
         measureState,
+        i,
         true,
       );
       const pageTable = splitRows?.table ?? tbl;
@@ -4621,6 +4633,7 @@ export function computePages(
               meta.heightsPt,
               tblContentWPt,
               measureState,
+              i,
               {
                 columnIndex: sliceEl.colIndex ?? 0,
                 xPt: columns[sliceEl.colIndex ?? 0]?.xPt ?? colX(),
@@ -4629,9 +4642,11 @@ export function computePages(
                 continuesOnNextPage: meta.continuesOnNextPage,
                 repeatedHeaderRowCount: meta.repeatedHeaderRowCount,
                 sourceRowIndexOf: meta.sourceRowIndexOf,
+                fragment: meta.fragment,
               },
             ),
           () => currentSectionFrame.textDirection,
+          i,
         );
         y = endY;
         measureState.y = bodyTopPt() + endY;
@@ -4652,6 +4667,7 @@ export function computePages(
           rowHs,
           tblContentWPt,
           measureState,
+          i,
           {
             columnIndex: colIndex,
             xPt: colX(),
@@ -5719,7 +5735,7 @@ function buildMeasureState(
         state.y += advancePt;
       },
     },
-    retainedTablesBySourceIndex: new Map<number, RetainedTableAcquisition>(),
+    retainedTablesBySourceIndex: new Map<number, RetainedTableRecord>(),
     currentDateMs: layoutOptions?.currentDateMs,
     kinsoku: layoutSettings.kinsoku,
     defaultTabPt: layoutSettings.defaultTabPt,
@@ -5833,68 +5849,12 @@ function segmentEnvironmentOf(state: RenderState): RenderState {
  *  mutated (a non-split paragraph element is the source object itself). */
 const bodyFlowFragments = Object.freeze(Object.assign(new WeakMap<object, PlacedFragment>(), {
   /** Body source index for fragment kinds whose public source is the parsed node. */
-  sourceIndices: new WeakMap<object, number>() as WeakMap<object, number> & {
-    retainedTableMeasureBySource: WeakMap<object, Readonly<{
-      acquisition: RetainedTableAcquisition;
-      state: RenderState;
-      contentWidthPt: number;
-      anchorYPt: number;
-    }>> & {
-      record(table: DocTable, record: Readonly<{
-        acquisition: RetainedTableAcquisition;
-        state: RenderState;
-        contentWidthPt: number;
-        anchorYPt: number;
-      }>): void;
-      forTable(table: DocTable): Readonly<{
-        acquisition: RetainedTableAcquisition;
-        state: RenderState;
-        contentWidthPt: number;
-        anchorYPt: number;
-      }> | undefined;
-      commitFloatRegistryDelta(
-        state: RenderState,
-        delta: FloatRegistryDeltaPt,
-        coordinateSpace: 'logical-page-points',
-        flowDomainId: string,
-      ): void;
-      prepareFittingOuterFragment(
-        table: DocTable,
-        finalState: RenderState,
-        outerBox: FloatTableBox,
-      ): Readonly<{
-        fragment?: TableFragmentLayout;
-        floatingTableRegistryDelta?: FloatRegistryDeltaPt;
-        physicalPageIndex: number;
-        displayPageNumber: number;
-        occurrenceId: string;
-      }>;
-      reacquirePageBlock(
-        table: DocTable,
-        sourceIndex: number,
-        retained: RetainedTableAcquisition,
-        state: RenderState,
-        services: LayoutServices,
-        request: PageDependentTableBlockRequest,
-      ): ParagraphLayout | TableLayout;
-    };
-  },
+  sourceIndices: new WeakMap<object, number>(),
   /** Placement ownership used by section vAlign/reserve composition. */
   framePlacement: new WeakMap<object, Readonly<{
     verticalOwnership: 'page' | 'host-flow';
   }>>(),
 }));
-
-// Body paint audits the exact canonical WeakMap initializer above; the
-// renderer-only acquisition registry is attached after that authority is sealed.
-Object.assign(bodyFlowFragments.sourceIndices, {
-  retainedTableMeasureBySource: new WeakMap<object, Readonly<{
-    acquisition: RetainedTableAcquisition;
-    state: RenderState;
-    contentWidthPt: number;
-    anchorYPt: number;
-  }>>(),
-});
 
 /** Read the placed fragment the paginator associated with an emitted body element,
  *  if any (paragraph or table elements the fragment migration covers). */
@@ -6065,6 +6025,7 @@ function attachTableFragment(
   _rowHeightsPt: number[],
   contentWPt: number,
   measureState: RenderState,
+  sourceIndex: number,
   placement: {
     columnIndex: number;
     xPt: number;
@@ -6073,71 +6034,36 @@ function attachTableFragment(
     continuesOnNextPage: boolean;
     repeatedHeaderRowCount: number;
     sourceRowIndexOf?: (fragmentRowIndex: number) => number;
+    fragment?: TableFragmentLayout;
   },
 ): void {
-  const sourceIndex = bodySourceIndexFor(table);
-  if (sourceIndex === undefined) {
-    throw new Error('Body table source identity must be prepared before fragment acquisition');
-  }
-  const retainedSlice = retainedTableEnvelopeFor(el);
+  const retainedRecord = measureState.retainedTablesBySourceIndex?.get(sourceIndex);
   const retainedAcquisition = placement.sourceRowIndexOf === undefined
     && !placement.continuesFromPreviousPage
     && !placement.continuesOnNextPage
-    ? measureState.retainedTablesBySourceIndex?.get(sourceIndex)
+    ? retainedRecord?.acquisition
     : undefined;
-  const layout = retainedSlice?.fragment ?? retainedAcquisition?.layout;
-  if (!layout || (!retainedSlice && layout.rows.length !== table.rows.length)) {
+  const layout = placement.fragment ?? retainedAcquisition?.layout;
+  if (!layout || (!placement.fragment && layout.rows.length !== table.rows.length)) {
     throw new Error('Body table placement requires retained TableLayout geometry');
   }
   bodyFlowFragments.set(el, Object.freeze({
     fragment: layout,
     columnIndex: placement.columnIndex,
-    xPt: retainedSlice?.xPt ?? placement.xPt,
-    yPt: retainedSlice?.yPt ?? placement.yPt,
-    widthPt: retainedSlice?.widthPt ?? contentWPt,
+    xPt: placement.xPt,
+    yPt: placement.yPt,
+    widthPt: contentWPt,
     heightPt: layout.advancePt,
   }));
   bodyFlowFragments.sourceIndices.set(el, sourceIndex);
 }
 
-Object.assign(
-  bodyFlowFragments.sourceIndices.retainedTableMeasureBySource,
-  {
-    record(table: DocTable, record: Readonly<{
-      acquisition: RetainedTableAcquisition;
-      state: RenderState;
-      contentWidthPt: number;
-      anchorYPt: number;
-    }>): void {
-      bodyFlowFragments.sourceIndices.retainedTableMeasureBySource.set(
-        table as object,
-        record,
-      );
-      table.rows.forEach((row) => {
-        bodyFlowFragments.sourceIndices.retainedTableMeasureBySource.set(
-          row as object,
-          record,
-        );
-      });
-    },
-    forTable(table: DocTable): Readonly<{
-      acquisition: RetainedTableAcquisition;
-      state: RenderState;
-      contentWidthPt: number;
-      anchorYPt: number;
-    }> | undefined {
-      return bodyFlowFragments.sourceIndices.retainedTableMeasureBySource
-        .get(table as object)
-        ?? table.rows.map((row) => bodyFlowFragments.sourceIndices
-          .retainedTableMeasureBySource.get(row as object))
-          .find((record) => record !== undefined);
-    },
-    commitFloatRegistryDelta(
-      state: RenderState,
-      delta: FloatRegistryDeltaPt,
-      coordinateSpace: 'logical-page-points',
-      flowDomainId: string,
-    ): void {
+function commitFloatRegistryDelta(
+  state: RenderState,
+  delta: FloatRegistryDeltaPt,
+  coordinateSpace: 'logical-page-points',
+  flowDomainId: string,
+): void {
       validateFloatingTableRegistryDelta(delta, {
         coordinateSpace,
         flowDomainId,
@@ -6171,26 +6097,30 @@ Object.assign(
         paraId: entry.paragraphId,
         drawn: true,
       })));
-      state.floatParaSeq = delta.nextParagraphId;
-    },
-    prepareFittingOuterFragment(
-      table: DocTable,
-      finalState: RenderState,
-      outerBox: FloatTableBox,
-    ): Readonly<{
+  state.floatParaSeq = delta.nextParagraphId;
+}
+
+function retainedTableRecord(state: RenderState, sourceIndex: number): RetainedTableRecord {
+  const record = state.retainedTablesBySourceIndex?.get(sourceIndex);
+  if (!record) throw new Error('Table placement requires retained table acquisition');
+  return record;
+}
+
+function prepareFittingOuterFragment(
+  table: DocTable,
+  sourceIndex: number,
+  retained: RetainedTableRecord,
+  finalState: RenderState,
+  outerBox: FloatTableBox,
+): Readonly<{
       fragment?: TableFragmentLayout;
       floatingTableRegistryDelta?: FloatRegistryDeltaPt;
       physicalPageIndex: number;
       displayPageNumber: number;
-      occurrenceId: string;
-    }> {
-      const retained = bodyFlowFragments.sourceIndices.retainedTableMeasureBySource
-        .forTable(table);
-      const sourceIndex = bodySourceIndexFor(table);
+  occurrenceId: string;
+}> {
       const services = finalState.layoutServices;
-      if (!retained || sourceIndex === undefined || !services) {
-        throw new Error('Fitting outer table preparation requires retained acquisition');
-      }
+      if (!services) throw new Error('Fitting outer table preparation requires layout services');
       const pageHeightPt = finalState.pageH / finalState.scale;
       const physicalPageIndex = finalState.pageIndex;
       const displayPageNumber = finalState.displayPageNumber ?? physicalPageIndex + 1;
@@ -6292,8 +6222,7 @@ Object.assign(
             xPt: outerBox.x / finalState.scale,
             yPt: outerBox.y / finalState.scale,
           },
-          reacquirePageDependentBlock: (request) => bodyFlowFragments.sourceIndices
-            .retainedTableMeasureBySource.reacquirePageBlock(
+          reacquirePageDependentBlock: (request) => reacquirePageBlock(
               table,
               sourceIndex,
               retained.acquisition,
@@ -6322,15 +6251,16 @@ Object.assign(
         displayPageNumber,
         occurrenceId,
       });
-    },
-    reacquirePageBlock(
-      table: DocTable,
-      sourceIndex: number,
-      retained: RetainedTableAcquisition,
-      state: RenderState,
-      services: LayoutServices,
-      request: PageDependentTableBlockRequest,
-    ): ParagraphLayout | TableLayout {
+}
+
+function reacquirePageBlock(
+  table: DocTable,
+  sourceIndex: number,
+  retained: RetainedTableAcquisition,
+  state: RenderState,
+  services: LayoutServices,
+  request: PageDependentTableBlockRequest,
+): ParagraphLayout | TableLayout {
       if (request.acquired.kind !== 'paragraph') return request.acquired;
       let nestedTable = table;
       let offset = 1;
@@ -6416,9 +6346,7 @@ Object.assign(
         retained.input.flowDomainId,
         resolveParagraphBorderEdges(source.previous, source.paragraph, source.next),
       );
-    },
-  },
-);
+}
 
 /** Measure a NON-split body paragraph at its final placement and attach its placed
  *  fragment covering the whole line range.
@@ -6436,6 +6364,7 @@ function attachBodyParagraphFragment(
   el: PaginatedElementWithLines,
   source: DocParagraph,
   measureState: RenderState,
+  sourceIndex: number,
   placement: {
     paragraphXPt: number;
     availableWidthPt: number;
@@ -6444,10 +6373,6 @@ function attachBodyParagraphFragment(
   },
   fitMeasured?: MeasuredParagraph,
 ): void {
-  const sourceIndex = bodySourceIndexFor(source);
-  if (sourceIndex === undefined) {
-    throw new Error('Body paragraph source identity must be prepared before fragment acquisition');
-  }
   const paragraphBorderEdges = bodyParagraphBorderEdgesFor(source) ?? {
     top: 'top',
     bottom: 'bottom',
@@ -6631,6 +6556,7 @@ function paraGrid(para: DocParagraph, state: RenderState): DocGridCtx {
 function splitParagraphAcrossPages(
   measureState: RenderState,
   para: DocParagraph,
+  sourceIndex: number,
   contentWPt: () => number,
   suppressSpaceBefore: boolean,
   paragraphXPt: () => number,
@@ -6684,10 +6610,6 @@ function splitParagraphAcrossPages(
    *  slices). Omitted ⇒ no stamp (the renderer's body-level fallback). */
   tagSectionTextDirection?: () => string | null,
 ): { endY: number } {
-  const sourceIndex = bodySourceIndexFor(para);
-  if (sourceIndex === undefined) {
-    throw new Error('Body paragraph source identity must be prepared before split acquisition');
-  }
   const paragraphBorderEdges = bodyParagraphBorderEdgesFor(para) ?? {
     top: 'top',
     bottom: 'bottom',
@@ -6986,8 +6908,13 @@ function splitParagraphAcrossPages(
  *  in `effCellMargins`, the §17.4.7 trailing-structural-marker drop, and the
  *  §17.3.1.33 contextual/overlap spacing collapse (via `sumCellContentHeight`), so
  *  the caller is a thin delegation. */
-function computeTableRowHeights(state: RenderState, table: DocTable, contentWPt: number): number[] {
-  return computeTablePtLayout(state, table, contentWPt).rowHeightsPt;
+function computeTableRowHeights(
+  state: RenderState,
+  table: DocTable,
+  contentWPt: number,
+  sourceIndex?: number,
+): number[] {
+  return computeTablePtLayout(state, table, contentWPt, sourceIndex).rowHeightsPt;
 }
 
 /** The paginator's scale-1 table layout: the per-grid-column widths (pt) and the
@@ -7001,10 +6928,10 @@ function computeTablePtLayout(
   state: RenderState,
   table: DocTable,
   contentWPt: number,
+  sourceIndex?: number,
 ): { colWidthsPt: number[]; rowContentHeightsPt: number[]; rowHeightsPt: number[] } {
   const colWidthsPt = resolveColumnWidths(table, contentWPt, state);
   const dependencies = state.retainedTableAcquisition;
-  const sourceIndex = bodySourceIndexFor(table);
   if (dependencies && sourceIndex !== undefined) {
     const retained = acquireRetainedTable(
       table,
@@ -7014,10 +6941,9 @@ function computeTablePtLayout(
       [sourceIndex],
       dependencies,
     );
-    state.retainedTablesBySourceIndex?.set(sourceIndex, retained);
-    bodyFlowFragments.sourceIndices.retainedTableMeasureBySource.record(table, Object.freeze({
+    state.retainedTablesBySourceIndex?.set(sourceIndex, Object.freeze({
+      sourceIndex,
       acquisition: retained,
-      state,
       contentWidthPt: contentWPt,
       anchorYPt: state.y,
     }));
@@ -7031,8 +6957,13 @@ function computeTablePtLayout(
   return { colWidthsPt, rowContentHeightsPt, rowHeightsPt };
 }
 
-function estimateTableHeight(state: RenderState, table: DocTable, contentWPt: number): number {
-  return computeTableRowHeights(state, table, contentWPt).reduce((s, x) => s + x, 0);
+function estimateTableHeight(
+  state: RenderState,
+  table: DocTable,
+  contentWPt: number,
+  sourceIndex?: number,
+): number {
+  return computeTableRowHeights(state, table, contentWPt, sourceIndex).reduce((s, x) => s + x, 0);
 }
 
 /**
@@ -7214,6 +7145,9 @@ function stampTableLayout(
   _colWidthsPt: number[],
   _rowHeightsPt: number[],
   _contentWPt: number,
+  sourceIndex: number,
+  retained: RetainedTableRecord,
+  retainedState: RenderState,
   finalState?: RenderState,
   preparedOuter?: Readonly<{
     fragment: TableFragmentLayout;
@@ -7225,29 +7159,24 @@ function stampTableLayout(
   }>,
 ): void {
   const table = el as unknown as DocTable;
-  const retained = bodyFlowFragments.sourceIndices.retainedTableMeasureBySource.forTable(table);
-  const sourceIndex = bodySourceIndexFor(table);
-  if (!retained || sourceIndex === undefined) {
-    throw new Error('Table placement requires retained table acquisition');
-  }
   let layout: TableLayout | TableFragmentLayout = retained.acquisition.layout;
   const tableWidthPt = layout.columnWidthsPt.reduce((sum, width) => sum + width, 0);
   const box = preparedOuter?.box ?? (table.tblpPr
     ? computeFloatTableBox(
       table.tblpPr,
-      retained.state,
+      retainedState,
       retained.anchorYPt,
       tableWidthPt,
       layout.advancePt,
     )
     : undefined);
   const xPt = box?.x === undefined
-    ? retained.state.contentX / retained.state.scale
-    : box.x / retained.state.scale;
+    ? retainedState.contentX / retainedState.scale
+    : box.x / retainedState.scale;
   const yPt = box?.y === undefined
-    ? retained.anchorYPt / retained.state.scale
-    : box.y / retained.state.scale;
-  const placementState = finalState ?? retained.state;
+    ? retained.anchorYPt / retainedState.scale
+    : box.y / retainedState.scale;
+  const placementState = finalState ?? retainedState;
   const physical = table.tblpPr ? undefined : placementState.verticalPhys;
   const services = placementState.layoutServices;
   if (table.tblpPr) {
@@ -7255,8 +7184,8 @@ function stampTableLayout(
       throw new Error('Fitting outer table acceptance requires a pure prepared fragment');
     }
     if (preparedOuter.floatingTableRegistryDelta?.entries.length) {
-      bodyFlowFragments.sourceIndices.retainedTableMeasureBySource.commitFloatRegistryDelta(
-        retained.state,
+      commitFloatRegistryDelta(
+        retainedState,
         preparedOuter.floatingTableRegistryDelta,
         'logical-page-points',
         `logical-page:${preparedOuter.physicalPageIndex}`,
@@ -7328,8 +7257,7 @@ function stampTableLayout(
           nextParagraphId: 0,
         },
         finalPlacementTranslationPt: { xPt: physicalLeftPt, yPt: physicalTopPt },
-        reacquirePageDependentBlock: (request) => bodyFlowFragments.sourceIndices
-          .retainedTableMeasureBySource.reacquirePageBlock(
+        reacquirePageDependentBlock: (request) => reacquirePageBlock(
             table,
             sourceIndex,
             retained.acquisition,
@@ -7344,7 +7272,6 @@ function stampTableLayout(
     }
     layout = physicalFragment.fragment;
   }
-  retainTableEnvelope(el, { fragment: layout, xPt, yPt, widthPt: tableWidthPt });
   bodyFlowFragments.set(el, Object.freeze({
     fragment: layout,
     // computePages assigns the destination column after this protected stamp
@@ -7913,9 +7840,9 @@ function splitRowsTallerThanPage(
   colWidthsPt: number[],
   pageContentHeightPt: number,
   state: RenderState,
+  sourceIndex?: number,
   rowHeightsAreContent = false,
 ): { table: DocTable; rowHs: number[]; sourceRowIndexByRow: number[] } | null {
-  const sourceIndex = bodySourceIndexFor(table);
   if (sourceIndex !== undefined && state.retainedTablesBySourceIndex?.has(sourceIndex)) {
     // The retained paginator owns paragraph-line, block, and nested-table
     // continuations. Pre-slicing the parsed row here would renumber source paths
@@ -8041,18 +7968,21 @@ export function splitTableAcrossPages(
       continuesOnNextPage: boolean;
       repeatedHeaderRowCount: number;
       sourceRowIndexOf: (fragmentRowIndex: number) => number;
+      fragment: TableFragmentLayout;
     },
   ) => void,
   /** ECMA-376 §17.6.20 — the active SECTION's text direction (issue #1000),
    *  stamped in lockstep with `tagSectionGeom` (constant across the split).
    *  Omitted ⇒ no stamp (the renderer's body-level fallback). */
   tagSectionTextDirection?: () => string | null,
+  /** Body occurrence owner. Parsed table identity is not a layout-session key. */
+  sourceIndex?: number,
 ): number {
   const colTop = columnTop ?? (() => 0);
-  const sourceIndex = bodySourceIndexFor(table);
-  const retained = sourceIndex === undefined
+  const retainedRecord = sourceIndex === undefined
     ? undefined
     : rowSplit?.state.retainedTablesBySourceIndex?.get(sourceIndex);
+  const retained = retainedRecord?.acquisition;
   const services = rowSplit?.state.layoutServices;
   if (!retained || !services || sourceIndex === undefined || !rowSplit) {
     throw new Error('Table pagination requires retained table acquisition');
@@ -8149,8 +8079,7 @@ export function splitTableAcrossPages(
           xPt: activeColumn?.xPt ?? rowSplit.state.contentX / rowSplit.state.scale,
           yPt: logicalMarginTopPt + y,
         },
-        reacquirePageDependentBlock: (request) => bodyFlowFragments.sourceIndices
-          .retainedTableMeasureBySource.reacquirePageBlock(
+        reacquirePageDependentBlock: (request) => reacquirePageBlock(
           table,
           sourceIndex,
           retained,
@@ -8182,13 +8111,6 @@ export function splitTableAcrossPages(
       if (tagSectionGeom) sliceEl.sectionGeom = tagSectionGeom();
       if (tagSectionPageNumType) sliceEl.sectionPageNumType = tagSectionPageNumType();
       if (tagSectionTextDirection) sliceEl.sectionTextDirection = tagSectionTextDirection();
-      retainTableEnvelope(
-        sliceEl,
-        {
-        fragment,
-        yPt: (marginTopPt ?? 0) + y,
-        },
-      );
       const continuesOnNextPage = result.nextCursor !== null;
       const repeatedHeaderRowCount = fragment.rows.filter(
         (row) => row.ownership === 'repeated-header',
@@ -8200,10 +8122,11 @@ export function splitTableAcrossPages(
         repeatedHeaderRowCount,
         sourceRowIndexOf: (fragmentRowIndex) =>
           fragment.rows[fragmentRowIndex]?.logicalRowIndex ?? 0,
+        fragment,
       });
       pages[pages.length - 1]!.push(sliceEl);
       if (result.floatingTableRegistryDelta) {
-        bodyFlowFragments.sourceIndices.retainedTableMeasureBySource.commitFloatRegistryDelta(
+        commitFloatRegistryDelta(
           rowSplit.state,
           result.floatingTableRegistryDelta,
           'logical-page-points',
@@ -8294,12 +8217,18 @@ export function splitFloatTableAcrossPages(
   /** Current live physical page. The compute paginator owns page advancement;
    *  direct unit callers may omit it and retain slice-ordinal fallback. */
   currentPhysicalPageIndex?: () => number,
+  /** Render-session occurrence owner. Required for retained pagination. */
+  retainedContext?: Readonly<{
+    sourceIndex: number;
+    record: RetainedTableRecord;
+    state: RenderState;
+  }>,
 ): number {
-  const retainedRecord = bodyFlowFragments.sourceIndices.retainedTableMeasureBySource
-    .forTable(table);
-  const sourceIndex = bodySourceIndexFor(table);
-  const retainedServices = retainedRecord?.state.layoutServices;
-  if (!retainedRecord || !retainedServices || sourceIndex === undefined) {
+  const retainedRecord = retainedContext?.record;
+  const retainedState = retainedContext?.state;
+  const sourceIndex = retainedContext?.sourceIndex;
+  const retainedServices = retainedState?.layoutServices;
+  if (!retainedRecord || !retainedState || !retainedServices || sourceIndex === undefined) {
     throw new Error('Floating table pagination requires retained table acquisition');
   }
   {
@@ -8327,7 +8256,7 @@ export function splitFloatTableAcrossPages(
       const probeTp: TblpPr = firstSlice
         ? tp
         : { ...tp, vertAnchor: 'text', tblpY: 0, tblpYSpec: undefined };
-      const probeState = retainedRecord.state;
+      const probeState = retainedState;
       const probeScale = probeState.scale;
       const retainedWidthPt = retained.layout.columnWidthsPt.reduce(
         (sum, width) => sum + width,
@@ -8440,12 +8369,11 @@ export function splitFloatTableAcrossPages(
           xPt: placementSeed.x / probeScale,
           yPt: placementSeed.y / probeScale,
         },
-        reacquirePageDependentBlock: (request) => bodyFlowFragments.sourceIndices
-          .retainedTableMeasureBySource.reacquirePageBlock(
+        reacquirePageDependentBlock: (request) => reacquirePageBlock(
           table,
           sourceIndex,
           retained,
-          retainedRecord.state,
+          retainedState,
           retainedServices,
           request,
         ),
@@ -8569,20 +8497,11 @@ export function splitFloatTableAcrossPages(
       } as unknown as PaginatedBodyElement;
       const tableWidthPt = fragment.columnWidthsPt.reduce((sum, width) => sum + width, 0);
 
-      retainTableEnvelope(
-        sliceEl,
-        {
-        fragment,
-        xPt: 0,
-        yPt: sliceTopRel,
-        widthPt: tableWidthPt,
-        },
-      );
       emitSlice?.(sliceEl);
       if (emitSlice && result.floatingTableRegistryDelta?.entries.length) {
-        const destinationPageIndex = destinationPage?.pageIndex ?? sliceOrdinal;
-        bodyFlowFragments.sourceIndices.retainedTableMeasureBySource.commitFloatRegistryDelta(
-          retainedRecord.state,
+        const destinationPageIndex = destinationPage?.pageIndex ?? livePhysicalPageIndex;
+        commitFloatRegistryDelta(
+          retainedState,
           result.floatingTableRegistryDelta,
           'logical-page-points',
           `logical-page:${destinationPageIndex}`,
@@ -8592,27 +8511,18 @@ export function splitFloatTableAcrossPages(
         registerTableFloat(
           acceptedParentBox,
           sliceTp,
-          retainedRecord.state,
-          floatTableWrapSide(acceptedParentBox, retainedRecord.state),
+          retainedState,
+          floatTableWrapSide(acceptedParentBox, retainedState),
           table.overlap !== 'never',
           true,
         );
       }
 
-      retainTableEnvelope(
-        sliceEl,
-        {
-        fragment,
-        xPt: acceptedParentBox.x / retainedRecord.state.scale,
-        yPt: acceptedParentBox.y / retainedRecord.state.scale,
-        widthPt: tableWidthPt,
-        },
-      );
       bodyFlowFragments.set(sliceEl, Object.freeze({
         fragment,
         columnIndex: sliceEl.colIndex ?? 0,
-        xPt: acceptedParentBox.x / retainedRecord.state.scale,
-        yPt: acceptedParentBox.y / retainedRecord.state.scale,
+        xPt: acceptedParentBox.x / retainedState.scale,
+        yPt: acceptedParentBox.y / retainedState.scale,
         widthPt: tableWidthPt,
         heightPt: fragment.advancePt,
       }));
@@ -12978,6 +12888,7 @@ function computeTableLayout(
   table: DocTable,
   contentWPx: number,
   state: RenderState,
+  sourceIndex?: number,
 ): {
   colWidths: number[];
   tableW: number;
@@ -12986,12 +12897,10 @@ function computeTableLayout(
 } {
   const { scale } = state;
   const contentWPt1 = contentWPx / scale;
-  // Body tables have a stable source identity and consume the same retained
-  // acquisition used by pagination. Header/footer tables do not yet have that
-  // story-level owner; they intentionally fall through to the B1 legacy
-  // calculation below until header/footer acquisition migrates.
-  if (state.retainedTableAcquisition && bodySourceIndexFor(table) !== undefined) {
-    const retained = computeTablePtLayout(state, table, contentWPt1);
+  // Body occurrences pass their source index explicitly. Header/footer tables
+  // have no body occurrence owner and retain the B1 story calculation below.
+  if (state.retainedTableAcquisition && sourceIndex !== undefined) {
+    const retained = computeTablePtLayout(state, table, contentWPt1, sourceIndex);
     const colWidths = retained.colWidthsPt.map((width) => width * scale);
     const rowHeights = retained.rowHeightsPt.map((height) => height * scale);
     return {

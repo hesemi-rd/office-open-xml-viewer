@@ -213,6 +213,59 @@ describe('retained table pagination contracts', () => {
     expect(source).not.toHaveProperty('tableRowHeightsPt');
   });
 
+  it('assigns a reused table the source path of its current document occurrence', () => {
+    const source = table([row([textCell('reused')])], [120]);
+    const firstModel = documentModel([source as unknown as BodyElement], 100);
+    const secondModel = documentModel([
+      paragraph('before') as unknown as BodyElement,
+      source as unknown as BodyElement,
+    ], 100);
+
+    const [first] = retainedTopLevelTables(paginateDocument(firstModel));
+    const [second] = retainedTopLevelTables(paginateDocument(secondModel));
+
+    expect(first?.source.path[0]).toBe(0);
+    expect(second?.source.path[0]).toBe(1);
+    expect(second?.rows[0]?.cells[0]?.blocks[0]?.layout.source.path[0]).toBe(1);
+  });
+
+  it('keeps repeated table occurrences distinct across unequal body columns', () => {
+    const source = table(
+      [row([textCell('repeated')], { rowHeight: 30, rowHeightRule: 'exact' })],
+      [180],
+      { widthPct: 5000 },
+    );
+    const model = documentModel([
+      source as unknown as BodyElement,
+      { type: 'columnBreak' } as BodyElement,
+      source as unknown as BodyElement,
+    ], 100, 220);
+    model.section = {
+      ...model.section,
+      columns: {
+        count: 2,
+        spacePt: 20,
+        equalWidth: false,
+        sep: false,
+        cols: [
+          { widthPt: 120, spacePt: 20 },
+          { widthPt: 60, spacePt: 0 },
+        ],
+      },
+    } as SectionProps;
+
+    const pages = paginateDocument(model);
+    const elements = pages.flatMap((page) => page).filter((element) => element.type === 'table');
+    const placements = elements.map((element) => bodyFragmentFor(element));
+
+    expect(placements).toHaveLength(2);
+    expect(placements.map((placed) => placed?.fragment.source.path[0])).toEqual([0, 2]);
+    expect(placements.map((placed) => placed?.columnIndex)).toEqual([0, 1]);
+    expect(placements.map((placed) => placed?.widthPt)).toEqual([120, 60]);
+    expect(placements[0]?.fragment).not.toBe(placements[1]?.fragment);
+    expect(placements[0]?.fragment.source.path).not.toEqual(placements[1]?.fragment.source.path);
+  });
+
   it('resolves page-local outer border ink for every auto-height slice', () => {
     const outer = singleBorder(4);
     const inside = singleBorder(1);
