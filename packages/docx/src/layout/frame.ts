@@ -1,15 +1,12 @@
 import type { BodyElement, DocParagraph, FramePr } from '../types.js';
 import type { ParagraphLayoutContext } from '../layout-context.js';
-import { buildSegments, layoutLines } from '../line-layout.js';
 import type {
   ParagraphMeasurementEnvironment,
   TextMeasurer,
 } from '../paragraph-measure.js';
 import { stableFingerprint } from './fingerprint.js';
-import {
-  numberingMarkerLogicalInterval,
-  type NumberingMarkerGeometry,
-} from './numbering-marker.js';
+import type { NumberingMarkerGeometry } from './numbering-marker.js';
+import { measureParagraphIntrinsicWidths } from './intrinsic-width.js';
 import {
   resolveParagraphBorderEdges,
   type ParagraphBorderEdges,
@@ -45,71 +42,14 @@ export function measureParagraphIntrinsicWidth(
   environment: ParagraphMeasurementEnvironment,
   numbering?: NumberingMarkerGeometry,
 ): number {
-  if (!Number.isFinite(maximumWidthPt) || maximumWidthPt < 0) {
-    throw new RangeError('maximumWidthPt must be finite and non-negative');
-  }
-  if (maximumWidthPt === 0) return 0;
-  const paragraphWidthPt = Math.max(
-    1,
-    maximumWidthPt - context.physicalIndentLeftPt - context.physicalIndentRightPt,
-  );
-  const segments = buildSegments(paragraph.runs, environment);
-  if (segments.length === 0 && !numbering) return 0;
-  const lines = segments.length === 0 ? [] : layoutLines(
-    measurer.context,
-    segments,
-    paragraphWidthPt,
-    context.firstIndentPt,
-    1,
-    [...context.tabStops],
-    undefined,
-    measurer.fontFamilyClasses as Record<string, string>,
-    context.physicalIndentLeftPt,
-    context.kinsoku,
-    context.characterGrid.active ? context.characterGrid.deltaPt : 0,
-    context.defaultTabPt,
-    paragraphWidthPt + context.physicalIndentRightPt,
-    context.baseRtl,
-    context.isJustified,
-    context.stretchLastLine,
-    undefined,
-    'intrinsic',
-  );
-  const leadingIndentPt = context.baseRtl
-    ? context.physicalIndentRightPt
-    : context.physicalIndentLeftPt;
-  const oppositeIndentPt = context.baseRtl
-    ? context.physicalIndentLeftPt
-    : context.physicalIndentRightPt;
-  let minimumLeftPt = 0;
-  let maximumRightPt = 0;
-  lines.forEach((line, index) => {
-    const lineLeftPt = leadingIndentPt
-      + (index === 0 ? context.firstIndentPt : 0)
-      + line.xOffset;
-    const lineWidthPt = line.segments.reduce(
-      (widthPt, segment) => widthPt + segment.measuredWidth,
-      0,
-    );
-    minimumLeftPt = Math.min(minimumLeftPt, lineLeftPt);
-    maximumRightPt = Math.max(maximumRightPt, lineLeftPt + lineWidthPt);
-  });
-  const bodyNaturalWidthPt = maximumRightPt - minimumLeftPt + oppositeIndentPt;
-  // The marker is not part of the run segments. Its final shaped/picture
-  // geometry therefore has to participate explicitly in the same logical
-  // leading-edge coordinate system used by retained marker placement.
-  const markerInterval = numbering ? numberingMarkerLogicalInterval({
-    leadingIndentPt,
-    authoredFirstIndentPt: paragraph.indentFirst,
-    markerShiftPt: numbering.markerShiftPt,
-    markerWidthPt: numbering.markerWidthPt,
-  }) : undefined;
-  const naturalWidthPt = numbering
-    ? Math.max(maximumRightPt, markerInterval!.endPt)
-      - Math.min(minimumLeftPt, markerInterval!.startPt)
-      + oppositeIndentPt
-    : bodyNaturalWidthPt;
-  return Math.min(maximumWidthPt, naturalWidthPt);
+  return measureParagraphIntrinsicWidths(
+    paragraph,
+    context,
+    maximumWidthPt,
+    measurer,
+    environment,
+    numbering,
+  ).maxWidthPt;
 }
 
 /**

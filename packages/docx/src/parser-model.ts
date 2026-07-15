@@ -11,11 +11,18 @@ import type {
   LineNumbering,
   ChartRun,
   ShapeRun,
+  DocTable,
+  TableBorders,
   TextPath,
 } from './types.js';
 import type {
   NumberingMarkerShapeInput,
   SourceRef,
+  TableColumnLayoutInput,
+  TableFormatInput,
+  TablePreferredWidthConstraint,
+  TableRowExceptionInput,
+  TableRowHeightInput,
   VmlTextPathAcquisitionInput,
 } from './layout/types.js';
 import type { MathOccurrence } from './layout/resources.js';
@@ -34,6 +41,7 @@ import {
   normalizeTextBoxInput,
   type NormalizedTextBoxParagraphInput,
 } from './layout/textbox-input.js';
+import { tableCellHorizontalSpacingInsets } from './layout/table-columns.js';
 
 export interface InternalRunFontSlots {
   readonly direct: TextFontSlots;
@@ -129,6 +137,515 @@ const sectionPlacementInputsByBody = new WeakMap<
   object,
   WeakMap<object, DocumentSectionPlacementInputs>
 >();
+
+/** Lexical CT_TblWidth facts. Element absence is represented by the owning
+ * nullable field; null attributes retain malformed/partial authored OOXML. */
+export interface TableWidthAcquisitionWire {
+  readonly kind: string | null;
+  readonly value: string | null;
+}
+
+export interface TableLayoutKindAcquisitionWire {
+  readonly kind: string | null;
+}
+
+export interface TableMarginAcquisitionWire {
+  readonly top?: TableWidthAcquisitionWire | null;
+  readonly bottom?: TableWidthAcquisitionWire | null;
+  readonly start?: TableWidthAcquisitionWire | null;
+  readonly end?: TableWidthAcquisitionWire | null;
+  readonly left?: TableWidthAcquisitionWire | null;
+  readonly right?: TableWidthAcquisitionWire | null;
+}
+
+export interface TableLayoutAcquisitionWire {
+  readonly effectiveStyleId: string | null;
+  readonly grid: {
+    readonly authored: boolean;
+    readonly columns: readonly { readonly width: string | null }[];
+    readonly requiredColumnCount: number;
+  };
+  readonly preferredWidth: TableWidthAcquisitionWire | null;
+  readonly layout: TableLayoutKindAcquisitionWire | null;
+  readonly cellSpacing: TableWidthAcquisitionWire | null;
+  readonly cellMargins?: TableMarginAcquisitionWire | null;
+}
+
+export interface TableRowHeightAcquisitionWire {
+  readonly value: string | null;
+  readonly rule: string;
+  readonly ruleAuthored: boolean;
+}
+
+export interface TablePropertyExceptionAcquisitionWire {
+  readonly preferredWidth: TableWidthAcquisitionWire | null;
+  readonly layout: TableLayoutKindAcquisitionWire | null;
+  readonly justification: string | null;
+  readonly indent: TableWidthAcquisitionWire | null;
+  readonly borders: TableBorders | null;
+  readonly cellMargins: TableMarginAcquisitionWire | null;
+  readonly cellSpacing: TableWidthAcquisitionWire | null;
+}
+
+export interface TableRowLayoutAcquisitionWire {
+  readonly height: TableRowHeightAcquisitionWire | null;
+  readonly justification: string | null;
+  readonly beforeWidth: TableWidthAcquisitionWire | null;
+  readonly afterWidth: TableWidthAcquisitionWire | null;
+  readonly cellSpacing: TableWidthAcquisitionWire | null;
+  readonly styleCellSpacing?: TableWidthAcquisitionWire | null;
+  readonly styleCellMargins?: TableMarginAcquisitionWire | null;
+  readonly exception: TablePropertyExceptionAcquisitionWire | null;
+}
+
+export interface TableCellLayoutAcquisitionWire {
+  readonly preferredWidth: TableWidthAcquisitionWire | null;
+  readonly margins: TableMarginAcquisitionWire | null;
+}
+
+interface InternalTable extends DocTable {
+  readonly __tableLayout?: TableLayoutAcquisitionWire;
+}
+
+type InternalTableRow = DocTable['rows'][number] & {
+  readonly __tableRowLayout?: TableRowLayoutAcquisitionWire;
+};
+
+type InternalTableCell = DocTable['rows'][number]['cells'][number] & {
+  readonly __tableCellLayout?: TableCellLayoutAcquisitionWire;
+};
+
+export interface TableAcquisitionInput {
+  readonly table: TableLayoutAcquisitionWire | null;
+  readonly rows: readonly {
+    readonly row: TableRowLayoutAcquisitionWire | null;
+    readonly cells: readonly (TableCellLayoutAcquisitionWire | null)[];
+  }[];
+}
+
+const tableAcquisitionInputs = new WeakMap<object, TableAcquisitionInput>();
+const tableFormatInputs = new WeakMap<object, TableFormatInput>();
+
+/** Snapshot serde-only table facts once at the parser/model boundary. Layout
+ * receives only clone-safe immutable data, while hand-built public `DocTable`
+ * values remain supported through aligned null entries and their public fields. */
+export function tableAcquisitionInput(table: Readonly<DocTable>): TableAcquisitionInput {
+  const cached = tableAcquisitionInputs.get(table);
+  if (cached) return cached;
+  const internal = table as Readonly<InternalTable>;
+  const input = snapshotPlainData({
+    table: internal.__tableLayout ?? null,
+    rows: table.rows.map((row) => {
+      const internalRow = row as Readonly<InternalTableRow>;
+      return {
+        row: internalRow.__tableRowLayout ?? null,
+        cells: row.cells.map(
+          (cell) => (cell as Readonly<InternalTableCell>).__tableCellLayout ?? null,
+        ),
+      };
+    }),
+  }, 'DOCX table acquisition input') as TableAcquisitionInput;
+  tableAcquisitionInputs.set(table, input);
+  return input;
+}
+
+type TableLexicalWidth = Readonly<{
+  kind: string | null;
+  value: string | null;
+}>;
+
+function finiteTableLexicalNumber(value: string | null, allowPercent: boolean): number | null {
+  if (value === null) return null;
+  const lexical = value.trim();
+  const numeric = allowPercent && lexical.endsWith('%') ? lexical.slice(0, -1) : lexical;
+  if (numeric.length === 0) return null;
+  const parsed = Number(numeric);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function effectiveTableWidthKind(width: TableLexicalWidth): string {
+  // ECMA-376 §17.4.87 makes the measurement syntax authoritative when it
+  // contradicts @type. Keeping this resolution here prevents each consumer
+  // from assigning different semantics to the same CT_TblWidth value.
+  return width.value?.trim().endsWith('%') ? 'pct' : (width.kind ?? 'dxa');
+}
+
+function tableWidthConstraintFromLexical(
+  width: TableLexicalWidth | null | undefined,
+): TablePreferredWidthConstraint | null {
+  if (!width) return null;
+  const lexicalValue = width.value?.trim() ?? '';
+  // §17.4.87: omitted type defaults to dxa and omitted w defaults to zero.
+  const kind = effectiveTableWidthKind(width);
+  if (kind === 'dxa') {
+    const value = finiteTableLexicalNumber(width.value ?? '0', false);
+    return value === null ? null : { kind: 'dxa', value: value / 20 };
+  }
+  if (kind !== 'pct') return null;
+  const value = finiteTableLexicalNumber(width.value ?? '0', true);
+  if (value === null) return null;
+  return {
+    kind: 'pct',
+    value: lexicalValue.endsWith('%') ? value / 100 : value / 5000,
+  };
+}
+
+function tableDxaPtFromLexical(width: TableLexicalWidth | null | undefined): number | null {
+  const constraint = tableWidthConstraintFromLexical(width);
+  return constraint?.kind === 'dxa' ? constraint.value : null;
+}
+
+function tableTwipsValuePt(value: string | null | undefined): number | null {
+  const parsed = finiteTableLexicalNumber(value ?? null, false);
+  return parsed === null ? null : parsed / 20;
+}
+
+function normalizedTableHeightRule(rule: string): TableRowHeightInput['rule'] {
+  if (rule === 'exact' || rule === 'atLeast') return rule;
+  return 'auto';
+}
+
+function privateTableRowHeight(height: TableRowHeightAcquisitionWire): TableRowHeightInput {
+  // ECMA-376 §17.4.80 defaults omitted hRule to auto, but Word intentionally
+  // differs: [MS-OI29500] 2.1.180 treats an omitted hRule as atLeast. Authored
+  // presence is therefore semantic input, not a parser implementation detail.
+  return {
+    rule: height.ruleAuthored ? normalizedTableHeightRule(height.rule) : 'atLeast',
+    valuePt: tableTwipsValuePt(height.value),
+  };
+}
+
+function publicTableRowHeight(row: Readonly<DocTable['rows'][number]>): TableRowHeightInput | null {
+  if (row.rowHeight === null || !Number.isFinite(row.rowHeight)) return null;
+  // The stable public model predates authored-presence retention. Keep its
+  // compatibility fallback at the model boundary, never in the layout solver.
+  const normalized = normalizedTableHeightRule(row.rowHeightRule);
+  return {
+    rule: normalized === 'auto' ? 'atLeast' : normalized,
+    valuePt: row.rowHeight,
+  };
+}
+
+function wordTableCellSpacingPt(
+  ...widths: readonly (TableWidthAcquisitionWire | null | undefined)[]
+): number | null {
+  for (const width of widths) {
+    if (!width) continue;
+    // Word resolves authored pct/auto spacing to zero at that precedence scope
+    // instead of exposing a lower scope ([MS-OI29500] 2.1.152–154).
+    const kind = effectiveTableWidthKind(width);
+    if (kind === 'pct' || kind === 'auto' || kind === 'nil') return 0;
+    const valuePt = tableDxaPtFromLexical(width);
+    if (valuePt !== null) return valuePt;
+  }
+  return null;
+}
+
+type TableMarginScope = 'cell' | 'exception' | 'table' | 'style';
+type TableMarginEdge = 'top' | 'bottom' | 'start' | 'end';
+
+function wordTableMarginPt(
+  width: TableWidthAcquisitionWire | null | undefined,
+  scope: TableMarginScope,
+  edge: TableMarginEdge,
+): number | null {
+  if (!width) return null;
+  const kind = effectiveTableWidthKind(width);
+  if (kind === 'dxa') return tableTwipsValuePt(width.value ?? '0');
+  // Individual-cell margin exceptions ignore pct/auto/nil. The default
+  // leading/trailing table margin differs in Word: pct/auto becomes zero
+  // ([MS-OI29500] 2.1.125/.146), while nil keeps ST_TblWidth's zero meaning.
+  if (scope === 'cell' || scope === 'exception') return null;
+  if (edge === 'start' || edge === 'end') {
+    if (kind === 'pct' || kind === 'auto' || kind === 'nil') return 0;
+  }
+  // Word ignores nil top/bottom margin elements ([MS-OI29500] 2.1.116/.177,
+  // also referenced by the corresponding default-margin sections).
+  return null;
+}
+
+function effectiveTableCellMargins(
+  table: Readonly<DocTable>,
+  cell: Readonly<DocTable['rows'][number]['cells'][number]>,
+  hasPrivateCellWire: boolean,
+  cellMargins: TableMarginAcquisitionWire | null | undefined,
+  exceptionMargins: TableMarginAcquisitionWire | null | undefined,
+  tableMargins: TableMarginAcquisitionWire | null | undefined,
+  styleMargins: TableMarginAcquisitionWire | null | undefined,
+): TableFormatInput['rows'][number]['cells'][number]['marginsPt'] {
+  const bidi = table.bidiVisual === true;
+  const physical = (
+    margins: TableMarginAcquisitionWire | null | undefined,
+    edge: 'left' | 'right',
+  ): Readonly<{ width: TableWidthAcquisitionWire | null | undefined; edge: 'start' | 'end' }> => {
+    const logicalEdge = edge === 'left'
+      ? (bidi ? 'end' : 'start')
+      : (bidi ? 'start' : 'end');
+    return { width: margins?.[edge] ?? margins?.[logicalEdge], edge: logicalEdge };
+  };
+  const firstMargin = (
+    edge: TableMarginEdge,
+    ...candidates: readonly Readonly<{
+      width: TableWidthAcquisitionWire | null | undefined;
+      scope: TableMarginScope;
+      edge?: TableMarginEdge;
+    }>[]
+  ): number | null => {
+    for (const candidate of candidates) {
+      const value = wordTableMarginPt(candidate.width, candidate.scope, candidate.edge ?? edge);
+      if (value !== null) return value;
+    }
+    return null;
+  };
+  const cellLeft = physical(cellMargins, 'left');
+  const exceptionLeft = physical(exceptionMargins, 'left');
+  const tableLeft = physical(tableMargins, 'left');
+  const styleLeft = physical(styleMargins, 'left');
+  const cellRight = physical(cellMargins, 'right');
+  const exceptionRight = physical(exceptionMargins, 'right');
+  const tableRight = physical(tableMargins, 'right');
+  const styleRight = physical(styleMargins, 'right');
+  const publicCellMargin = (value: number | null | undefined): number | null => (
+    !hasPrivateCellWire && value != null && Number.isFinite(value) ? value : null
+  );
+  return {
+    top: firstMargin('top',
+      { width: cellMargins?.top, scope: 'cell' },
+    ) ?? publicCellMargin(cell.marginTop) ?? firstMargin('top',
+      { width: exceptionMargins?.top, scope: 'exception' },
+      { width: tableMargins?.top, scope: 'table' },
+      { width: styleMargins?.top, scope: 'style' },
+    ) ?? table.cellMarginTop,
+    bottom: firstMargin('bottom',
+      { width: cellMargins?.bottom, scope: 'cell' },
+    ) ?? publicCellMargin(cell.marginBottom) ?? firstMargin('bottom',
+      { width: exceptionMargins?.bottom, scope: 'exception' },
+      { width: tableMargins?.bottom, scope: 'table' },
+      { width: styleMargins?.bottom, scope: 'style' },
+    ) ?? table.cellMarginBottom,
+    left: firstMargin(cellLeft.edge,
+      { ...cellLeft, scope: 'cell' },
+    ) ?? publicCellMargin(cell.marginLeft) ?? firstMargin(exceptionLeft.edge,
+      { ...exceptionLeft, scope: 'exception' },
+      { ...tableLeft, scope: 'table' },
+      { ...styleLeft, scope: 'style' },
+    ) ?? table.cellMarginLeft,
+    right: firstMargin(cellRight.edge,
+      { ...cellRight, scope: 'cell' },
+    ) ?? publicCellMargin(cell.marginRight) ?? firstMargin(exceptionRight.edge,
+      { ...exceptionRight, scope: 'exception' },
+      { ...tableRight, scope: 'table' },
+      { ...styleRight, scope: 'style' },
+    ) ?? table.cellMarginRight,
+  };
+}
+
+function normalizedTableRowException(
+  exception: TablePropertyExceptionAcquisitionWire | null | undefined,
+): TableRowExceptionInput | null {
+  if (!exception) return null;
+  const indentKind = exception.indent ? effectiveTableWidthKind(exception.indent) : null;
+  return {
+    preferredWidthAuthored: exception.preferredWidth != null,
+    preferredWidth: tableWidthConstraintFromLexical(exception.preferredWidth),
+    layout: exception.layout?.kind === 'fixed' || exception.layout?.kind === 'autofit'
+      ? exception.layout.kind
+      : null,
+    justification: exception.justification,
+    indentAuthored: exception.indent != null && (indentKind === 'dxa' || indentKind === 'nil'),
+    indentPt: indentKind === 'nil'
+      ? 0
+      : tableDxaPtFromLexical(exception.indent),
+    borders: exception.borders,
+  };
+}
+
+/** Resolve parser-private and public-compatibility table formatting once. */
+export function tableFormatInput(table: Readonly<DocTable>): TableFormatInput {
+  const cached = tableFormatInputs.get(table);
+  if (cached) return cached;
+  const acquisition = tableAcquisitionInput(table);
+  const rows = table.rows.map((row, rowIndex) => {
+    const rowWire = acquisition.rows[rowIndex]?.row ?? null;
+    const exception = rowWire?.exception ?? null;
+    return {
+      height: rowWire?.height ? privateTableRowHeight(rowWire.height) : publicTableRowHeight(row),
+      cellSpacingPt: wordTableCellSpacingPt(
+        rowWire?.cellSpacing,
+        exception?.cellSpacing,
+        acquisition.table?.cellSpacing,
+        rowWire?.styleCellSpacing,
+      ) ?? 0,
+      justification: rowWire?.justification ?? exception?.justification ?? null,
+      exception: normalizedTableRowException(exception),
+      cells: row.cells.map((cell, cellIndex) => ({
+        marginsPt: effectiveTableCellMargins(
+          table,
+          cell,
+          acquisition.rows[rowIndex]?.cells[cellIndex] !== null
+            && acquisition.rows[rowIndex]?.cells[cellIndex] !== undefined,
+          acquisition.rows[rowIndex]?.cells[cellIndex]?.margins,
+          exception?.cellMargins,
+          acquisition.table?.cellMargins,
+          rowWire?.styleCellMargins,
+        ),
+      })),
+    };
+  });
+  const input = snapshotPlainData({
+    rows,
+    // Word applies selected first-row tblPrEx values table-wide
+    // ([MS-OI29500] 2.1.156/.158/.167).
+    firstRowException: rows[0]?.exception ?? null,
+  }, 'DOCX table format input') as TableFormatInput;
+  tableFormatInputs.set(table, input);
+  return input;
+}
+
+export interface CellIntrinsicWidths {
+  readonly minWidthPt: number;
+  readonly maxWidthPt: number;
+}
+
+function publicTableCellConstraint(
+  cell: DocTable['rows'][number]['cells'][number],
+): TablePreferredWidthConstraint | null {
+  if (cell.widthPt != null) return { kind: 'dxa', value: cell.widthPt };
+  if (cell.widthPct != null) return { kind: 'pct', value: cell.widthPct / 5000 };
+  return null;
+}
+
+function tablePreferredWidthPt(
+  table: DocTable,
+  input: TableAcquisitionInput,
+  availableWidthPt: number,
+  firstRowException: TableRowExceptionInput | null,
+): number | null {
+  const exception = firstRowException?.preferredWidth ?? null;
+  if (firstRowException?.preferredWidthAuthored) {
+    // [MS-OI29500] 2.1.167 applies a first-row tblPrEx/tblW to the whole
+    // table. Authored auto/nil/zero values therefore shadow the parent tblW
+    // without becoming an invented physical length.
+    if (exception?.kind === 'dxa') return exception.value > 0 ? exception.value : null;
+    if (exception?.kind === 'pct') {
+      return exception.value > 0 ? exception.value * availableWidthPt : null;
+    }
+    return null;
+  }
+  const lexical = tableWidthConstraintFromLexical(input.table?.preferredWidth);
+  if (lexical?.kind === 'dxa') return lexical.value > 0 ? lexical.value : null;
+  if (lexical?.kind === 'pct') return lexical.value > 0 ? lexical.value * availableWidthPt : null;
+  if (table.widthPt != null && table.widthPt > 0) return table.widthPt;
+  if (table.widthPct != null && table.widthPct > 0) return table.widthPct / 5000 * availableWidthPt;
+  return null;
+}
+
+function tableGridWidthsPt(table: DocTable, input: TableAcquisitionInput): number[] {
+  const grid = input.table?.grid;
+  if (!grid) return table.colWidths.map((width) => Math.max(0, width));
+  const count = Math.max(grid.requiredColumnCount, grid.columns.length);
+  return Array.from({ length: count }, (_unused, column) => {
+    const points = tableTwipsValuePt(grid.columns[column]?.width ?? null);
+    return points === null ? 0 : Math.max(0, points);
+  });
+}
+
+function skippedTableWidthConstraint(
+  width: TableLexicalWidth | null | undefined,
+  availableWidthPt: number,
+): TablePreferredWidthConstraint | null {
+  const constraint = tableWidthConstraintFromLexical(width);
+  if (constraint?.kind !== 'pct') return constraint;
+  return { kind: 'dxa', value: Math.max(0, constraint.value) * Math.max(0, availableWidthPt) };
+}
+
+/** Project normalized parser/model facts into the pure §17.18.87 solver contract. */
+export function tableColumnLayoutInput(
+  table: Readonly<DocTable>,
+  availableWidthPt: number,
+  intrinsicWidths: (cell: Readonly<DocTable['rows'][number]['cells'][number]>) => CellIntrinsicWidths,
+  maximumWidthPt: number = availableWidthPt,
+): TableColumnLayoutInput {
+  const acquisition = tableAcquisitionInput(table);
+  const format = tableFormatInput(table);
+  const gridWidthsPt = tableGridWidthsPt(table as DocTable, acquisition);
+  const layoutKind = format.firstRowException?.layout === 'fixed'
+    ? 'fixed'
+    : (acquisition.table?.layout?.kind ?? table.layout);
+  const authoredGridCount = acquisition.table?.grid.authored
+    ? acquisition.table.grid.columns.length
+    : null;
+  const normalizedBeforeSpans = table.rows.map((row) => {
+    const requested = Math.max(0, row.gridBefore ?? 0);
+    return authoredGridCount !== null && requested > authoredGridCount ? 0 : requested;
+  });
+  const contentGridCount = Math.max(
+    authoredGridCount ?? 0,
+    acquisition.table?.grid.requiredColumnCount ?? 0,
+    ...table.rows.map((row, rowIndex) => (
+      (normalizedBeforeSpans[rowIndex] ?? 0)
+      + row.cells.reduce((total, cell) => total + Math.max(1, cell.colSpan), 0)
+    )),
+  );
+  return {
+    layout: layoutKind === 'fixed' ? 'fixed' : 'autofit',
+    availableWidthPt: Math.max(0, maximumWidthPt),
+    gridWidthsPt,
+    tablePreferredWidthPt: tablePreferredWidthPt(
+      table as DocTable,
+      acquisition,
+      availableWidthPt,
+      format.firstRowException,
+    ),
+    rows: table.rows.map((row, rowIndex) => {
+      const rowInput = acquisition.rows[rowIndex];
+      const beforeSpan = normalizedBeforeSpans[rowIndex] ?? 0;
+      const requestedAfterSpan = Math.max(0, row.gridAfter ?? 0);
+      const occupiedColumns = beforeSpan
+        + row.cells.reduce((total, cell) => total + Math.max(1, cell.colSpan), 0);
+      const afterSpan = authoredGridCount !== null
+        && occupiedColumns + requestedAfterSpan > contentGridCount
+        ? 0
+        : requestedAfterSpan;
+      let columnStart = beforeSpan;
+      return {
+        before: beforeSpan > 0 ? {
+          columnSpan: beforeSpan,
+          preferredWidth: skippedTableWidthConstraint(rowInput?.row?.beforeWidth, availableWidthPt),
+        } : null,
+        after: afterSpan > 0 ? {
+          columnSpan: afterSpan,
+          preferredWidth: skippedTableWidthConstraint(rowInput?.row?.afterWidth, availableWidthPt),
+        } : null,
+        cells: row.cells.map((cell, cellIndex) => {
+          const wire = rowInput?.cells[cellIndex] ?? null;
+          const span = Math.max(1, cell.colSpan);
+          const intrinsic = layoutKind === 'fixed'
+            ? { minWidthPt: 0, maxWidthPt: 0 }
+            : intrinsicWidths(cell);
+          const spacingInsets = tableCellHorizontalSpacingInsets(
+            format.rows[rowIndex]?.cellSpacingPt ?? 0,
+            columnStart,
+            span,
+            gridWidthsPt.length,
+          );
+          const horizontalSpacingPt = spacingInsets.startPt + spacingInsets.endPt;
+          const result = {
+            columnStart,
+            columnSpan: span,
+            preferredWidth: tableWidthConstraintFromLexical(wire?.preferredWidth)
+              ?? publicTableCellConstraint(cell),
+            minContentWidthPt: Math.max(0, intrinsic.minWidthPt) + horizontalSpacingPt,
+            maxContentWidthPt:
+              Math.max(intrinsic.minWidthPt, intrinsic.maxWidthPt) + horizontalSpacingPt,
+          };
+          columnStart += span;
+          return result;
+        }),
+      };
+    }),
+  };
+}
 
 function setBodySectionPlacementInputs(
   body: readonly BodyElement[],

@@ -132,7 +132,14 @@ import {
   type StoryContext,
 } from './layout-context.js';
 import { canvasFontString, justifiedPiecePositions } from '@silurus/ooxml-core';
-import type { LayoutServices, Matrix2DData, ParagraphLayout, SourceRef, WrapExclusion } from './layout/types.js';
+import type {
+  LayoutServices,
+  Matrix2DData,
+  ParagraphLayout,
+  SourceRef,
+  TableLayout,
+  WrapExclusion,
+} from './layout/types.js';
 import type { DocumentLayout as RetainedDocumentLayout } from './layout/types.js';
 import { normalizeLayoutOptions } from './layout/options.js';
 import type { LayoutOptions } from './layout/options.js';
@@ -149,6 +156,7 @@ import {
 } from './paint/canvas-page.js';
 import { canonicalCanvasPaintResourceHandlers } from './paint/canonical-resource-handlers.js';
 import { paintPlacedParagraphLayout, paintPlacedTextBoxLayout, paintTextBoxLayout } from './paint/canvas-text.js';
+import { paintPlacedTableLayout } from './paint/canvas-table.js';
 import { paintDrawingLayout } from './paint/canvas-drawing.js';
 import type { CanvasPaintResourcePainter } from './paint/types.js';
 import { createDocumentPaintResourceRegistry } from './layout/production-paint-resources.js';
@@ -213,6 +221,12 @@ import {
   type NumberingMarkerTextLayout,
 } from './layout/numbering-marker.js';
 import { paintNumberingMarkerText } from './paint/numbering-marker.js';
+import { tableColumnLayoutInput, tableFormatInput } from './parser-model.js';
+import { resolveTableColumnWidths } from './layout/table-columns.js';
+import {
+  measureParagraphIntrinsicWidths,
+  measureTableCellIntrinsicWidths,
+} from './layout/intrinsic-width.js';
 
 
 export { computeColumns };
@@ -280,6 +294,10 @@ import {
 } from './layout-fragments.js';
 import { buildTableFragment } from './table-fragments.js';
 import { acquireTableCellBlocks } from './layout/table-cell-blocks.js';
+import {
+  acquireRetainedTableLayout,
+  type RetainedTableAcquisitionDependencies,
+} from './layout/table-acquisition.js';
 import { paragraphGapAdjustment, paragraphGapPt } from './layout/paragraph-spacing.js';
 import { imageResourceKey } from './layout/source-key.js';
 import {
@@ -732,7 +750,12 @@ export interface RenderState extends DeferredFrontPaintState {
   /** Per-render opaque retained resource session adapter. */
   retainedResourcePainter?: CanvasPaintResourcePainter;
   /** Renderer-owned retained table adapter, threaded through nested cell states. */
-  retainedTablePainter?: (fragment: TableFragment, state: RenderState) => void;
+  retainedTablePainter?: (fragment: TableFragment | TableLayout, state: RenderState) => void;
+  /** Renderer authorities injected into the pure recursive table acquisition. */
+  retainedTableAcquisition?: RetainedTableAcquisitionDependencies<RenderState>;
+  /** Final-width retained tables keyed by stable body source identity until the
+   * existing attachment seam consumes them. */
+  retainedTablesBySourceIndex?: Map<number, TableLayout>;
   /** ECMA-376 §17.15.1.58–.60 — resolved Japanese line-breaking rules
    *  (kinsoku enabled flag + line-start/line-end forbidden character sets).
    *  Default is the application's Japanese kinsoku table with kinsoku ON. */
@@ -1999,7 +2022,28 @@ async function renderDocumentToCanvasLeased(
     resolvedLocalFonts,
     layoutServices,
     retainedResourcePainter,
-    retainedTablePainter: renderTableFragment,
+    retainedTablePainter: (fragment, state) => {
+      if (!('flowBounds' in fragment)) {
+        renderTableFragment(fragment, state);
+        return;
+      }
+      const resources = state.retainedResourcePainter;
+      if (!resources) throw new Error('Retained table paint requires a resource painter');
+      paintPlacedTableLayout(fragment, {
+        xPt: state.contentX / state.scale + fragment.flowBounds.xPt,
+        yPt: state.y / state.scale + fragment.flowBounds.yPt,
+      }, {
+        ctx: state.ctx,
+        scale: state.scale,
+        dpr: state.dpr,
+        defaultTextColor: state.defaultColor,
+        showTrackChanges: state.showTrackChanges,
+        resources,
+        pointToCss: state.pointToCss,
+        onTextRun: state.onTextRun,
+      });
+      state.y += fragment.advancePt * state.scale;
+    },
     kinsoku,
     // §17.15.1.25 — automatic tab interval, resolved once and threaded like
     // `kinsoku` so the measure and draw passes agree.
@@ -4289,8 +4333,7 @@ export function computePages(
         colWidthsPt: tblColWidthsPt,
         rowContentHeightsPt: measuredRowContentHs,
         rowHeightsPt: measuredRowHs,
-      } =
-        computeTablePtLayout(measureState, tbl, tblContentWPt);
+      } = computeTablePtLayout(measureState, tbl, tblContentWPt);
       const tblWidthPt = tblColWidthsPt.reduce((sum, width) => sum + width, 0);
 
       // §17.4.57: a floating table reserves a page-scoped exclusion band for
@@ -4691,8 +4734,13 @@ function paginateWithHeaderFooterReserve(
       target: WeakMap<object, Map<number, PageFieldAcquisitionContext>>,
     ): void => {
       if (fragment.kind === 'table') {
-        fragment.rows.forEach((row) => row.cells.forEach((cell) =>
-          cell.blocks.forEach((block) => retainPageFieldOccurrences(block, context, target))));
+        if ('flowBounds' in fragment) {
+          fragment.rows.forEach((row) => row.cells.forEach((cell) =>
+            cell.blocks.forEach((block) => retainPageFieldOccurrences(block.layout, context, target))));
+        } else {
+          fragment.rows.forEach((row) => row.cells.forEach((cell) =>
+            cell.blocks.forEach((block) => retainPageFieldOccurrences(block, context, target))));
+        }
         return;
       }
       const paragraph = sourceParagraphAt(fragment.source.path);
@@ -5289,6 +5337,70 @@ function buildMeasureState(
     fontFamilyClasses,
     resolvedLocalFonts,
     layoutServices: effectiveLayoutServices,
+    retainedTableAcquisition: {
+      layoutServices: (state) => state.layoutServices,
+      tableFormat: tableFormatInput,
+      resolveColumns: resolveColumnWidths,
+      createCellState: (state, contentWidthPt, cell) => ({
+        ...withTableCellStory(state),
+        contentX: 0,
+        contentW: contentWidthPt,
+        y: 0,
+        containerShading: cell.background ?? state.containerShading,
+        floats: [],
+        floatParaSeq: 0,
+        pageAnchorPrescanned: new Set<DocParagraph>(),
+      }),
+      acquireParagraph: (
+        cellState,
+        paragraph,
+        paragraphWidthPt,
+        paragraphPath,
+        flowDomainId,
+        paragraphBorderEdges,
+      ) => {
+        registerAnchorFloats(paragraph, cellState, cellState.y);
+        const acquiredParagraph = measureCellParagraphScale1(
+          cellState,
+          paragraph,
+          paragraphWidthPt,
+        );
+        const { measured } = acquiredParagraph;
+        const trailingExtentPt = Math.max(
+          measured.requestedSpaceAfterPt,
+          bottomBorderExtentPt(paragraph.borders),
+        );
+        const fullLineEnd = measured.markOnly ? 0 : measured.lines.length;
+        const fragment = buildParagraphFragment(
+          paragraph,
+          measured,
+          0,
+          fullLineEnd,
+          true,
+          true,
+          trailingExtentPt,
+          cellState,
+          { story: 'body', storyInstance: 'body', path: [...paragraphPath] },
+          flowDomainId,
+          paragraphBorderEdges,
+          acquiredParagraph.context,
+        );
+        if (paragraph.spaceBefore === 0) return fragment;
+        return Object.freeze({
+          ...fragment,
+          flowBounds: Object.freeze({
+            ...fragment.flowBounds,
+            heightPt: fragment.flowBounds.heightPt + paragraph.spaceBefore,
+          }),
+          advancePt: fragment.advancePt + paragraph.spaceBefore,
+          spacing: Object.freeze({ ...fragment.spacing, beforePt: paragraph.spaceBefore }),
+        });
+      },
+      advanceState: (state, advancePt) => {
+        state.y += advancePt;
+      },
+    },
+    retainedTablesBySourceIndex: new Map<number, TableLayout>(),
     currentDateMs: layoutOptions?.currentDateMs,
     kinsoku: layoutSettings.kinsoku,
     defaultTabPt: layoutSettings.defaultTabPt,
@@ -5444,6 +5556,7 @@ function buildParagraphFragment(
   sourceRef: SourceRef,
   flowDomainId = 'body',
   paragraphBorderEdges?: NonNullable<Parameters<typeof paragraphLayoutFromMeasurement>[1]['paragraphBorderEdges']>,
+  acquiredContext?: ParagraphLayoutContext,
 ): ParagraphLayout {
   const exclusions: WrapExclusion[] = state.floats.map((float, index) => ({
     id: float.imageKey || `${flowDomainId}:float:${index}`,
@@ -5468,7 +5581,7 @@ function buildParagraphFragment(
       source: sourceRef,
       flowDomainId,
       ordinaryFlow: true,
-      context: resolveStateParagraphLayoutContext(state, source),
+      context: acquiredContext ?? resolveStateParagraphLayoutContext(state, source),
       placement: measured.placement,
       measurer: { context: state.ctx, fontFamilyClasses: state.fontFamilyClasses },
       environment: paragraphMeasurementEnvironment(state),
@@ -5550,9 +5663,9 @@ function measureCellParagraphScale1(
   cellState: RenderState,
   para: DocParagraph,
   contentWPt: number,
-): MeasuredParagraph {
+): Readonly<{ measured: MeasuredParagraph; context: ParagraphLayoutContext }> {
   const paragraphContext = resolveStateParagraphLayoutContext(cellState, para);
-  return measureParagraph(
+  const measured = measureParagraph(
     para,
     paragraphContext,
     {
@@ -5571,14 +5684,11 @@ function measureCellParagraphScale1(
     },
     paragraphMeasurementEnvironment(cellState),
   );
+  return { measured, context: paragraphContext };
 }
 
-/** Side table: emitted table element -> the scale-1 content-band width its fragment
- *  was resolved at. The fragment-paint gate reuses the fragment only when this paint's
- *  band matches (mirroring the removed `tableLayoutInputs.contentWPt` stamp gate — a
- *  negative-`tblInd` table paints at the page-width budget, not the column band, so it
- *  must recompute on the legacy path). Renderer-internal; not part of the public
- *  {@link TableFragment}. */
+/** Transitional A5 paint-band authority. Retained table geometry stores its
+ * actual width separately; this map preserves the containing flow band. */
 const tableFragmentBandPt = new WeakMap<object, number>();
 
 /** Build and attach the {@link TableFragment} for one placed table (whole table or one
@@ -5605,6 +5715,28 @@ function attachTableFragment(
   const sourceIndex = bodySourceIndexFor(table);
   if (sourceIndex === undefined) {
     throw new Error('Body table source identity must be prepared before fragment acquisition');
+  }
+  const retainedLayout = placement.sourceRowIndexOf === undefined
+    && !placement.continuesFromPreviousPage
+    && !placement.continuesOnNextPage
+    ? measureState.retainedTablesBySourceIndex?.get(sourceIndex)
+    : undefined;
+  if (retainedLayout && retainedLayout.rows.length === table.rows.length) {
+    const layout = retainedLayout;
+    bodyFlowFragments.set(el, Object.freeze({
+      fragment: layout,
+      columnIndex: placement.columnIndex,
+      xPt: placement.xPt,
+      yPt: placement.yPt,
+      // A placed fragment owns its available flow band; the table's actual
+      // width remains in layout.flowBounds. This is the same invariant body
+      // paragraphs use and lets the paint guard compare one canonical value.
+      widthPt: contentWPt,
+      heightPt: layout.advancePt,
+    }));
+    bodyFlowFragments.sourceIndices.set(el, sourceIndex);
+    tableFragmentBandPt.set(el as object, contentWPt);
+    return;
   }
   const fragment = buildTableFragment({
     table,
@@ -5643,7 +5775,12 @@ function attachTableFragment(
         paragraphBorderEdges,
       ) => {
         registerAnchorFloats(paragraph, cellState, cellState.y);
-        const measured = measureCellParagraphScale1(cellState, paragraph, contentWidthPt);
+        const acquiredParagraph = measureCellParagraphScale1(
+          cellState,
+          paragraph,
+          contentWidthPt,
+        );
+        const { measured } = acquiredParagraph;
         const trailingExtentPt = Math.max(
           measured.requestedSpaceAfterPt,
           bottomBorderExtentPt(paragraph.borders),
@@ -5666,6 +5803,7 @@ function attachTableFragment(
           { story: 'body', storyInstance: 'body', path: [...sourcePath] },
           'table-cell',
           paragraphBorderEdges,
+          acquiredParagraph.context,
         );
         if (lineStart !== 0 || paragraph.spaceBefore === 0) return fragment;
         return Object.freeze({
@@ -5690,36 +5828,52 @@ function attachTableFragment(
         acquireNestedCellBlocks,
       ) => {
         const columnWidthsPt = resolveColumnWidths(inner, contentWidthPt, cellState);
-        const rowHeightsPt = resolveTableRowHeights(
+        // A nested table normally belongs to the A4 retained tree. The A5
+        // transitional row splitter is the exception: it replaces one nested
+        // table with page-local row slices and records which sides continue.
+        // Preserve that page-slice view until A5 can express continuations on
+        // TableLayout itself; treating the slice as an ordinary table here
+        // discards the continuation provenance before paint can observe it.
+        if (continuation.fromPrevious || continuation.onNext) {
+          const retainedSlice = acquireRetainedTableLayout(
+            inner,
+            columnWidthsPt,
+            contentWidthPt,
+            cellState,
+            sourcePath,
+            measureState.retainedTableAcquisition as RetainedTableAcquisitionDependencies<RenderState>,
+          );
+          return buildTableFragment({
+            table: inner,
+            columnWidthsPt,
+            rowHeightsPt: retainedSlice.rows.map((row) => row.advancePt),
+            continuesFromPreviousPage: continuation.fromPrevious,
+            continuesOnNextPage: continuation.onNext,
+            repeatedHeaderRowCount: 0,
+            buildCellBlocks: (nestedCell, nestedWidthPt, sourceRowIndex, cellIndex) =>
+              acquireNestedCellBlocks(
+                nestedCell,
+                inner,
+                nestedWidthPt,
+                cellState,
+                [...sourcePath, sourceRowIndex, cellIndex],
+              ),
+          });
+        }
+        return acquireRetainedTableLayout(
           inner,
           columnWidthsPt,
-          1,
-          (nestedCell, nestedWidthPt) =>
-            measureCellContentHeightPx(nestedCell, inner, nestedWidthPt, 1, cellState),
+          contentWidthPt,
+          cellState,
+          sourcePath,
+          measureState.retainedTableAcquisition as RetainedTableAcquisitionDependencies<RenderState>,
         );
-        return buildTableFragment({
-          table: inner,
-          columnWidthsPt,
-          rowHeightsPt,
-          continuesFromPreviousPage: continuation.fromPrevious,
-          continuesOnNextPage: continuation.onNext,
-          repeatedHeaderRowCount: 0,
-          buildCellBlocks: (nestedCell, nestedWidthPt, sourceRowIndex, cellIndex) =>
-            acquireNestedCellBlocks(
-              nestedCell,
-              inner,
-              nestedWidthPt,
-              cellState,
-              [...sourcePath, sourceRowIndex, cellIndex],
-            ),
-        });
       },
       advanceState: (cellState, advancePt) => {
         cellState.y += advancePt;
       },
     }),
   });
-  const widthPt = colWidthsPt.reduce((s, w) => s + w, 0);
   bodyFlowFragments.set(
     el,
     Object.freeze({
@@ -5727,7 +5881,7 @@ function attachTableFragment(
       columnIndex: placement.columnIndex,
       xPt: placement.xPt,
       yPt: placement.yPt,
-      widthPt,
+      widthPt: contentWPt,
       heightPt: tableFragmentHeightPt(fragment),
     }),
   );
@@ -6367,6 +6521,21 @@ function computeTablePtLayout(
   contentWPt: number,
 ): { colWidthsPt: number[]; rowContentHeightsPt: number[]; rowHeightsPt: number[] } {
   const colWidthsPt = resolveColumnWidths(table, contentWPt, state);
+  const dependencies = state.retainedTableAcquisition;
+  const sourceIndex = bodySourceIndexFor(table);
+  if (dependencies && sourceIndex !== undefined) {
+    const retained = acquireRetainedTableLayout(
+      table,
+      colWidthsPt,
+      contentWPt,
+      state,
+      [sourceIndex],
+      dependencies,
+    );
+    state.retainedTablesBySourceIndex?.set(sourceIndex, retained);
+    const rowHeightsPt = retained.rows.map((row) => row.advancePt);
+    return { colWidthsPt, rowContentHeightsPt: rowHeightsPt, rowHeightsPt };
+  }
   const rowContentHeightsPt = resolveTableRowContentHeights(table, colWidthsPt, 1, (cell, cellW) =>
     measureCellContentHeightPx(cell, table, cellW, 1, state),
   );
@@ -6379,383 +6548,97 @@ function estimateTableHeight(state: RenderState, table: DocTable, contentWPt: nu
 }
 
 /**
- * Resolve the per-grid-column widths (pt) for a table, honoring Word's table
- * layout algorithm (ECMA-376 §17.4.52 tblLayout + §17.4.71/§17.4.63 tcW/tblW).
- *
- *   - layout === 'fixed': use the tblGrid widths verbatim (the historical
- *     behavior), then scale down proportionally if the grid total overflows the
- *     available content width.
- *   - autofit (the spec default) WITH a preferred table width (tblW=dxa/pct,
- *     §17.4.63): the tblGrid widths (§17.4.48) ARE the column widths, scaled to
- *     fit `contentWPt`, content min-width the only grower. Per-cell `tcW`
- *     (§17.4.71) is NOT re-applied: Word bakes the resolved auto-fit widths back
- *     into the saved `<w:gridCol>`, so for a round-tripped preferred-width table
- *     the grid already is the tcW-resolved layout (sample-3).
- *   - autofit with tblW=auto ("AutoFit to Contents"), or a degenerate all-zero
- *     grid: per-cell `tcW` + content min drive the column sizes. The saved grid
- *     is the style/default full text column, not a baked layout, so it must not
- *     pin the width — otherwise the table spans the page and overrides its own
- *     `w:jc` placement (sample-7's cover tables). See the in-body comment for the
- *     full rationale and the commit-8a3d8a5 history.
- *
- * The returned widths sum to at most `contentWPt`. Both `renderTable` (which
- * then multiplies by the device scale) and `computeTableRowHeights` (which
- * works directly in pt) consume this.
+ * Acquire the parser/style facts and intrinsic content constraints required by
+ * ECMA-376 §17.18.87, then resolve the shared table grid. `tblGrid` is the
+ * initial grid, not an oracle containing an application's previous result;
+ * authored `tblW`, `tcW`, `wBefore`, and `wAfter` remain active constraints.
+ * Exported for the table-layout integration tests.
  */
-/** Minimum content width (pt) of a single cell: the widest non-breakable token
- *  across its paragraphs plus the cell's left/right margins. A column can never
- *  be narrower than this without clipping/wrapping the longest word — Word's
- *  auto-fit (ECMA-376 §17.4.52) treats it as the column's hard floor when the
- *  preferred widths overflow, which is why date strings like "2026-02-28" stay
- *  on one line even though their preferred `tcW` gets squeezed. */
-function cellMinContentPt(cell: DocTableCell, table: DocTable, state: RenderState): number {
-  const { ctx, fontFamilyClasses } = state;
-  let maxTokenPt = 0;
-  const scanPara = (para: DocParagraph): void => {
-    // Build the same scalar-routed segments as ordinary line layout. This keeps
-    // hAnsi/theme/charset/CS selection and registered Canvas routes in one
-    // service instead of reconstructing a legacy family in table geometry.
-    const segments = buildSegments(para.runs, segmentEnvironmentOf(state));
-    for (let segmentIndex = 0; segmentIndex < segments.length; segmentIndex++) {
-      const segment = segments[segmentIndex];
-      if (!('text' in segment) || !segment.text) continue;
-      // `joinPrev` is a LINE-BREAK contract, not a font-routing contract. It can
-      // arise from a cross-slot grapheme, UAX #14 no-break pairs, fitText, or a
-      // formatting seam. Keep every piece with its own immutable shape request
-      // and sum those piece widths when the group forms one min-content atom.
-      // Re-shaping concatenated text with the first piece would incorrectly make
-      // that first font authoritative for differently formatted continuations.
-      const pieces: Array<{ segment: LayoutTextSeg; start: number; end: number }> = [];
-      let joinedText = '';
-      const appendPiece = (piece: LayoutTextSeg): void => {
-        const start = joinedText.length;
-        joinedText += piece.text;
-        pieces.push({ segment: piece, start, end: joinedText.length });
-      };
-      appendPiece(segment as LayoutTextSeg);
-      while (segmentIndex + 1 < segments.length) {
-        const following = segments[segmentIndex + 1];
-        if (!('text' in following) || following.joinPrev !== true) break;
-        appendPiece(following as LayoutTextSeg);
-        segmentIndex += 1;
-      }
-      const measureRange = (start: number, end: number): number => {
-        let width = 0;
-        for (const piece of pieces) {
-          const overlapStart = Math.max(start, piece.start);
-          const overlapEnd = Math.min(end, piece.end);
-          if (overlapStart >= overlapEnd) continue;
-          const text = joinedText.slice(overlapStart, overlapEnd);
-          const candidate = { ...piece.segment, text };
-          if (candidate.textLayoutService && candidate.textShapeRequest) {
-            const shaped = candidate.textLayoutService.shape({
-              ...candidate.textShapeRequest,
-              text,
-              fontSizePt: calcEffectiveFontPx(candidate, 1),
-              measure: true,
-              clusterGeometry: false,
-            });
-            width += segAdvanceWidth(candidate, shaped.advancePt, 0, 1);
-          } else {
-            ctx.font = buildFont(
-              candidate.bold,
-              candidate.italic,
-              calcEffectiveFontPx(candidate, 1),
-              candidate.fontFamily,
-              fontFamilyClasses,
-              candidate.fontRoute,
-            );
-            width += segAdvanceWidth(candidate, ctx.measureText(text).width, 0, 1);
-          }
-        }
-        return width;
-      };
-      let tokenStart = 0;
-      for (const token of splitTextForLayout(joinedText)) {
-        const trimmed = token.replace(/\s+$/u, '');
-        const trimmedStart = tokenStart;
-        const trimmedEnd = tokenStart + trimmed.length;
-        tokenStart += token.length;
-        if (!trimmed) continue;
-        let width: number;
-        if (hasCJKBreakOpportunity(trimmed)) {
-          // CJK contributes one legal grapheme unit, not one Unicode scalar:
-          // combining marks and supplementary characters stay attached exactly
-          // as they do in emergency line wrapping. Boundary discovery is route-
-          // independent; measurement below still dispatches every slice through
-          // the service request retained by its originating segment.
-          const boundaries = [0, ...graphemeClusterOffsets(trimmed), trimmed.length];
-          const clusters: Array<{ text: string; start: number; end: number }> = [];
-          for (let i = 1; i < boundaries.length; i++) {
-            clusters.push({
-              text: trimmed.slice(boundaries[i - 1], boundaries[i]),
-              start: trimmedStart + boundaries[i - 1],
-              end: trimmedStart + boundaries[i],
-            });
-          }
-          const rules = state.kinsoku ?? DEFAULT_KINSOKU_RULES;
-          const atoms: Array<{ text: string; start: number; end: number }> = [];
-          let atom = clusters[0];
-          for (let i = 1; i < clusters.length; i++) {
-            const previous = [...atom.text].at(-1)?.codePointAt(0);
-            const next = clusters[i].text.codePointAt(0);
-            const breakAllowed = previous !== undefined
-              && next !== undefined
-              && !rules.lineEndForbidden.has(previous)
-              && !rules.lineStartForbidden.has(next);
-            if (breakAllowed) {
-              atoms.push(atom);
-              atom = clusters[i];
-            } else {
-              atom = { text: atom.text + clusters[i].text, start: atom.start, end: clusters[i].end };
-            }
-          }
-          if (atom) atoms.push(atom);
-          width = 0;
-          for (const unbreakable of atoms) {
-            width = Math.max(width, measureRange(unbreakable.start, unbreakable.end));
-          }
-        } else {
-          width = measureRange(trimmedStart, trimmedEnd);
-        }
-        if (width > maxTokenPt) maxTokenPt = width;
-      }
-    }
-  };
-  for (const ce of cell.content) {
-    if (ce.type === 'paragraph') scanPara(ce as unknown as DocParagraph);
-    // Nested tables: their own columns handle min-width; skip here.
-  }
-  if (maxTokenPt === 0) return 0;
-  const cm = effCellMargins(cell, table);
-  return maxTokenPt + cm.left + cm.right;
-}
-
-/** Resolve a table's per-grid-column widths (pt) to fit `contentWPt`. Exported
- *  for unit tests (column-widths.test) — see {@link calculateRowHeight} for the
- *  same test-export pattern. */
 export function resolveColumnWidths(table: DocTable, contentWPt: number, state: RenderState): number[] {
-  const n = table.colWidths.length;
-  if (n === 0) return [];
-
-  const grid = table.colWidths;
-
-  // Overflow cap for the fit passes below. A BLOCK table is confined to its text
-  // column band (`contentWPt`). A FLOATING table (§17.4.57 `<w:tblpPr>`) is
-  // positioned absolutely, out of flow — Word keeps its declared `<w:tblW>`/
-  // `<w:tblGrid>` width even past the column band, letting the box extend into
-  // the page margins (sample-28's page-anchored forms: a fixed grid of 523.75pt
-  // and autofit-preferred grids of 522pt on a 451.35pt band all render at full
-  // grid width, centered across the margins — Word-PDF measured). The physical
-  // page is the only hard constraint, so a float's cap is the page width. The
-  // preferred-width BASES are unchanged (pct still resolves against the column
-  // band, §17.18.90); only the overflow clamp is relaxed. Same principle as the
-  // negative-`tblInd` budget widening in renderTable (§17.4.50).
-  const fitCapPt = table.tblpPr ? Math.max(contentWPt, state.pageWidth) : contentWPt;
-
-  // Per-column minimum content width (pt). Single-column cells set a hard floor;
-  // a gridSpan cell's min is distributed across its columns in proportion to the
-  // tblGrid so a wide spanning cell does not over-inflate any one column.
-  const minW: number[] = new Array(n).fill(0);
-  for (const row of table.rows) {
-    let ci = rowGridBefore(row, n);
-    for (const cell of row.cells) {
-      const span = Math.min(Math.max(cell.colSpan, 1), n - ci);
-      const m = cellMinContentPt(cell, table, state);
-      if (m > 0) {
-        if (span === 1) {
-          if (m > minW[ci]) minW[ci] = m;
-        } else {
-          const spanCols = grid.slice(ci, ci + span);
-          const gridSum = spanCols.reduce((s, w) => s + w, 0);
-          for (let k = 0; k < span; k++) {
-            const share = gridSum > 0 ? spanCols[k] / gridSum : 1 / span;
-            const part = m * share;
-            if (part > minW[ci + k]) minW[ci + k] = part;
-          }
-        }
-      }
-      ci += span;
-    }
-  }
-
-  // Fit a desired-width vector (preferred `tcW`, floored at min content) to the
-  // available width. When the desired total overflows, Word's auto-fit
-  // (ECMA-376 §17.4.52) distributes the available width in proportion to each
-  // column's PREFERRED width — but never below its minimum content width. A
-  // column pinned to its min keeps that width and the leftover space is shared
-  // among the still-shrinkable columns (again proportional to preferred). This
-  // is what makes a date column with a small preferred width settle at exactly
-  // the date string's width (its content min) while a column with a large
-  // preferred width keeps proportionally more, matching Word's PDF layout.
-  const fitToContent = (widths: number[]): number[] => {
-    const total = widths.reduce((s, w) => s + w, 0);
-    if (total <= fitCapPt || total <= 0) return widths;
-    const minTotal = minW.reduce((s, w) => s + w, 0);
-    if (minTotal >= fitCapPt) {
-      // Even the minimums overflow — scale the minimums so the table still
-      // fits (content clips, as Word does when forced narrower than its words).
-      const s = fitCapPt / minTotal;
-      return minTotal > 0 ? minW.map((w) => w * s) : widths.map(() => fitCapPt / n);
-    }
-    // Iteratively pin columns to their min and redistribute the rest by
-    // preferred-width proportion. Converges in ≤ n passes (each pass pins at
-    // least one new column or finishes). `widths` already encodes the preferred
-    // width (floored at min) per column, used as the distribution weight.
-    const out = widths.slice();
-    const pinned = new Array(n).fill(false);
-    for (let pass = 0; pass < n; pass++) {
-      let free = fitCapPt;
-      let weightSum = 0;
-      for (let c = 0; c < n; c++) {
-        if (pinned[c]) free -= out[c];
-        else weightSum += widths[c];
-      }
-      if (weightSum <= 0) break;
-      let pinnedAny = false;
-      for (let c = 0; c < n; c++) {
-        if (pinned[c]) continue;
-        const share = free * (widths[c] / weightSum);
-        if (share < minW[c]) {
-          out[c] = minW[c];
-          pinned[c] = true;
-          pinnedAny = true;
-        } else {
-          out[c] = share;
-        }
-      }
-      if (!pinnedAny) break;
-    }
-    return out;
-  };
-
-  // Fixed layout: tblGrid is authoritative (ECMA-376 §17.4.52) and content is
-  // clipped, never grown — so scale proportionally to fit, ignoring min content
-  // widths (which only govern the autofit branch below). The cap is the column
-  // band for a block table, the page width for a floating one (see fitCapPt).
-  if (table.layout === 'fixed') {
-    const g = grid.slice();
-    const total = g.reduce((s, w) => s + w, 0);
-    if (total > fitCapPt && total > 0) {
-      const s = fitCapPt / total;
-      return g.map((w) => w * s);
-    }
-    return g;
-  }
-
-  // Autofit (default). The width source depends on the table's preferred width
-  // (ECMA-376 §17.4.63 `<w:tblW>` / §17.18.87 ST_TblWidth):
-  //
-  // (a) tblW=dxa or pct (a FIXED preferred width) ⇒ trust the `<w:tblGrid>`
-  //     (§17.4.48 / gridCol §17.4.16), scaled to fit, with content min-widths
-  //     the only grower. DELIBERATE DEVIATION from the literal autofit algorithm
-  //     to match Word: §17.4.16/§17.4.52 make a cell's `<w:tcW>` (§17.4.71) an
-  //     input that can override the grid's initial widths, but Word does not ship
-  //     the pre-autofit state — it BAKES the resolved autofit widths back into
-  //     the saved `<w:gridCol>`. So for a round-tripped, preferred-width Word
-  //     table the grid already IS the tcW-resolved layout; re-applying `tcW`
-  //     double-counts. sample-3's résumé grid is [2137, 222, 2430, 279, 2427,
-  //     279] twips (a deliberately narrow first content column), yet each row's
-  //     single-column cells carry `tcW≈30%`; the old "tcW overrides grid" path
-  //     equalized the columns to ~116 pt apiece, shifting every later column
-  //     right and re-wrapping the description paragraphs. Trusting the grid
-  //     reproduces Word exactly.
-  //
-  // (b) tblW=auto ("AutoFit to Contents") ⇒ the table has NO preferred width, so
-  //     the saved `<w:gridCol>` is the style/layout default (commonly the FULL
-  //     text column), NOT a baked autofit result. Trusting it makes the table
-  //     span the page and defeats its own `w:jc` placement (sample-7's cover
-  //     tables carry gridCol=full-page yet a 100 pt `tcW`; the grid path centred
-  //     them and broke the right/left alignment). So tblW=auto falls through to
-  //     the tcW/content-preference autofit below, exactly as before commit
-  //     8a3d8a5 sized every autofit table — that change correctly fixed the
-  //     preferred-width case (a) but wrongly applied the grid to (b) too.
-  //
-  // A degenerate grid (no `<w:gridCol>` widths) also falls through to (b): with
-  // no grid to anchor the columns, tcW + content are the only sizing signal.
-  //
-  // LIMITATION: a `tblW=pct` table whose SAVED grid no longer matches the
-  // available width (authored under different margins, or by a tool that did not
-  // bake the grid) is NOT re-scaled up to the pct target — the grid is taken
-  // as-is (only scaled DOWN on overflow). Tracked for a future full tblW pass.
-  const hasPreferredWidth = table.widthPt != null || table.widthPct != null;
-  const gridSum = grid.reduce((s, w) => s + w, 0);
-  if (gridSum > 0 && hasPreferredWidth) {
-    const desired = grid.map((g, c) => Math.max(g, minW[c]));
-    return fitToContent(desired);
-  }
-
-  // (b) tblW=auto (or a degenerate grid): preferred-width autofit, where `tcW`
-  // and content drive the column sizes. `pref[c]` accumulates the strongest
-  // single-column preference seen so far.
-  const pref: number[] = new Array(n).fill(0);
-  // `hasPref[c]` is true once any cell has expressed a preference for c.
-  const hasPref: boolean[] = new Array(n).fill(false);
-
-  // Translate a cell's `<w:tcW>` into a preferred width in pt, or null when the
-  // cell expresses no preference (auto/nil). pct is a fraction of contentWPt
-  // (50ths of a percent — §17.18.90 ST_TblWidth).
-  const cellPreferred = (cell: DocTableCell): number | null => {
-    if (cell.widthPt != null) return cell.widthPt;
-    if (cell.widthPct != null) return (cell.widthPct / 5000) * contentWPt;
-    return null;
-  };
-
-  // First pass: single-column (non-spanning) cells set a hard per-column floor.
-  for (const row of table.rows) {
-    let ci = rowGridBefore(row, n);
-    for (const cell of row.cells) {
-      const span = Math.min(Math.max(cell.colSpan, 1), n - ci);
-      if (span === 1) {
-        const p = cellPreferred(cell);
-        if (p != null) {
-          if (p > pref[ci]) pref[ci] = p;
-          hasPref[ci] = true;
-        }
-      }
-      ci += span;
-    }
-  }
-
-  // Second pass: gridSpan cells distribute their preference across the spanned
-  // columns in proportion to the tblGrid widths, but only raise columns that
-  // are still below their share (so a single-column floor is never lowered).
-  for (const row of table.rows) {
-    let ci = rowGridBefore(row, n);
-    for (const cell of row.cells) {
-      const span = Math.min(Math.max(cell.colSpan, 1), n - ci);
-      if (span > 1) {
-        const p = cellPreferred(cell);
-        if (p != null) {
-          const spanCols = grid.slice(ci, ci + span);
-          const gridSum = spanCols.reduce((s, w) => s + w, 0);
-          // Current resolved width across the span (grid fallback where unset).
-          const curSum = spanCols.reduce(
-            (s, w, k) => s + (hasPref[ci + k] ? pref[ci + k] : w),
-            0,
+  const format = tableFormatInput(table);
+  const marginsByCell = new WeakMap<object, Readonly<{ left: number; right: number }>>();
+  table.rows.forEach((row, rowIndex) => row.cells.forEach((cell, cellIndex) => {
+    const acquired = format.rows[rowIndex]?.cells[cellIndex]?.marginsPt;
+    marginsByCell.set(cell, acquired ?? effCellMargins(cell, table));
+  }));
+  return [...resolveTableColumnWidths(tableColumnLayoutInput(
+    table,
+    contentWPt,
+    (cell) => {
+      const margins = marginsByCell.get(cell as object) ?? effCellMargins(cell as DocTableCell, table);
+      return measureTableCellIntrinsicWidths(cell, margins, {
+        paragraph: (paragraph) => {
+          // This exported low-level seam historically accepts a reduced state.
+          // Production uses normalized contexts; the fallback preserves only
+          // the stable hand-built test/input contract at this renderer adapter.
+          const baseContext: ParagraphLayoutContext = state.layoutSettings && state.sectionLayout
+            ? resolveParagraphLayoutContext(
+                state.layoutSettings,
+                state.sectionLayout,
+                state.storyContext ?? BODY_STORY_CONTEXT,
+                paragraph,
+              )
+            : {
+                lineGrid: { active: false, pitchPt: null },
+                characterGrid: { active: false, deltaPt: 0 },
+                physicalIndentLeftPt: paragraph.bidi ? paragraph.indentRight : paragraph.indentLeft,
+                physicalIndentRightPt: paragraph.bidi ? paragraph.indentLeft : paragraph.indentRight,
+                firstIndentPt: paragraph.indentFirst,
+                lineSpacing: paragraph.lineSpacing,
+                spaceBeforePt: paragraph.spaceBefore,
+                spaceAfterPt: paragraph.spaceAfter,
+                baseRtl: paragraph.bidi === true,
+                isJustified: jcIsFullyJustified(paragraph.alignment),
+                stretchLastLine: jcStretchesLastLine(paragraph.alignment),
+                tabStops: [...paragraph.tabStops],
+                hasRuby: paragraph.runs.some(
+                  (run) => run.type === 'text' && Boolean((run as DocxTextRun).ruby),
+                ),
+                hasEastAsianText: paragraph.runs.some(
+                  (run) => run.type === 'text' && EAST_ASIAN_RE.test((run as DocxTextRun).text),
+                ),
+                kinsoku: state.kinsoku ?? DEFAULT_KINSOKU_RULES,
+                defaultTabPt: state.defaultTabPt ?? DEFAULT_TAB_PT,
+              };
+          const markerInput = paragraph.numbering
+            ? numberingMarkerShapeInput(paragraph.numbering, getDefaultFontSize(paragraph))
+            : undefined;
+          const context = applyNumberingBodyOffset(baseContext, {
+            numbering: paragraph.numbering,
+            ...(markerInput ? { markerInput } : {}),
+            authoredFirstIndentPt: paragraph.indentFirst,
+            tabStops: paragraph.tabStops,
+            defaultTabPt: state.defaultTabPt,
+            service: state.layoutServices?.text,
+            clusterGeometry: false,
+          });
+          const numbering = context.numberingMarkerGeometry
+            ?? (paragraph.numbering && markerInput && state.layoutServices?.text
+              ? resolveNumberingMarkerGeometry(paragraph.numbering, markerInput, {
+                  authoredFirstIndentPt: paragraph.indentFirst,
+                  physicalIndentLeftPt: context.physicalIndentLeftPt,
+                  tabStops: paragraph.tabStops,
+                  defaultTabPt: state.defaultTabPt,
+                }, state.layoutServices.text, false)
+              : undefined);
+          return measureParagraphIntrinsicWidths(
+            paragraph,
+            context,
+            contentWPt,
+            { context: state.ctx, fontFamilyClasses: state.fontFamilyClasses },
+            paragraphMeasurementEnvironment(state),
+            numbering,
           );
-          // Only widen when the span's preference exceeds what we already have.
-          if (p > curSum) {
-            const extra = p - curSum;
-            for (let k = 0; k < span; k++) {
-              const share = gridSum > 0 ? spanCols[k] / gridSum : 1 / span;
-              const base = hasPref[ci + k] ? pref[ci + k] : grid[ci + k];
-              pref[ci + k] = base + extra * share;
-              hasPref[ci + k] = true;
-            }
-          }
-        }
-      }
-      ci += span;
-    }
-  }
-
-  // Columns with no preference anywhere fall back to their tblGrid width. A
-  // column's desired width is then floored at its minimum content width: a
-  // preferred `tcW` narrower than the longest unbreakable token cannot actually
-  // be honored (ECMA-376 §17.4.52 — auto layout grows a column to fit content).
-  const widths = pref.map((p, c) => Math.max(hasPref[c] ? p : grid[c], minW[c]));
-  return fitToContent(widths);
+        },
+        nestedTable: (nested) => {
+          const widthPt = resolveColumnWidths(nested, contentWPt, state)
+            .reduce((sum, width) => sum + width, 0);
+          return { minWidthPt: widthPt, maxWidthPt: widthPt };
+        },
+      });
+    },
+    table.tblpPr ? Math.max(contentWPt, state.pageWidth) : contentWPt,
+  ))];
 }
 
 /** A page break before row `ri` is unsafe when `ri` continues a vertical merge
@@ -8545,7 +8428,7 @@ function renderBodyElements(
       const fragmentPaintable = isFragmentPaintableTable(tbl, placedTable, state);
       if (fragmentPaintable) {
         if (placedTable.fragment.kind !== 'table') {
-          throw new Error('Body table paint requires a TableFragment');
+          throw new Error('Body table paint requires retained table geometry');
         }
         if (!state.retainedTablePainter) {
           throw new Error('Body table paint requires a retained table painter');

@@ -10,12 +10,11 @@ import type { BorderSpec, CellBorders, TableBorders } from './types';
  * candidates for each shared edge and draws only the returned winner, so a
  * gridline is drawn once with the correct spec (no more "last cell painted wins").
  *
- * Rules (§17.4.66):
- *   0. If either border is `nil`/`none` (no border), the OTHER is displayed. If
- *      both are nil/none ⇒ nothing (`null`).
+ * Rules (ECMA-376 §17.4.66 with Word deviations in [MS-OI29500] 2.1.169):
+ *   0. `none` loses to the opposing border; `nil` suppresses the shared edge.
  *   1. A CELL border always beats a TABLE(-level or table-style) border.
- *   2. Weight = (# of lines in the border) × (the style's "border number"); the
- *      larger weight wins.
+ *   2. Weight = border width in eighth-points × Word border number; dotted and
+ *      dashed have weight 1 regardless of width.
  *   3. Equal weight ⇒ the style higher on the precedence list wins.
  *   4. Identical style ⇒ the darker colour wins, by three successive brightness
  *      formulas: R+B+2G, then B+2G, then G (smaller value wins each).
@@ -86,56 +85,32 @@ export function resolveCellEdges(
   return { top, bottom, left, right };
 }
 
-/** ECMA-376 §17.4.66 — the "border number" rank of each ST_Border style. The
- *  larger the rank, the heavier the style (before the line-count multiplier).
- *  Unknown / art styles are treated as rank 0 (they never out-weigh a real line
- *  style; art borders are unsupported anyway). */
+/** [MS-OI29500] 2.1.169 — Word's border number. Dotted and dashed are
+ * handled separately because Word fixes their complete weight at 1. */
 const BORDER_NUMBER: Record<string, number> = {
   single: 1,
   thick: 2,
   double: 3,
-  dotted: 4,
-  dashed: 5,
-  dotDash: 6,
-  dotDotDash: 7,
-  triple: 8,
-  thinThickSmallGap: 9,
-  thickThinSmallGap: 10,
-  thinThickThinSmallGap: 11,
-  thinThickMediumGap: 12,
-  thickThinMediumGap: 13,
-  thinThickThinMediumGap: 14,
-  thinThickLargeGap: 15,
-  thickThinLargeGap: 16,
-  thinThickThinLargeGap: 17,
-  wave: 18,
-  doubleWave: 19,
-  dashSmallGap: 20,
-  dashDotStroked: 21,
-  threeDEmboss: 22,
-  threeDEngrave: 23,
-  outset: 24,
-  inset: 25,
-};
-
-/** ECMA-376 §17.18.2 — the number of parallel lines each ST_Border style draws,
- *  the first factor of the §17.4.66 weight. A single rule is 1; a `double` is 2;
- *  a `triple` and the "thinThickThin" families are 3; the two-band "thinThick" /
- *  "thickThin" families and `doubleWave` are 2. All dash / dot / wave / 3D /
- *  outset / inset single-stroke styles are 1. Unknown styles default to 1. */
-const BORDER_LINES: Record<string, number> = {
-  double: 2,
-  triple: 3,
-  thinThickSmallGap: 2,
-  thickThinSmallGap: 2,
-  thinThickThinSmallGap: 3,
-  thinThickMediumGap: 2,
-  thickThinMediumGap: 2,
-  thinThickThinMediumGap: 3,
-  thinThickLargeGap: 2,
-  thickThinLargeGap: 2,
-  thinThickThinLargeGap: 3,
-  doubleWave: 2,
+  dotDash: 8,
+  dotDotDash: 9,
+  triple: 10,
+  thinThickSmallGap: 11,
+  thickThinSmallGap: 12,
+  thinThickThinSmallGap: 13,
+  thinThickMediumGap: 14,
+  thickThinMediumGap: 15,
+  thinThickThinMediumGap: 16,
+  thinThickLargeGap: 17,
+  thickThinLargeGap: 18,
+  thinThickThinLargeGap: 19,
+  wave: 20,
+  doubleWave: 21,
+  dashSmallGap: 22,
+  dashDotStroked: 23,
+  threeDEmboss: 24,
+  threeDEngrave: 25,
+  outset: 26,
+  inset: 27,
 };
 
 /** §17.4.66 rule #3 precedence list — index 0 is the highest priority. Identical
@@ -152,21 +127,17 @@ const PRECEDENCE: string[] = [
 function borderNumber(style: string): number {
   return BORDER_NUMBER[style] ?? 0;
 }
-function borderLines(style: string): number {
-  return BORDER_LINES[style] ?? 1;
-}
-function borderWeight(style: string): number {
-  return borderLines(style) * borderNumber(style);
+function borderWeight(spec: BorderSpec): number {
+  if (spec.style === 'dotted' || spec.style === 'dashed') return 1;
+  return Math.max(0, spec.width) * 8 * borderNumber(spec.style);
 }
 function precedenceIndex(style: string): number {
   const i = PRECEDENCE.indexOf(style);
   return i === -1 ? PRECEDENCE.length : i; // unknown ⇒ lowest priority
 }
 
-/** True for a border that draws no ink (`nil`/`none`), which §17.4.66 rule #0
- *  treats as "no border". */
 function isNil(spec: BorderSpec): boolean {
-  return spec.style === 'nil' || spec.style === 'none';
+  return spec.style === 'nil';
 }
 
 /** Parse a 6-hex colour to (r,g,b). `null`/auto ⇒ black (0,0,0): §17.4.66's
@@ -209,9 +180,11 @@ export function resolveBorderConflict(
   a: BorderCandidate | null,
   b: BorderCandidate | null,
 ): BorderCandidate | null {
-  // Rule #0 — nil/none (or absent) contributes nothing.
-  const av = a && !isNil(a.spec) ? a : null;
-  const bv = b && !isNil(b.spec) ? b : null;
+  // Word differs from the base ECMA rule here: nil suppresses the shared edge,
+  // while none merely contributes no competing border ([MS-OI29500] 2.1.169).
+  if ((a && isNil(a.spec)) || (b && isNil(b.spec))) return null;
+  const av = a && a.spec.style !== 'none' ? a : null;
+  const bv = b && b.spec.style !== 'none' ? b : null;
   if (!av && !bv) return null;
   if (!av) return bv;
   if (!bv) return av;
@@ -221,8 +194,8 @@ export function resolveBorderConflict(
   if (bv.source === 'cell' && av.source === 'table') return bv;
 
   // Rule #2 — heavier weight wins.
-  const wa = borderWeight(av.spec.style);
-  const wb = borderWeight(bv.spec.style);
+  const wa = borderWeight(av.spec);
+  const wb = borderWeight(bv.spec);
   if (wa !== wb) return wa > wb ? av : bv;
 
   // Rule #3 — equal weight ⇒ higher on the precedence list (smaller index).

@@ -2,12 +2,14 @@ import { describe, it, expect } from 'vitest';
 import { resolveBorderConflict } from './cell-border-conflict.js';
 import type { BorderSpec } from './types';
 
-// ECMA-376 §17.4.66 — adjacent table cell border conflict resolution. When cell
-// spacing is zero, two cells that share an interior gridline both contribute a
-// border for that edge; the DISPLAYED border is chosen by these rules (in order):
-//   0. nil/none loses to any real border (if BOTH nil ⇒ nothing).
+// ECMA-376 §17.4.66 with Word deviations from [MS-OI29500] 2.1.169 —
+// adjacent table cell border conflict resolution. When cell spacing is zero,
+// two cells that share an interior gridline both contribute a border for that
+// edge; the DISPLAYED border is chosen by these rules (in order):
+//   0. none loses to the opposing border; nil suppresses the shared edge.
 //   1. a CELL border beats a TABLE border.
-//   2. weight = (# of lines in the style) × (style rank number); larger wins.
+//   2. Word weight = width in eighth-points × Word border number; dotted and
+//      dashed have weight 1 regardless of width.
 //   3. equal weight ⇒ higher on the style precedence list wins.
 //   4. identical style ⇒ darker colour wins, by three successive brightness
 //      formulas R+B+2G, then B+2G, then G (smaller wins each).
@@ -22,12 +24,13 @@ const cell = (over: Partial<BorderSpec> = {}) => ({ spec: spec(over), source: 'c
 const tbl = (over: Partial<BorderSpec> = {}) => ({ spec: spec(over), source: 'table' as const });
 
 describe('§17.4.66 resolveBorderConflict', () => {
-  it('rule 0: nil/none loses to a real border', () => {
-    expect(resolveBorderConflict(cell({ style: 'nil' }), cell({ style: 'single' }))!.spec.style).toBe('single');
+  it('Word rule 0: none loses to a real border', () => {
     expect(resolveBorderConflict(cell({ style: 'single' }), cell({ style: 'none' }))!.spec.style).toBe('single');
   });
 
-  it('rule 0: both nil/none ⇒ no border (null)', () => {
+  it('Word rule 0: nil suppresses the shared edge even against a real border', () => {
+    expect(resolveBorderConflict(cell({ style: 'nil' }), cell({ style: 'single' }))).toBeNull();
+    expect(resolveBorderConflict(cell({ style: 'double' }), cell({ style: 'nil' }))).toBeNull();
     expect(resolveBorderConflict(cell({ style: 'nil' }), cell({ style: 'none' }))).toBeNull();
   });
 
@@ -37,35 +40,46 @@ describe('§17.4.66 resolveBorderConflict', () => {
     expect(resolveBorderConflict(null, null)).toBeNull();
   });
 
-  it('rule 1: a cell border beats a table border regardless of weight', () => {
-    // table `double` (weight 2×3=6) vs cell `single` (1×1=1): the cell still wins.
-    const r = resolveBorderConflict(tbl({ style: 'double' }), cell({ style: 'single' }));
+  it('rule 1: a cell border beats a table border regardless of Word weight', () => {
+    const r = resolveBorderConflict(
+      tbl({ style: 'double', width: 8 }),
+      cell({ style: 'single', width: 0.125 }),
+    );
     expect(r!.spec.style).toBe('single');
     expect(r!.source).toBe('cell');
   });
 
-  it('rule 2: heavier weight wins (double 2×3=6 beats single 1×1=1)', () => {
-    const r = resolveBorderConflict(cell({ style: 'single' }), cell({ style: 'double' }));
-    expect(r!.spec.style).toBe('double');
+  it('Word rule 2: width in eighth-points participates in the border weight', () => {
+    // single 2pt => 16 * 1; double 0.5pt => 4 * 3.
+    const r = resolveBorderConflict(
+      cell({ style: 'single', width: 2 }),
+      cell({ style: 'double', width: 0.5 }),
+    );
+    expect(r!.spec.style).toBe('single');
   });
 
-  it('rule 2: dashed (1×5=5) beats thick (1×2=2)', () => {
-    const r = resolveBorderConflict(cell({ style: 'thick' }), cell({ style: 'dashed' }));
-    expect(r!.spec.style).toBe('dashed');
+  it('Word rule 2: dotted and dashed have weight 1 regardless of width', () => {
+    const dashed = cell({ style: 'dashed', width: 20 });
+    const single = cell({ style: 'single', width: 0.25 });
+    expect(resolveBorderConflict(dashed, single)).toBe(single);
   });
 
-  it('rule 2: triple (3×8=24) beats double (2×3=6)', () => {
-    const r = resolveBorderConflict(cell({ style: 'double' }), cell({ style: 'triple' }));
+  it('Word rule 2: uses the Word border-number table for non-dash styles', () => {
+    // triple 0.125pt => 1 * 10; double 0.25pt => 2 * 3.
+    const r = resolveBorderConflict(
+      cell({ style: 'double', width: 0.25 }),
+      cell({ style: 'triple', width: 0.125 }),
+    );
     expect(r!.spec.style).toBe('triple');
   });
 
-  it('rule 3: equal weight ⇒ higher on the precedence list wins (single before thick)', () => {
-    // Contrive equal weight: single (1×1=1) vs … there is no other weight-1 style,
-    // so use two styles that tie. thinThickSmallGap (2×9=18) vs … pick a real tie:
-    // dotDash (1×6=6) vs double (2×3=6) — equal weight 6. Precedence: double is
-    // higher on the list than dotDash, so double wins.
-    const r = resolveBorderConflict(cell({ style: 'dotDash' }), cell({ style: 'double' }));
-    expect(r!.spec.style).toBe('double');
+  it('Word rule 3: equal weight uses the documented style precedence', () => {
+    // dotDash 0.125pt => 1 * 8; thick 0.5pt => 4 * 2 = 8.
+    const r = resolveBorderConflict(
+      cell({ style: 'dotDash', width: 0.125 }),
+      cell({ style: 'thick', width: 0.5 }),
+    );
+    expect(r!.spec.style).toBe('thick');
   });
 
   it('rule 4: identical style ⇒ darker colour wins (R+B+2G smaller)', () => {

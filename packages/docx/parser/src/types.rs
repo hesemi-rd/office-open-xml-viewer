@@ -2625,6 +2625,68 @@ pub struct DocTable {
     /// the table is not floating (no `tblp_pr`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overlap: Option<String>,
+    /// Parser/layout acquisition facts which must retain authored presence and
+    /// lexical OOXML values. Kept off the stable TypeScript `DocTable` surface;
+    /// `parser-model.ts` snapshots this serde-only wire before layout.
+    #[serde(rename = "__tableLayout")]
+    pub table_layout: TableLayoutAcquisitionWire,
+}
+
+/// ECMA-376 CT_TblWidth as authored. `None` on either attribute is distinct
+/// from the element being absent (represented by the owning `Option`). Layout
+/// resolves the lexical kind only after its containing-block width is known.
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TableWidthAcquisitionWire {
+    pub kind: Option<String>,
+    pub value: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TableLayoutKindAcquisitionWire {
+    pub kind: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TableGridColumnAcquisitionWire {
+    /// Raw `gridCol/@w` twips token. Missing is not an inferred width: per
+    /// §17.4.16 it contributes zero until the table-width algorithm runs.
+    pub width: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TableGridAcquisitionWire {
+    pub authored: bool,
+    pub columns: Vec<TableGridColumnAcquisitionWire>,
+    /// The grid may need augmentation when rows address more columns than
+    /// `tblGrid` authored (§17.4.17/§17.4.48). Preserve that lower bound rather
+    /// than manufacturing widths in the parser.
+    pub required_column_count: u32,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TableMarginAcquisitionWire {
+    pub top: Option<TableWidthAcquisitionWire>,
+    pub bottom: Option<TableWidthAcquisitionWire>,
+    pub start: Option<TableWidthAcquisitionWire>,
+    pub end: Option<TableWidthAcquisitionWire>,
+    pub left: Option<TableWidthAcquisitionWire>,
+    pub right: Option<TableWidthAcquisitionWire>,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TableLayoutAcquisitionWire {
+    pub effective_style_id: Option<String>,
+    pub grid: TableGridAcquisitionWire,
+    pub preferred_width: Option<TableWidthAcquisitionWire>,
+    pub layout: Option<TableLayoutKindAcquisitionWire>,
+    pub cell_spacing: Option<TableWidthAcquisitionWire>,
+    pub cell_margins: Option<TableMarginAcquisitionWire>,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
@@ -2669,6 +2731,49 @@ pub struct DocTableRow {
     /// ECMA-376 §17.4.6 w:cantSplit. When true, this row must not be split
     /// across page boundaries.
     pub cant_split: bool,
+    #[serde(rename = "__tableRowLayout")]
+    pub table_row_layout: TableRowLayoutAcquisitionWire,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TableRowHeightAcquisitionWire {
+    pub value: Option<String>,
+    pub rule: String,
+    /// `[MS-OI29500]` 2.1.180 gives Word a different omitted-hRule behavior;
+    /// retaining presence lets a later compatibility policy distinguish it
+    /// from an explicitly authored `auto` without guessing from the value.
+    pub rule_authored: bool,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TablePropertyExceptionAcquisitionWire {
+    pub preferred_width: Option<TableWidthAcquisitionWire>,
+    pub layout: Option<TableLayoutKindAcquisitionWire>,
+    pub justification: Option<String>,
+    pub indent: Option<TableWidthAcquisitionWire>,
+    pub borders: Option<TableBorders>,
+    pub cell_margins: Option<TableMarginAcquisitionWire>,
+    pub cell_spacing: Option<TableWidthAcquisitionWire>,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TableRowLayoutAcquisitionWire {
+    pub height: Option<TableRowHeightAcquisitionWire>,
+    /// ECMA-376 §17.4.27 direct alignment for this row. It precedes the
+    /// table-property exception and parent table alignment during acquisition.
+    pub justification: Option<String>,
+    pub before_width: Option<TableWidthAcquisitionWire>,
+    pub after_width: Option<TableWidthAcquisitionWire>,
+    pub cell_spacing: Option<TableWidthAcquisitionWire>,
+    /// Effective whole-table/conditional table-style spacing for this row.
+    /// Direct row, exception, and table properties remain separate higher layers.
+    pub style_cell_spacing: Option<TableWidthAcquisitionWire>,
+    /// Effective whole-table/conditional table-style margins for this row.
+    pub style_cell_margins: Option<TableMarginAcquisitionWire>,
+    pub exception: Option<TablePropertyExceptionAcquisitionWire>,
 }
 
 /// One block-level entry inside a table cell. ECMA-376 §17.4.7 (w:tc) allows
@@ -2715,6 +2820,15 @@ pub struct DocTableCell {
     pub margin_left: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub margin_right: Option<f64>,
+    #[serde(rename = "__tableCellLayout")]
+    pub table_cell_layout: TableCellLayoutAcquisitionWire,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TableCellLayoutAcquisitionWire {
+    pub preferred_width: Option<TableWidthAcquisitionWire>,
+    pub margins: Option<TableMarginAcquisitionWire>,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]

@@ -14,15 +14,9 @@ import type {
 // depend on RenderState being exported (mirrors table-row-height.test).
 type ColState = Parameters<typeof resolveColumnWidths>[2];
 
-// ECMA-376 §17.4.48 (`<w:tblGrid>`) / §17.4.16 (`<w:gridCol>`) define the
-// column widths; per-cell `<w:tcW>` (§17.4.71) is only a PREFERRED width. Word
-// bakes its resolved auto-fit widths back into the saved grid, so we size
-// columns from the grid (scaled to the table width) and do NOT re-apply tcW
-// (see resolveColumnWidths' comment for why this matches Word over the literal
-// §17.4.52 algorithm). sample-3's résumé regressed because its rows carry
-// single-column `tcW≈30%` each that, under the old tcW-over-grid path,
-// flattened an intentionally-unequal grid ([2137, 222, 2430, …] twips) toward
-// equal columns, shifting later columns right and changing the wrap.
+// ECMA-376 §17.4.48 (`<w:tblGrid>`) supplies the INITIAL shared grid;
+// §17.18.87 then applies tblW, wBefore/wAfter and tcW preferences. A saved
+// grid is not evidence that a producer already applied those constraints.
 //
 // Empty cells carry no content, so the min-content floor is 0 and `state` is
 // never dereferenced (mirrors table-row-height.test's EMPTY_STATE).
@@ -68,17 +62,16 @@ function table(rows: DocTableRow[], width: Partial<DocTable> = { widthPct: 5000 
   } as unknown as DocTable;
 }
 
-describe('resolveColumnWidths — a tblW=dxa/pct grid (§17.4.48) governs widths, not per-cell tcW (§17.4.71)', () => {
-  it('keeps the (unequal) tblGrid proportions even when cells prefer ~equal tcW=pct', () => {
-    // Two rows of single-column cells, each preferring 50% (2500/5000). The grid
-    // says 70/30. Word renders 70/30 (the grid); tcW must NOT equalize to 50/50.
+describe('resolveColumnWidths — fixed preferences are applied over the initial tblGrid', () => {
+  it('applies single-column tcW=pct constraints over an unequal initial grid', () => {
+    // Two first-row single-column cells each prefer 50% of the final table.
     const t = table([
       row([cell(1, 2500), cell(1, 2500)]),
       row([cell(1, 2500), cell(1, 2500)]),
     ]);
     const w = resolveColumnWidths(t, 100, EMPTY_STATE);
-    expect(w[0]).toBeCloseTo(70, 5);
-    expect(w[1]).toBeCloseTo(30, 5);
+    expect(w[0]).toBeCloseTo(50, 5);
+    expect(w[1]).toBeCloseTo(50, 5);
   });
 
   it('a gridSpan cell whose tcW exceeds its grid span does not widen the columns', () => {
@@ -90,13 +83,11 @@ describe('resolveColumnWidths — a tblW=dxa/pct grid (§17.4.48) governs widths
     expect(w[1]).toBeCloseTo(30, 5);
   });
 
-  it('scales the grid proportionally when it overflows the available width', () => {
-    // Grid sums to 100 pt but only 50 pt is available ⇒ scale by 0.5, preserving
-    // the 70/30 proportion.
+  it('resolves percentage tcW against the smaller preferred table width', () => {
     const t = table([row([cell(1, 2500), cell(1, 2500)])]);
     const w = resolveColumnWidths(t, 50, EMPTY_STATE);
-    expect(w[0]).toBeCloseTo(35, 5);
-    expect(w[1]).toBeCloseTo(15, 5);
+    expect(w[0]).toBeCloseTo(25, 5);
+    expect(w[1]).toBeCloseTo(25, 5);
   });
 });
 
@@ -215,6 +206,47 @@ describe('resolveColumnWidths — a tblW=auto table sizes to tcW/content, ignori
     expect(autoFitFonts).toContain(expectedFont);
     expect(measured.filter((entry) => entry.text === 'é').map((entry) => entry.font))
       .toContain(expectedFont);
+  });
+
+  it('feeds the unwrapped paragraph width into the autofit maximum-content step', () => {
+    const ctx = {
+      font: '', letterSpacing: '0px', fontKerning: 'auto' as CanvasFontKerning,
+      measureText(text: string) {
+        return {
+          width: [...text].length * 10,
+          fontBoundingBoxAscent: 8,
+          fontBoundingBoxDescent: 2,
+          actualBoundingBoxAscent: 8,
+          actualBoundingBoxDescent: 2,
+        } as TextMetrics;
+      },
+    } as unknown as CanvasRenderingContext2D;
+    const doc = { section: {}, body: [], headers: {}, footers: {} } as unknown as DocxDocumentModel;
+    const services = createLayoutServices(doc, { measureContext: ctx });
+    const paragraph = (text: string) => ({
+      alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
+      spaceBefore: 0, spaceAfter: 0, lineSpacing: null, numbering: null,
+      tabStops: [], widowControl: false,
+      runs: [{
+        type: 'text', text, fontSize: 10, fontFamily: 'Synthetic Serif',
+        fontFamilyEastAsia: '', bold: false, italic: false, underline: false,
+        strikethrough: false, color: null, isLink: false, background: null,
+        vertAlign: null, hyperlink: null,
+      }],
+    }) as DocParagraph;
+    const contentCell = (text: string) => ({
+      ...cell(1, null, null),
+      content: [{ type: 'paragraph', ...paragraph(text) }],
+    }) as unknown as DocTableCell;
+    const t = autofit([row([contentCell('aa aa'), contentCell('b')])], [0, 100]);
+    const state = {
+      ctx, fontFamilyClasses: {}, layoutServices: services, pageWidth: 100,
+      pageH: 200, scale: 1, pageIndex: 0, totalPages: 1,
+    } as unknown as ColState;
+
+    // min-content is [20, 10], but the first cell's no-wrap maximum is 50.
+    // Autofit first reclaims the second track's slack toward that maximum.
+    expect(resolveColumnWidths(t, 100, state)).toEqual([50, 50]);
   });
 
   it('sums each retained route across a differently formatted no-break pair', () => {

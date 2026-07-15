@@ -19,7 +19,7 @@
  */
 import type { DocTable, DocTableRow, DocTableCell, SectionGeom } from './types';
 import type { SectionLayoutContext } from './layout-context.js';
-import type { ParagraphLayout } from './layout/types.js';
+import type { ParagraphLayout, TableLayout } from './layout/types.js';
 
 /**
  * A measured table cell (ECMA-376 §17.4.7 `<w:tc>`). Its content is a recursive list
@@ -90,6 +90,7 @@ export interface RowFragment {
  * consumer can render header repetition and continuation without re-deriving the split.
  */
 export interface TableFragment {
+  /** Transitional page-slice representation deleted by A5. */
   readonly kind: 'table';
   readonly source: DocTable;
   readonly columnWidthsPt: readonly number[];
@@ -98,7 +99,7 @@ export interface TableFragment {
   readonly continuesOnNextPage: boolean;
 }
 
-export type FlowFragment = ParagraphLayout | TableFragment;
+export type FlowFragment = ParagraphLayout | TableLayout | TableFragment;
 
 export interface PlacedFragment {
   readonly fragment: FlowFragment;
@@ -184,7 +185,7 @@ export function cellFragmentContentHeightPt(fragment: CellFragment): number {
   let sum = 0;
   for (const block of fragment.blocks) {
     sum += block.kind === 'table'
-      ? tableFragmentHeightPt(block)
+      ? ('flowBounds' in block ? block.advancePt : tableFragmentHeightPt(block))
       : paragraphFragmentAdvancePt(block);
   }
   return sum;
@@ -194,6 +195,6 @@ export function cellFragmentContentHeightPt(fragment: CellFragment): number {
  *  leading + line advances + trailing, or a table fragment's summed row heights. */
 export function flowFragmentAdvancePt(fragment: FlowFragment): number {
   return fragment.kind === 'table'
-    ? tableFragmentHeightPt(fragment)
+    ? ('flowBounds' in fragment ? fragment.advancePt : tableFragmentHeightPt(fragment))
     : paragraphFragmentAdvancePt(fragment);
 }

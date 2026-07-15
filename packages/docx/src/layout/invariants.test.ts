@@ -10,6 +10,8 @@ import type {
   LayoutServices,
   PaintNode,
   SourceRef,
+  TableEdgeInputs,
+  TableLayoutInput,
 } from './types.js';
 import type { SectionLayoutContext } from '../layout-context.js';
 import { createCanvasFontRoute } from '@silurus/ooxml-core';
@@ -26,6 +28,19 @@ const rect = (xPt: number, yPt: number, widthPt: number, heightPt: number): Layo
   widthPt,
   heightPt,
 });
+
+const noTableBorders: TableEdgeInputs = {
+  top: null, right: null, bottom: null, left: null, insideH: null, insideV: null,
+};
+
+function tableInput(index: number): TableLayoutInput {
+  return {
+    kind: 'table', id: `table-input-${index}`, source: source(index),
+    flowDomainId: 'body', ordinaryFlow: true,
+    alignment: 'left', indentPt: 0, bidiVisual: false,
+    columnWidthsPt: [], borders: noTableBorders, rows: [],
+  };
+}
 
 function drawing(
   id: string,
@@ -275,6 +290,7 @@ describe('layoutFlowBlocks', () => {
         const layout = {
           ...drawing('t2', rect(10, placement.cursor.yPt, 100, 18)),
           kind: 'table' as const,
+          columnWidthsPt: [], rows: [], borders: [],
         };
         return { layout, nextCursor: { xPt: 10, yPt: placement.cursor.yPt + 18 } };
       },
@@ -287,7 +303,7 @@ describe('layoutFlowBlocks', () => {
       cursor: { xPt: 10, yPt: 20 },
       blocks: [
         { kind: 'paragraph', source: source(1) },
-        { kind: 'table', source: source(2) },
+        tableInput(2),
       ],
     }, services, algorithms);
 

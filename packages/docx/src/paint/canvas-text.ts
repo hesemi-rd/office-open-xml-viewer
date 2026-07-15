@@ -1,18 +1,13 @@
 import {
   autoContrastColor,
   canvasFontString,
-  crispOffset,
-  doubleRailGeometry,
-  fillDoubleBorder,
 } from '@silurus/ooxml-core';
-import type { BorderSegment, ParagraphLayout, TextBoxLayout, TextDecorationLayout } from '../layout/types.js';
+import type { ParagraphLayout, TextBoxLayout } from '../layout/types.js';
 import type { CanvasPaintContext } from './types.js';
 import { paintDrawingLayout } from './canvas-drawing.js';
+import { paintStrokeSegment } from './canvas-border.js';
 import {
   composeAffine,
-  inverseMapAffinePoint,
-  inverseMapAffineVector,
-  mapAffinePoint,
   quarterTurnAffine,
   scaleAffine,
   translationAffine,
@@ -77,104 +72,6 @@ function textColor(
   context: CanvasPaintContext,
 ): string {
   return resolvedTextColor(placement.color, context);
-}
-
-function strokeSegment(
-  segment: BorderSegment | TextDecorationLayout,
-  context: CanvasPaintContext,
-): void {
-  const { ctx } = context;
-  ctx.strokeStyle = segment.color;
-  ctx.lineWidth = segment.widthPt;
-  ctx.setLineDash('dashPatternPt' in segment && segment.dashPatternPt
-    ? [...segment.dashPatternPt]
-    : []);
-  ctx.beginPath();
-  const path = 'path' in segment && segment.path?.length ? segment.path : [segment.from, segment.to];
-  const axisAligned = path.length === 2
-    && (path[0]!.xPt === path[1]!.xPt || path[0]!.yPt === path[1]!.yPt);
-  const horizontal = axisAligned && path[0]!.yPt === path[1]!.yPt;
-  const vertical = axisAligned && path[0]!.xPt === path[1]!.xPt;
-  const pointToCss = context.pointToCss ?? scaleAffine(context.scale);
-  const finalPath = path.map((point) => mapAffinePoint(pointToCss, point));
-  const localDx = axisAligned ? path[1]!.xPt - path[0]!.xPt : 0;
-  const localDy = axisAligned ? path[1]!.yPt - path[0]!.yPt : 0;
-  const finalDx = pointToCss.a * localDx + pointToCss.c * localDy;
-  const finalDy = pointToCss.b * localDx + pointToCss.d * localDy;
-  const finalHorizontal = axisAligned && finalDy === 0;
-  const finalVertical = axisAligned && finalDx === 0;
-  const normalScale = horizontal
-    ? Math.hypot(pointToCss.c, pointToCss.d)
-    : vertical ? Math.hypot(pointToCss.a, pointToCss.b) : 0;
-  if (segment.style === 'double' && axisAligned && normalScale > 0) {
-    ctx.fillStyle = segment.color;
-    if (finalHorizontal || finalVertical) {
-      const localFillContext = {
-        fillRect(x: number, y: number, width: number, height: number): void {
-          const corners = [
-            { xPt: x, yPt: y },
-            { xPt: x + width, yPt: y },
-            { xPt: x, yPt: y + height },
-            { xPt: x + width, yPt: y + height },
-          ].map((point) => inverseMapAffinePoint(pointToCss, point));
-          if (corners.some((point) => point === null)) return;
-          const local = corners as Array<{ xPt: number; yPt: number }>;
-          const xs = local.map((point) => point.xPt);
-          const ys = local.map((point) => point.yPt);
-          ctx.fillRect(
-            Math.min(...xs), Math.min(...ys),
-            Math.max(...xs) - Math.min(...xs),
-            Math.max(...ys) - Math.min(...ys),
-          );
-        },
-      } as unknown as CanvasRenderingContext2D;
-      fillDoubleBorder(
-        localFillContext,
-        finalPath[0]!.xPt,
-        finalPath[0]!.yPt,
-        finalPath[1]!.xPt,
-        finalPath[1]!.yPt,
-        segment.widthPt * normalScale,
-        context.dpr,
-      );
-    } else {
-      // Under a non-axis affine, preserve the authored parallel geometry but do
-      // not pretend a device row/column exists to snap against.
-      const { railDev, gapDev, spanDev } = doubleRailGeometry(
-        segment.widthPt * normalScale,
-        context.dpr,
-      );
-      const railPt = railDev / context.dpr / normalScale;
-      const gapPt = gapDev / context.dpr / normalScale;
-      const spanPt = spanDev / context.dpr / normalScale;
-      if (horizontal) {
-        const x = Math.min(path[0]!.xPt, path[1]!.xPt);
-        const width = Math.abs(path[1]!.xPt - path[0]!.xPt);
-        ctx.fillRect(x, path[0]!.yPt - spanPt / 2, width, railPt);
-        ctx.fillRect(x, path[0]!.yPt - spanPt / 2 + railPt + gapPt, width, railPt);
-      } else {
-        const y = Math.min(path[0]!.yPt, path[1]!.yPt);
-        const height = Math.abs(path[1]!.yPt - path[0]!.yPt);
-        ctx.fillRect(path[0]!.xPt - spanPt / 2, y, railPt, height);
-        ctx.fillRect(path[0]!.xPt - spanPt / 2 + railPt + gapPt, y, railPt, height);
-      }
-    }
-    ctx.setLineDash([]);
-    return;
-  }
-  const cssOffset = finalVertical && normalScale > 0
-    ? { xPt: crispOffset(finalPath[0]!.xPt, segment.widthPt * normalScale, context.dpr), yPt: 0 }
-    : finalHorizontal && normalScale > 0
-      ? { xPt: 0, yPt: crispOffset(finalPath[0]!.yPt, segment.widthPt * normalScale, context.dpr) }
-      : { xPt: 0, yPt: 0 };
-  const localOffset = inverseMapAffineVector(pointToCss, cssOffset) ?? { xPt: 0, yPt: 0 };
-  const first = path[0]!;
-  ctx.moveTo(first.xPt + localOffset.xPt, first.yPt + localOffset.yPt);
-  for (const point of path.slice(1)) {
-    ctx.lineTo(point.xPt + localOffset.xPt, point.yPt + localOffset.yPt);
-  }
-  ctx.stroke();
-  ctx.setLineDash([]);
 }
 
 function paintRetainedGlyph(
@@ -426,11 +323,11 @@ export function paintParagraphLayout(node: ParagraphLayout, context: CanvasPaint
           ...(placement.tateChuYoko ? { eastAsianVert: true } : {}),
         }));
       }
-      for (const decoration of placement.decorations) strokeSegment(decoration, context);
-      for (const border of placement.runBorderFragments ?? []) strokeSegment(border, context);
+      for (const decoration of placement.decorations) paintStrokeSegment(decoration, context);
+      for (const border of placement.runBorderFragments ?? []) paintStrokeSegment(border, context);
     }
   }
-  for (const border of node.borders) strokeSegment(border, context);
+  for (const border of node.borders) paintStrokeSegment(border, context);
   for (const drawing of node.drawings.filter((item) => !item.anchorLayer)) {
     paintDrawingWithTextBoxes(drawing);
   }

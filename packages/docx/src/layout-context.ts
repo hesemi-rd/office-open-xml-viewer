@@ -9,6 +9,7 @@ import {
 } from './line-layout.js';
 import { jcIsFullyJustified, jcStretchesLastLine } from './bidi-line.js';
 import { prepareBodyFrameMetadata } from './layout/frame.js';
+import type { NumberingMarkerGeometry } from './layout/numbering-marker.js';
 import type {
   BodyElement,
   ColumnGeom,
@@ -102,6 +103,9 @@ export interface ParagraphLayoutContext {
   readonly hasEastAsianText: boolean;
   readonly kinsoku: KinsokuRules;
   readonly defaultTabPt: number;
+  /** Effective marker geometry acquired with the paragraph context and reused
+   * by retained layout instead of shaping the marker a second time. */
+  readonly numberingMarkerGeometry?: NumberingMarkerGeometry;
   /** ECMA-376 §22.1.2.30 document-wide display-math justification. */
   readonly mathDefJc?: string;
 }

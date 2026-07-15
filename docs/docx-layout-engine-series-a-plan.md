@@ -68,7 +68,7 @@ layout rule. Its audit must map existing shared DrawingML transforms, colors,
 images, charts, and font primitives to ECMA-376 Parts 1 and 4, and record why
 WordprocessingML page flow, stories, and table pagination remain DOCX-local.
 
-- [ ] **Step 1: Write failing invariant and paint-purity tests**
+- [x] **Step 1: Write failing invariant and paint-purity tests**
 
 Add tests that construct two ordinary in-flow allocation ranges with overlapping
 `flowBounds`, an ordinary in-flow node whose allocation crosses
@@ -88,7 +88,7 @@ expect(() => paintLayoutPage(paintOnlyLayout, 0, canvas, { scale: 1, dpr: 1 }))
   .not.toThrow();
 ```
 
-- [ ] **Step 2: Run tests to verify Red**
+- [x] **Step 2: Run tests to verify Red**
 
 Run:
 
@@ -98,7 +98,7 @@ pnpm vitest run packages/docx/src/layout/invariants.test.ts packages/docx/src/pa
 
 Expected: FAIL because the new modules and exports do not exist.
 
-- [ ] **Step 3: Add the minimal immutable contracts**
+- [x] **Step 3: Add the minimal immutable contracts**
 
 Define deep-readonly, structured-clone-safe point-space data and diagnostics:
 
@@ -173,7 +173,7 @@ CI `actions/checkout` step to `fetch-depth: 0`, so `origin/main`, the merge base
 and its committed baseline are available to the checker rather than depending on
 a shallow checkout's incidental history.
 
-- [ ] **Step 4: Run focused and static checks**
+- [x] **Step 4: Run focused and static checks**
 
 Run:
 
@@ -195,7 +195,7 @@ prove a new forbidden import edge fails, expanding the head baseline beyond the
 merge-base set fails, and `--final` with a nonempty baseline fails. The
 structured-clone test contains no live platform objects.
 
-- [ ] **Step 5: Commit, independently review, fix, and merge PR A1**
+- [x] **Step 5: Commit, independently review, fix, and merge PR A1**
 
 Commit subject: `refactor(docx): establish immutable layout boundaries`.
 Use the roadmap review gate and merge only with all checks and findings clear.
@@ -283,7 +283,7 @@ anchor extents (`wp:extent`) supply image/chart intrinsic layout size. Font
 substitution is environment/Office compatibility behavior and must emit a
 resolution record, not hide inside paragraph geometry.
 
-- [ ] **Step 1: Write failing service, option, convergence, and error-page tests**
+- [x] **Step 1: Write failing service, option, convergence, and error-page tests**
 
 Use fake font inventories and glyph measurers to cover ASCII, East Asian,
 complex-script, theme, embedded, local, Google, missing, bold, and italic
@@ -311,7 +311,7 @@ import `{ normalizeInternalDocumentModel }` from `../parser-model.js` in
 re-export, alias, leak, or extra reference cases fail. All other gateway edges
 remain traversed; erased type-only contracts remain valid.
 
-- [ ] **Step 2: Run tests to verify Red**
+- [x] **Step 2: Run tests to verify Red**
 
 Run:
 
@@ -322,7 +322,7 @@ pnpm vitest run packages/docx/src/layout/font-service.test.ts packages/docx/src/
 Expected: FAIL because services/options/convergence do not exist and
 `drawParseErrorPlaceholder` wraps with Canvas `measureText` during paint.
 
-- [ ] **Step 3: Implement final instance-scoped services before feature migration**
+- [x] **Step 3: Implement final instance-scoped services before feature migration**
 
 Snapshot available font families and resources into immutable per-document
 service instances, reuse format-neutral core resource primitives, and keep DOCX
@@ -367,7 +367,7 @@ sole use to the exported `documentMathOccurrences` return of
 re-export, alias, leak, or extra references; traverse every other gateway edge
 normally. Erased type-only contracts do not create runtime paths.
 
-- [ ] **Step 4: Verify Green and main/worker service parity**
+- [x] **Step 4: Verify Green and main/worker service parity**
 
 Run:
 
@@ -391,7 +391,7 @@ edges are inspected and type-only contracts stay erased; the exact public API
 surface is unchanged; and `rg` has no production global-state or
 paint-error-wrapper matches.
 
-- [ ] **Step 5: Commit, independently review, fix, and merge PR A2**
+- [x] **Step 5: Commit, independently review, fix, and merge PR A2**
 
 Commit subject: `refactor(docx): establish deterministic layout services`.
 Use the roadmap review gate.
@@ -532,7 +532,7 @@ pnpm typecheck
 
 Expected: tests and typecheck pass; `rg` has no production matches.
 
-- [ ] **Step 5: Commit, independently review, fix, and merge PR A3**
+- [x] **Step 5: Commit, independently review, fix, and merge PR A3**
 
 Commit subject: `refactor(docx): make paragraph paint consume layout geometry`.
 Use the roadmap review gate.
@@ -545,7 +545,16 @@ Use the roadmap review gate.
 - Create: `packages/docx/src/layout/table.test.ts`
 - Create: `packages/docx/src/paint/canvas-table.ts`
 - Create: `packages/docx/src/paint/canvas-table.test.ts`
+- Create: `packages/docx/src/layout/intrinsic-width.ts`
+- Create: `packages/docx/src/layout/table-acquisition.ts`
+- Create: `packages/docx/src/layout/table-columns.ts`
+- Create: `packages/docx/src/paint/canvas-border.ts`
 - Modify: `packages/docx/src/layout/types.ts`
+- Modify: `packages/docx/parser/src/types.rs`
+- Modify: `packages/docx/parser/src/parser.rs`
+- Modify: `packages/docx/src/parser-model.ts`
+- Modify: `packages/docx/src/cell-border-conflict.ts`
+- Modify: `packages/docx/src/cell-border-conflict.test.ts`
 - Modify: `packages/docx/src/table-fragments.ts`
 - Modify: `packages/docx/src/renderer.ts`
 - Modify: `packages/docx/src/table-layout-reuse.test.ts`
@@ -562,6 +571,11 @@ Use the roadmap review gate.
 (`w:tblGrid`), §17.4.52 (`w:tblLayout`), §17.4.80 (`w:trHeight`),
 §17.4.84 (`w:vMerge`), §17.4.68 (`w:tcMar`), §17.4.71 (`w:tcW`), and
 the table/cell border conflict rules in §17.4 define the retained geometry.
+Word-specific conflict weights, `nil` suppression, omitted `hRule`, and exact-row
+bottom padding follow `[MS-OI29500]` 2.1.169 and 2.1.180. Parser-private wire
+facts preserve authored presence, lexical width kinds, style/exception layers,
+logical margins, and cell spacing; `parser-model.ts` snapshots them into plain
+immutable acquisition inputs without widening the public declaration surface.
 
 ```ts
 export interface TableLayout {
@@ -576,11 +590,15 @@ export interface TableLayout {
   readonly rows: readonly TableRowLayout[];
   readonly borders: readonly ResolvedBorderSegment[];
 }
-export function layoutTable(input: TableLayoutInput, services: LayoutServices): TableLayout;
+export function layoutTable(
+  input: TableLayoutInput,
+  placement: FlowBlockPlacement,
+  services: LayoutServices,
+): BlockLayoutResult<TableLayout>;
 export function paintTableLayout(node: TableLayout, context: CanvasPaintContext): void;
 ```
 
-- [ ] **Step 1: Write failing single-acquisition tests**
+- [x] **Step 1: Write failing single-acquisition tests**
 
 Create a counting `TextLayoutService` and synthetic fixed/auto tables containing
 paragraphs, nested tables, vertical merges, row spans, exact/at-least heights,
@@ -588,7 +606,18 @@ cell margins, and conflicting borders. Assert each paragraph is shaped once per
 placement, row heights equal the sum/max of retained child layouts, and paint
 does not increment the counter.
 
-- [ ] **Step 2: Run tests to verify Red**
+Add parser/layout fixtures for: omitted and partially authored `tblGrid`, a
+`gridSpan` which extends the grid, fixed and autofit `tblW`/`tcW` constraints,
+`wBefore`/`wAfter`, explicit versus omitted `trHeight/@hRule`, exact-row bottom
+padding, `tblPrEx`, direct/exception/table `tblCellSpacing`, logical start/end
+cell margins, `nil` versus `none`, and preservation of the effective style ID
+needed to recognize adjacent same-style in-flow tables. The actual adjacent
+body-element grouping belongs to A6's sequence-normalization/page-flow state
+machine, where intervening paragraphs and floating-table exclusions are visible.
+These fixtures are semantic and synthetic; no private sample name or empirical
+constant may select behavior.
+
+- [x] **Step 2: Run tests to verify Red**
 
 Run:
 
@@ -600,7 +629,7 @@ Expected: counting assertions fail because `buildTableCellBlocks` performs a
 second cell-content measurement and paint retains a legacy supplied-geometry
 bridge.
 
-- [ ] **Step 3: Implement one retained table acquisition**
+- [x] **Step 3: Implement one retained table acquisition**
 
 Resolve the grid, lay out each cell's blocks once, compute intrinsic cell heights
 from those retained blocks, resolve row/vMerge heights, translate child bounds to
@@ -608,24 +637,37 @@ final cell positions, and resolve shared border segments once. Recursively use
 the same function for nested tables. `paintTableLayout` draws stored backgrounds,
 children, clipping, and border segments only.
 
-Remove `tableColWidthsPt`, `tableRowHeightsPt`, and `tableLayoutInputs` from
-`PaginatedBodyElement`; delete their writes and reuse checks for in-flow and
-nested tables. Delete the second paragraph acquisition in
+Delete the writes and reuse checks for `tableColWidthsPt`, `tableRowHeightsPt`,
+and `tableLayoutInputs` from ordinary in-flow and nested-table paths. A5 keeps
+the fields temporarily only for floating and page-split tables, then removes
+them with the remaining legacy gate. Delete the second paragraph acquisition in
 `buildTableCellBlocks`; preserve a single function that converts retained child
 layouts into page fragments.
 
-- [ ] **Step 4: Verify Green and mutation safety**
+Treat missing grid widths as zero and extend the grid for over-wide spans per
+§17.4.16/§17.4.17/§17.4.48. Apply preferred table/cell widths as constraints
+instead of assuming a saved grid already contains Word's result. Resolve cell
+margins and spacing by their documented precedence layers. Model each vertical
+merge as an interval minimum over row tracks; satisfy a deficit at the latest
+growable `auto`/`atLeast` row so exact rows remain exact. This is a deterministic
+solver policy for an under-specified distribution, not a claim about a hidden
+Word rule; retain the policy rationale in code. Resolve and retain border
+segments after row/column geometry, using the Word conflict deviations only
+where `[MS-OI29500]` documents them.
+
+- [x] **Step 4: Verify Green and mutation safety**
 
 Run:
 
 ```bash
 pnpm vitest run packages/docx/src/layout/table.test.ts packages/docx/src/paint/canvas-table.test.ts packages/docx/src/table-layout-reuse.test.ts packages/docx/src/cell-border-conflict-render.test.ts packages/docx/src/column-widths.test.ts
-rg -n 'tableColWidthsPt|tableRowHeightsPt|tableLayoutInputs' packages/docx/src --glob '!**/*.test.ts'
+rg -n 'tableColWidthsPt|tableRowHeightsPt|tableLayoutInputs' packages/docx/src/renderer.ts
 pnpm typecheck
 ```
 
 Expected: tests pass, parser input remains deeply equal before/after layout and
-paint, and `rg` has no production matches.
+paint, and every remaining `rg` match is owned by A5's floating/page-split
+migration rather than ordinary or nested table acquisition.
 
 - [ ] **Step 5: Commit, independently review, fix, and merge PR A4**
 
@@ -762,7 +804,10 @@ export function paginateBody(input: BodyLayoutInput, services: LayoutServices, o
 Cover explicit page/column breaks, continuous and next-page sections, even/odd
 parity pages, mixed page sizes, per-section vertical direction, multi-column
 regions starting mid-page, keep-next, widow/orphan control, hidden paragraphs,
-and bottom-margin overflow. Include DATE/TIME and NUMPAGES cases whose text changes
+bottom-margin overflow, and consecutive in-flow `w:tbl` elements with the same
+effective style (including a different-style, intervening-paragraph, and floating
+table non-merge case) per §17.4.37 and the corresponding Microsoft floating-table
+compatibility note. Include DATE/TIME and NUMPAGES cases whose text changes
 wrapping. Serialize the same synthetic document plus identical
 `LayoutOptions`/font inventory through direct layout and the render-worker layout
 handler and assert identical fingerprints and page sizes. Assert different
@@ -782,7 +827,9 @@ are recovered from element stamps rather than `LayoutPage`.
 
 - [ ] **Step 3: Implement explicit transitions and page ownership**
 
-Make each transition return a new `PageFlowState`; store section, geometry,
+Normalize consecutive same-style in-flow tables into one logical table before
+page transitions, without merging across paragraphs or floating tables. Make
+each transition return a new `PageFlowState`; store section, geometry,
 columns, content origin, page numbering, direction, header/footer references,
 and parity-page metadata on `LayoutPage`. Replace `computePages` closure state
 with `paginateBody`. The render worker retains `Map<string, DocumentLayout>` keyed

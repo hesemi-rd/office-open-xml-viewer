@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { CellElement, DocParagraph, DocTable, DocTableCell } from '../types.js';
-import type { ParagraphLayout } from './types.js';
+import type { FlowFragment } from '../layout-fragments.js';
+import type { ParagraphLayout, TableLayout } from './types.js';
 import { acquireTableCellBlocks, resolveRetainedCellBlockPlacement } from './table-cell-blocks.js';
 
 function paragraph(text: string): Extract<CellElement, { type: 'paragraph' }> {
@@ -32,6 +33,45 @@ function retainedParagraph(path: readonly number[], yPt: number): ParagraphLayou
   };
 }
 
+function retainedNestedTable(
+  path: readonly number[],
+  widthPt: number,
+  heightPt: number,
+  nestedBlocks: readonly FlowFragment[],
+): TableLayout {
+  const blocks = nestedBlocks.map((layout) => {
+    if (layout.kind === 'table' && !('flowBounds' in layout)) {
+      throw new Error('ordinary nested acquisition must retain a TableLayout');
+    }
+    return { layout, offsetPt: 0, advancePt: layout.advancePt };
+  });
+  return {
+    kind: 'table', id: `nested-${path.join('.')}`,
+    source: { story: 'body', storyInstance: 'body', path: [...path] },
+    flowDomainId: 'table-cell', ordinaryFlow: true,
+    flowBounds: { xPt: 0, yPt: 0, widthPt, heightPt },
+    inkBounds: { xPt: 0, yPt: 0, widthPt, heightPt },
+    advancePt: heightPt, columnWidthsPt: [widthPt], borders: [],
+    rows: [{
+      kind: 'table-row', id: `nested-row-${path.join('.')}`,
+      source: { story: 'body', storyInstance: 'body', path: [...path, 0] },
+      flowDomainId: 'table-cell', ordinaryFlow: true,
+      flowBounds: { xPt: 0, yPt: 0, widthPt, heightPt },
+      inkBounds: { xPt: 0, yPt: 0, widthPt, heightPt },
+      advancePt: heightPt, heightPt, contentHeightPt: heightPt,
+      cells: [{
+        kind: 'table-cell', id: `nested-cell-${path.join('.')}`,
+        source: { story: 'body', storyInstance: 'body', path: [...path, 0, 0] },
+        flowDomainId: 'table-cell', ordinaryFlow: true,
+        flowBounds: { xPt: 0, yPt: 0, widthPt, heightPt },
+        inkBounds: { xPt: 0, yPt: 0, widthPt, heightPt },
+        contentBounds: { xPt: 0, yPt: 0, widthPt, heightPt },
+        advancePt: heightPt, verticalMerge: 'none', vAlign: 'top', blocks,
+      }],
+    }],
+  };
+}
+
 describe('table cell block acquisition', () => {
   it('retains paragraph/nested-table document order and recursively advances cell state', () => {
     const nested = table([cell([paragraph('nested')])]);
@@ -56,37 +96,22 @@ describe('table cell block acquisition', () => {
       acquireNestedTable: (state, nestedTable, contentWidthPt, sourcePath, continuation, recurse) => {
         events.push(`t:${state.yPt}:${contentWidthPt}`);
         const nestedCell = nestedTable.rows[0]!.cells[0]!;
-        return {
-          kind: 'table', source: nestedTable,
-          columnWidthsPt: [contentWidthPt],
-          continuesFromPreviousPage: continuation.fromPrevious,
-          continuesOnNextPage: continuation.onNext,
-          rows: [{
-            source: nestedTable.rows[0]!, sourceRowIndex: 0, heightPt: 10,
-            repeatedHeader: false,
-            cells: [{
-              source: nestedCell, verticalMerge: 'none', boxHeightPt: 10,
-              blocks: recurse(
-                nestedCell,
-                nestedTable,
-                contentWidthPt,
-                state,
-                [...sourcePath, 0, 0],
-              ),
-              blockPlacements: [],
-              contentTranslationPt: 0,
-              inkBlock: { topPt: 0, heightPt: 0 },
-            }],
-          }],
-        };
+        expect(continuation).toEqual({ fromPrevious: false, onNext: false });
+        return retainedNestedTable(sourcePath, contentWidthPt, 10, recurse(
+          nestedCell,
+          nestedTable,
+          contentWidthPt,
+          state,
+          [...sourcePath, 0, 0],
+        ));
       },
       advanceState: (state, advancePt) => { state.yPt += advancePt; },
     });
 
     expect(blocks.map((block) => block.kind)).toEqual(['paragraph', 'table', 'paragraph']);
     const nestedBlock = blocks[1];
-    expect(nestedBlock?.kind === 'table'
-      ? nestedBlock.rows[0]?.cells[0]?.blocks.map((block) => block.kind)
+    expect(nestedBlock?.kind === 'table' && 'flowBounds' in nestedBlock
+      ? nestedBlock.rows[0]?.cells[0]?.blocks.map((block) => block.layout.kind)
       : []).toEqual(['paragraph']);
     expect(events).toEqual([
       'p:0.0.0:0:40',
@@ -123,25 +148,13 @@ describe('table cell block acquisition', () => {
         decisions.push([(para.runs[0] as { text: string }).text, edges]);
         return retainedParagraph(path, state.yPt);
       },
-      acquireNestedTable: (state, nestedTable, widthPt, sourcePath, continuation, recurse) => ({
-        kind: 'table', source: nestedTable, columnWidthsPt: [widthPt],
-        continuesFromPreviousPage: continuation.fromPrevious,
-        continuesOnNextPage: continuation.onNext,
-        rows: [{
-          source: nestedTable.rows[0]!, sourceRowIndex: 0, heightPt: 20,
-          repeatedHeader: false,
-          cells: [{
-            source: nestedTable.rows[0]!.cells[0]!, verticalMerge: 'none', boxHeightPt: 20,
-            blocks: recurse(
-              nestedTable.rows[0]!.cells[0]!, nestedTable, widthPt, state,
-              [...sourcePath, 0, 0],
-            ),
-            blockPlacements: [],
-            contentTranslationPt: 0,
-            inkBlock: { topPt: 0, heightPt: 0 },
-          }],
-        }],
-      }),
+      acquireNestedTable: (state, nestedTable, widthPt, sourcePath, continuation, recurse) => {
+        expect(continuation).toEqual({ fromPrevious: false, onNext: false });
+        return retainedNestedTable(sourcePath, widthPt, 20, recurse(
+          nestedTable.rows[0]!.cells[0]!, nestedTable, widthPt, state,
+          [...sourcePath, 0, 0],
+        ));
+      },
       advanceState: (state, advancePt) => { state.yPt += advancePt; },
     });
 

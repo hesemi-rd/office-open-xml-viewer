@@ -14,7 +14,7 @@ import {
   type FlowFragment,
   type PlacedFragment,
 } from './layout-fragments.js';
-import type { ParagraphLayout } from './layout/types.js';
+import type { ParagraphLayout, TableCellLayout, TableLayout } from './layout/types.js';
 import type {
   BodyElement,
   CellElement,
@@ -148,22 +148,45 @@ function doc(body: BodyElement[], pageHeight = 400): DocxDocumentModel {
   } as unknown as DocxDocumentModel;
 }
 
-/** Every placed table fragment on every page, in document order. */
-function allTables(model: DocxDocumentModel): { placed: PlacedFragment; table: TableFragment }[] {
+type RetainedTable = TableLayout | TableFragment;
+
+/** Every placed retained table on every page, in document order. */
+function allTables(model: DocxDocumentModel): { placed: PlacedFragment; table: RetainedTable }[] {
   const layout = layoutDocument(model);
-  const out: { placed: PlacedFragment; table: TableFragment }[] = [];
+  const out: { placed: PlacedFragment; table: RetainedTable }[] = [];
   for (const page of layout.pages) {
     for (const placed of page.fragments) {
-      if (placed.fragment.kind === 'table') out.push({ placed, table: placed.fragment });
+      if (placed.fragment.kind === 'table') {
+        out.push({ placed, table: placed.fragment });
+      }
     }
   }
   return out;
 }
 
-function firstParagraphBlock(cf: CellFragment): ParagraphLayout {
+function firstParagraphBlock(cf: CellFragment | TableCellLayout): ParagraphLayout {
   const block = cf.blocks[0];
-  if (!block || block.kind !== 'paragraph') throw new Error('expected a paragraph block');
+  if (!block) throw new Error('expected a paragraph block');
+  if ('layout' in block) {
+    if (block.layout.kind !== 'paragraph') throw new Error('expected a paragraph block');
+    return block.layout;
+  }
+  if (block.kind !== 'paragraph') throw new Error('expected a paragraph block');
   return block;
+}
+
+function requireTableLayout(table: RetainedTable): TableLayout {
+  if (!('flowBounds' in table)) throw new Error('expected an ordinary retained table layout');
+  return table;
+}
+
+function requireTableFragment(table: RetainedTable): TableFragment {
+  if ('flowBounds' in table) throw new Error('expected a page-split table fragment');
+  return table;
+}
+
+function retainedTableHeightPt(table: RetainedTable): number {
+  return 'flowBounds' in table ? table.advancePt : tableFragmentHeightPt(table);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -382,7 +405,9 @@ describe('buildTableFragment — pure recursion contract', () => {
     expect(Object.isFrozen(fragment.rows[0]?.source)).toBe(true);
     expect(Object.isFrozen(fragment.rows[0]?.cells[0]?.source)).toBe(true);
     const nestedRetained = fragment.rows[0]?.cells[0]?.blocks[1];
-    expect(nestedRetained?.kind === 'table' && Object.isFrozen(nestedRetained.source)).toBe(true);
+    expect(nestedRetained?.kind === 'table'
+      && !('flowBounds' in nestedRetained)
+      && Object.isFrozen(nestedRetained.source)).toBe(true);
 
     source.jc = 'right';
     source.rows[0]!.cells[0]!.background = 'ffffff';
@@ -396,18 +421,16 @@ describe('buildTableFragment — pure recursion contract', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('layoutDocument — table fragments', () => {
-  it('emits a placed table fragment from a clone that preserves parsed row identity', () => {
+  it('emits a parser-independent placed TableLayout for an ordinary table', () => {
     const t = table([row([textCell('a'), textCell('b')])], [80, 80]);
     const tables = allTables(doc([t as unknown as BodyElement]));
     expect(tables).toHaveLength(1);
-    expect(tables[0].table.source).not.toBe(t);
-    expect(tables[0].table.source.rows).not.toBe(t.rows);
-    expect(tables[0].table.source.rows).toEqual(t.rows);
-    expect(tables[0].table.rows).toHaveLength(1);
-    expect(tables[0].table.continuesFromPreviousPage).toBe(false);
-    expect(tables[0].table.continuesOnNextPage).toBe(false);
+    const retained = requireTableLayout(tables[0].table);
+    expect(retained.source).toEqual({ story: 'body', storyInstance: 'body', path: [0] });
+    expect(retained.source).not.toBe(t);
+    expect(retained.rows).toHaveLength(1);
     // column widths sum to the table width the paginator resolved (≤ content band)
-    const sum = tables[0].table.columnWidthsPt.reduce((s, w) => s + w, 0);
+    const sum = retained.columnWidthsPt.reduce((s, w) => s + w, 0);
     expect(sum).toBeGreaterThan(0);
     expect(sum).toBeLessThanOrEqual(180 + 1e-6);
   });
@@ -422,7 +445,7 @@ describe('layoutDocument — table fragments', () => {
   });
 
   it('keeps table fragment side-table entries isolated across pagination runs', () => {
-    const t = table([row([textCell('a')])], [200]);
+    const t = table([row([textCell('a')])], [200], { widthPct: 5000 });
     const body = [t as unknown as BodyElement];
     const wideSection = doc(body).section;
     const narrowSection = { ...wideSection, pageWidth: 150 };
@@ -446,7 +469,7 @@ describe('layoutDocument — table fragments', () => {
     const cellPara = para('hello');
     const c = cell([{ type: 'paragraph', ...cellPara } as unknown as CellElement]);
     const t = table([row([c])], [120]);
-    const { table: tf } = allTables(doc([t as unknown as BodyElement]))[0];
+    const tf = requireTableLayout(allTables(doc([t as unknown as BodyElement]))[0].table);
     const block = firstParagraphBlock(tf.rows[0].cells[0]);
     expect(block.kind).toBe('paragraph');
     expect(block).not.toHaveProperty('measured');
@@ -459,7 +482,9 @@ describe('layoutDocument — table fragments', () => {
     const rows = Array.from({ length: 12 }, (_v, i) => row([textCell(`row ${i}`)]));
     const t = table(rows, [120]);
     // page height 120 with 10pt margins → ~100pt body; each auto row ~ MIN 10pt+
-    const tables = allTables(doc([t as unknown as BodyElement], 120));
+    const tables = allTables(doc([t as unknown as BodyElement], 120)).map(({ placed, table }) => ({
+      placed, table: requireTableFragment(table),
+    }));
     expect(tables.length).toBeGreaterThanOrEqual(2);
     expect(tables[0].table.continuesOnNextPage).toBe(true);
     expect(tables[0].table.continuesFromPreviousPage).toBe(false);
@@ -490,14 +515,16 @@ describe('layoutDocument — table fragments', () => {
     // The 30pt body band admits one row per page. Every emitted one-row table
     // paints both horizontal edges as 4pt outer rules, so its 20pt content box
     // reserves half of each rule: 20 + 2 + 2 = 24pt.
-    const tables = allTables(doc([t as unknown as BodyElement], 50));
+    const tables = allTables(doc([t as unknown as BodyElement], 50)).map(({ placed, table }) => ({
+      placed, table: requireTableFragment(table),
+    }));
 
     expect(tables).toHaveLength(3);
     expect(tables.map(({ table: fragment }) => fragment.rows[0].heightPt))
       .toEqual([24, 24, 24]);
   });
 
-  it('chooses the largest fitting mixed exact/auto slice endpoint', () => {
+  it('keeps border ink outside the row-track flow height', () => {
     const outer = singleBorder(12);
     const rows = [
       row([cell([])], { rowHeight: 10, rowHeightRule: 'auto' }),
@@ -517,15 +544,18 @@ describe('layoutDocument — table fragments', () => {
       },
     });
 
-    // Prefix slice heights are non-monotonic because exact rows already contain
-    // their complete §17.4.80 boxes: [22, 17, 33, 28, 44]. The 32pt band must
-    // therefore select the four-row endpoint (28pt), not the two-row endpoint.
+    // §17.4.80 owns the row-track heights: 10 + 1 + 10 + 1 + 10 = 32pt.
+    // The 12pt outer rules are centred on the first/last row boundaries, so
+    // their 6pt overhang belongs to inkBounds rather than inflating an auto row
+    // or changing the page-fit allocation.
     const tables = allTables(doc([t as unknown as BodyElement], 52));
 
-    expect(tables.map(({ table: fragment }) => fragment.rows.length))
-      .toEqual([4, 1]);
-    expect(tables.map(({ table: fragment }) => tableFragmentHeightPt(fragment)))
-      .toEqual([28, 22]);
+    expect(tables).toHaveLength(1);
+    const retained = requireTableLayout(tables[0]!.table);
+    expect(retained.rows).toHaveLength(5);
+    expect(retained.advancePt).toBe(32);
+    expect(retained.flowBounds.heightPt).toBe(32);
+    expect(retained.inkBounds.heightPt).toBe(44);
   });
 
   it('re-resolves repeated-header boundaries for each atLeast page slice', () => {
@@ -554,7 +584,9 @@ describe('layoutDocument — table fragments', () => {
     // A header + one body row occupies 45pt in every slice:
     //   header 20 + outer-top/2 2 + inside/2 0.5 = 22.5
     //   body   20 + inside/2 0.5 + outer-bottom/2 2 = 22.5
-    const tables = allTables(doc([t as unknown as BodyElement], 70));
+    const tables = allTables(doc([t as unknown as BodyElement], 70)).map(({ placed, table }) => ({
+      placed, table: requireTableFragment(table),
+    }));
 
     expect(tables).toHaveLength(3);
     for (const { table: fragment } of tables) {
@@ -590,7 +622,9 @@ describe('layoutDocument — table fragments', () => {
     // contributes outer-top/2 + insideH/2, while exact rows already contain
     // their complete boxes. Treating the header alone during the scan would
     // incorrectly charge outer-bottom/2 and stop after one body row.
-    const tables = allTables(doc([t as unknown as BodyElement], 83));
+    const tables = allTables(doc([t as unknown as BodyElement], 83)).map(({ placed, table }) => ({
+      placed, table: requireTableFragment(table),
+    }));
 
     expect(tables).toHaveLength(2);
     expect(tables.map(({ table: fragment }) => fragment.rows.length))
@@ -607,7 +641,9 @@ describe('layoutDocument — table fragments', () => {
       [row([tallCell]), row([textCell('following row')])],
       [120],
     );
-    const tables = allTables(doc([t as unknown as BodyElement], 120));
+    const tables = allTables(doc([t as unknown as BodyElement], 120)).map(({ placed, table }) => ({
+      placed, table: requireTableFragment(table),
+    }));
     const fragmentRows = tables.flatMap(({ table: fragment }) => fragment.rows);
 
     // Sanity: splitRowsTallerThanPage expanded the first parsed row into pieces.
@@ -635,7 +671,9 @@ describe('layoutDocument — table fragments', () => {
         insideV: null,
       },
     });
-    const tables = allTables(doc([t as unknown as BodyElement], 120));
+    const tables = allTables(doc([t as unknown as BodyElement], 120)).map(({ placed, table }) => ({
+      placed, table: requireTableFragment(table),
+    }));
     const cellContentHeight = (
       layoutFragments as unknown as {
         cellFragmentContentHeightPt: (fragment: CellFragment) => number;
@@ -662,7 +700,9 @@ describe('layoutDocument — table fragments', () => {
     const bodyRows = Array.from({ length: 12 }, (_v, i) => row([textCell(`b${i}`)]));
     const rows = [row([textCell('HEADER')], { isHeader: true }), ...bodyRows];
     const t = table(rows, [120]);
-    const tables = allTables(doc([t as unknown as BodyElement], 120));
+    const tables = allTables(doc([t as unknown as BodyElement], 120)).map(({ placed, table }) => ({
+      placed, table: requireTableFragment(table),
+    }));
     expect(tables.length).toBeGreaterThanOrEqual(2);
     // continuation slices lead with a repeated-header RowFragment referencing the source header row
     for (let i = 1; i < tables.length; i++) {
@@ -674,12 +714,12 @@ describe('layoutDocument — table fragments', () => {
     expect(tables[0].table.rows[0].repeatedHeader).toBe(false);
   });
 
-  it('fragments a nested table as a TableFragment cell block', () => {
+  it('retains an ordinary nested table as a TableLayout cell block', () => {
     const inner = table([row([textCell('inner')])], [80]);
     const outerCell = cell([{ type: 'table', ...inner } as unknown as CellElement]);
     const t = table([row([outerCell])], [120]);
-    const { table: tf } = allTables(doc([t as unknown as BodyElement]))[0];
-    const block = tf.rows[0].cells[0].blocks[0];
+    const tf = requireTableLayout(allTables(doc([t as unknown as BodyElement]))[0].table);
+    const block = tf.rows[0].cells[0].blocks[0]?.layout;
     expect(block).toBeDefined();
     expect(block.kind).toBe('table');
     if (block.kind === 'table') {
@@ -698,13 +738,15 @@ describe('layoutDocument — table fragments', () => {
     );
     const outerCell = cell([{ type: 'table', ...inner } as unknown as CellElement]);
     const outer = table([row([outerCell])], [120]);
-    const outerFragments = allTables(doc([outer as unknown as BodyElement], 120));
+    const outerFragments = allTables(doc([outer as unknown as BodyElement], 120)).map(
+      ({ placed, table }) => ({ placed, table: requireTableFragment(table) }),
+    );
     const nestedFragments: TableFragment[] = [];
     for (const { table: outerFragment } of outerFragments) {
       for (const outerRow of outerFragment.rows) {
         for (const cellFragment of outerRow.cells) {
           for (const block of cellFragment.blocks) {
-            if (block.kind === 'table') nestedFragments.push(block);
+            if (block.kind === 'table' && !('flowBounds' in block)) nestedFragments.push(block);
           }
         }
       }
@@ -726,7 +768,7 @@ describe('layoutDocument — table fragments', () => {
       ],
       [60, 60],
     );
-    const { table: tf } = allTables(doc([t as unknown as BodyElement]))[0];
+    const tf = requireTableLayout(allTables(doc([t as unknown as BodyElement]))[0].table);
     expect(tf.rows[0].cells[0].verticalMerge).toBe('restart');
     expect(tf.rows[1].cells[0].verticalMerge).toBe('continue');
     expect(tf.rows[1].cells[0].blocks).toEqual([]);
@@ -736,7 +778,7 @@ describe('layoutDocument — table fragments', () => {
     const rows = Array.from({ length: 3 }, (_v, i) => row([textCell(`r${i}`)]));
     const t = table(rows, [120]);
     for (const { placed, table: tf } of allTables(doc([t as unknown as BodyElement]))) {
-      expect(placed.heightPt).toBeCloseTo(tableFragmentHeightPt(tf), 6);
+      expect(placed.heightPt).toBeCloseTo(retainedTableHeightPt(tf), 6);
     }
   });
 });

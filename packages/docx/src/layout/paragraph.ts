@@ -1032,6 +1032,7 @@ function retainedNumberingPlan(
 ): RetainedNumberingPlan | undefined {
   const numbering = paragraph.numbering;
   if (!numbering) return undefined;
+  if (context.numberingMarkerGeometry) return context.numberingMarkerGeometry;
   const markerInput = paragraph.numberingMarkerShapeInput;
   const service = options.environment.layoutServices?.text;
   if (!markerInput || !service) return undefined;

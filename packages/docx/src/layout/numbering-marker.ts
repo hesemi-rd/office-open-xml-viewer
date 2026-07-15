@@ -61,6 +61,7 @@ export function applyNumberingBodyOffset<Context extends Readonly<{
     tabStops: readonly TabStop[];
     defaultTabPt?: number;
     service?: TextLayoutService;
+    clusterGeometry?: boolean;
   }>,
 ): Context {
   const { numbering, markerInput, service } = input;
@@ -75,8 +76,12 @@ export function applyNumberingBodyOffset<Context extends Readonly<{
     physicalIndentLeftPt: context.physicalIndentLeftPt,
     tabStops: input.tabStops,
     defaultTabPt: input.defaultTabPt ?? context.defaultTabPt,
-  }, service);
-  return { ...context, firstIndentPt: geometry.bodyOffsetPt };
+  }, service, input.clusterGeometry ?? true);
+  return {
+    ...context,
+    firstIndentPt: geometry.bodyOffsetPt,
+    numberingMarkerGeometry: geometry,
+  };
 }
 
 /** Shape numbering text through the document's one font authority. ECMA-376
@@ -90,6 +95,7 @@ export function shapeNumberingMarkerText(
   text: string,
   scale: number,
   service: TextLayoutService | undefined,
+  clusterGeometry = true,
 ): NumberingMarkerTextLayout | null {
   if (!service) return null;
   const shape = service.shape({
@@ -105,6 +111,7 @@ export function shapeNumberingMarkerText(
     eastAsiaLanguage: input.eastAsiaLanguage,
     kerning: input.kerning,
     measure: true,
+    clusterGeometry,
   });
   return { shape, fontSizePx: input.fontSizePt * scale };
 }
@@ -123,12 +130,19 @@ export function resolveNumberingMarkerGeometry(
     defaultTabPt: number;
   }>,
   service: TextLayoutService,
+  clusterGeometry = true,
 ): NumberingMarkerGeometry {
   const markerText = numbering.picBulletImagePath
     ? ''
     : symbolFontToUnicode(numbering.text, numbering.fontFamily ?? null);
   const markerShape = markerText
-    ? shapeNumberingMarkerText(markerInput, markerText, 1, service)?.shape ?? null
+    ? shapeNumberingMarkerText(
+        markerInput,
+        markerText,
+        1,
+        service,
+        clusterGeometry,
+      )?.shape ?? null
     : null;
   const markerWidthPt = numbering.picBulletImagePath
     ? numbering.picBulletWidthPt ?? markerInput.fontSizePt
@@ -140,7 +154,13 @@ export function resolveNumberingMarkerGeometry(
   const suffix = numbering.suff || 'tab';
   let bodyOffsetPt = markerEndPt;
   if (suffix === 'space') {
-    bodyOffsetPt += shapeNumberingMarkerText(markerInput, ' ', 1, service)?.shape.advancePt ?? 0;
+    bodyOffsetPt += shapeNumberingMarkerText(
+      markerInput,
+      ' ',
+      1,
+      service,
+      clusterGeometry,
+    )?.shape.advancePt ?? 0;
   } else if (suffix === 'tab') {
     bodyOffsetPt = 0;
     if (markerEndPt > 0) {

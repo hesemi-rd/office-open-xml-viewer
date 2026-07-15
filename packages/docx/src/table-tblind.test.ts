@@ -32,7 +32,9 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; xs: number[] } {
   let font = '10px serif';
   const px = () => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
   const xs: number[] = [];
-  const record = (x: number) => xs.push(x);
+  let transform = { scaleX: 1, translateX: 0 };
+  const transformStack: Array<typeof transform> = [];
+  const record = (x: number) => xs.push(transform.translateX + x * transform.scaleX);
   const ctx = {
     get font() { return font; },
     set font(v: string) { font = v; },
@@ -47,10 +49,14 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; xs: number[] } {
         actualBoundingBoxDescent: p * 0.2,
       } as TextMetrics;
     },
-    save() {}, restore() {}, beginPath() {}, closePath() {},
+    save() { transformStack.push({ ...transform }); },
+    restore() { transform = transformStack.pop() ?? { scaleX: 1, translateX: 0 }; },
+    beginPath() {}, closePath() {},
     moveTo(x: number) { record(x); }, lineTo(x: number) { record(x); },
     stroke() {}, fill() {}, fillRect() {}, strokeRect() {},
-    rect() {}, clip() {}, scale() {}, translate() {},
+    rect() {}, clip() {},
+    scale(x: number) { transform.scaleX *= x; },
+    translate(x: number) { transform.translateX += x * transform.scaleX; },
     setLineDash() {}, clearRect() {}, arc() {},
     quadraticCurveTo() {}, bezierCurveTo() {},
     createLinearGradient() { return { addColorStop() {} }; },
@@ -144,13 +150,13 @@ describe('§17.4.50 tblInd — table indent from the leading margin', () => {
     expectNear(Math.min(...withInd.xs), 30, 'RTL left origin = rightEdge - tableW = 30');
   });
 
-  it('a positive tblInd only applies when jc resolves to left/leading (§17.4.50)', async () => {
-    // jc='right' → not leading → tblInd ignored. Table right-aligns to content.
+  it('applies positive tblInd after right alignment like Word ([MS-OI29500] 2.1.155)', async () => {
+    // ECMA-376 §17.4.50 says jc='right' ignores tblInd, but Word explicitly
+    // deviates: resolve right alignment first, then translate by the indent.
     const doc = tableDoc(100, 20, false);
     (doc.body[0] as unknown as DocTable).jc = 'right';
     const rec = makeRecordingCanvas();
     await renderDocumentToCanvas(doc, rec.canvas, 0, { dpr: 1, width: 200 });
-    // jc=right: right edge at contentRight (180), unaffected by the ignored indent.
-    expectNear(Math.max(...rec.xs), 180, 'jc=right ignores tblInd; right edge = contentRight');
+    expectNear(Math.max(...rec.xs), 200, 'Word shifts the right-aligned table by tblInd');
   });
 });

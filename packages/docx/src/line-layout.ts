@@ -325,6 +325,8 @@ export interface LayoutTabSeg extends LayoutSegSource {
   measuredWidth: number;
   /** tab leader to fill the gap (e.g. TOC dot leaders); set during layout. */
   leader?: TabStop['leader'];
+  /** Alignment selected from the effective stop during layout. */
+  resolvedAlignment?: TabStop['alignment'];
   /** Bold/italic of the run carrying the tab (ECMA-376 §17.3.1.37 — the leader
    *  characters take the formatting of the tab's run, e.g. a bold TOC1 entry's
    *  dot leader is bold). Threaded so {@link drawTabLeader} can match the font. */
@@ -3455,6 +3457,7 @@ export function layoutLines(
       // ought to mirror) is unverified; the primary use case (an LTR footer's
       // centered/right-aligned PAGE field) is correct.
       if (seg.ptab) {
+        seg.resolvedAlignment = seg.ptab.alignment;
         // Reference box: "indent" ⇒ the paragraph content box [0, maxWidth];
         // "margin" ⇒ the text-margin box [-tabOriginPx, marginRightPx].
         const boxLeft = seg.ptab.relativeTo === 'indent' ? 0 : -tabOriginPx;
@@ -3528,6 +3531,7 @@ export function layoutLines(
       const curMarginPx = absFromParaX + tabOriginPx;
       const customStopsPx = tabStops.map((t) => ({ pos: t.pos * scale, alignment: t.alignment, leader: t.leader }));
       const stop = nextTabStop(curMarginPx, customStopsPx, defaultTabPt * scale);
+      seg.resolvedAlignment = stop?.alignment ?? 'left';
       // Convert the chosen margin-space stop back to paraX-relative px.
       const stopParaX = stop ? stop.pos - tabOriginPx : absFromParaX;
       // Right/center/decimal tab: place the tab + its trailing content (up to the next
@@ -4246,11 +4250,13 @@ export function layoutLines(
   // returned LayoutLine contract always carries complete, piece-relative
   // grapheme geometry. A missing service is deliberately left unshaped; the
   // retained acquisition boundary rejects that production contract violation.
-  for (const line of lines) {
-    for (const segment of line.segments) {
-      if (!('text' in segment) || segment.metricOnly || segment.text.length === 0) continue;
-      segment.shapedClusters = undefined;
-      if (segment.textLayoutService && segment.textShapeRequest) measureText(segment, true);
+  if (widthPolicy === 'bounded') {
+    for (const line of lines) {
+      for (const segment of line.segments) {
+        if (!('text' in segment) || segment.metricOnly || segment.text.length === 0) continue;
+        segment.shapedClusters = undefined;
+        if (segment.textLayoutService && segment.textShapeRequest) measureText(segment, true);
+      }
     }
   }
 

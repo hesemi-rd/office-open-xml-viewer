@@ -204,22 +204,40 @@ async function renderAllPages(model: DocxDocumentModel, pages: PaginatedBodyElem
 
 function retainedFlowGeometry(fragment: FlowFragment): unknown {
   if (fragment.kind === 'paragraph') return fragment;
-  return {
-    kind: fragment.kind,
-    columnWidthsPt: fragment.columnWidthsPt,
-    continuesFromPreviousPage: fragment.continuesFromPreviousPage,
-    continuesOnNextPage: fragment.continuesOnNextPage,
-    rows: fragment.rows.map((row) => ({
-      sourceRowIndex: row.sourceRowIndex,
-      heightPt: row.heightPt,
-      repeatedHeader: row.repeatedHeader,
-      cells: row.cells.map((cell) => ({
-        verticalMerge: cell.verticalMerge,
-        boxHeightPt: cell.boxHeightPt ?? null,
-        blocks: cell.blocks.map(retainedFlowGeometry),
+  if (fragment.kind === 'table') {
+    if (!('flowBounds' in fragment)) {
+      return {
+        kind: fragment.kind,
+        columnWidthsPt: fragment.columnWidthsPt,
+        continuesFromPreviousPage: fragment.continuesFromPreviousPage,
+        continuesOnNextPage: fragment.continuesOnNextPage,
+        rows: fragment.rows.map((row) => ({
+          sourceRowIndex: row.sourceRowIndex,
+          heightPt: row.heightPt,
+          repeatedHeader: row.repeatedHeader,
+          cells: row.cells.map((cell) => ({
+            verticalMerge: cell.verticalMerge,
+            boxHeightPt: cell.boxHeightPt ?? null,
+            blocks: cell.blocks.map(retainedFlowGeometry),
+          })),
+        })),
+      };
+    }
+    return {
+      kind: fragment.kind,
+      columnWidthsPt: fragment.columnWidthsPt,
+      rows: fragment.rows.map((row) => ({
+        heightPt: row.flowBounds.heightPt,
+        repeatedHeader: row.repeatedHeader ?? false,
+        cells: row.cells.map((cell) => ({
+          verticalMerge: cell.verticalMerge,
+          boxHeightPt: cell.flowBounds.heightPt,
+          blocks: cell.blocks.map((block) => retainedFlowGeometry(block.layout)),
+        })),
       })),
-    })),
-  };
+    };
+  }
+  return fragment;
 }
 
 function retainedFingerprints(pages: PaginatedBodyElement[][]): string[] {
@@ -765,15 +783,26 @@ describe('table-cell retained paragraph paint', () => {
     const pageFieldFragments = pages.flatMap((elements, pageIndex) =>
       elements.flatMap((element) => {
         const placed = bodyFragmentFor(element);
-        if (placed?.fragment.kind !== 'table') return [];
-        return placed.fragment.rows.flatMap((tableRow) =>
-          tableRow.cells.flatMap((cell) =>
-            cell.blocks.flatMap((block) =>
-              block.kind === 'paragraph' && block.lines.some((line) =>
-                line.placements.some((placement) =>
-                  placement.kind === 'text' && placement.dependency === 'page'))
-                ? [{ pageIndex, fragment: block }]
-                : [])));
+        if (placed?.fragment.kind === 'table') {
+          return 'flowBounds' in placed.fragment
+            ? placed.fragment.rows.flatMap((tableRow) =>
+                tableRow.cells.flatMap((cell) =>
+                  cell.blocks.flatMap((block) =>
+                    block.layout.kind === 'paragraph' && block.layout.lines.some((line) =>
+                      line.placements.some((placement) =>
+                        placement.kind === 'text' && placement.dependency === 'page'))
+                      ? [{ pageIndex, fragment: block.layout }]
+                      : [])))
+            : placed.fragment.rows.flatMap((tableRow) =>
+                tableRow.cells.flatMap((cell) =>
+                  cell.blocks.flatMap((block) =>
+                    block.kind === 'paragraph' && block.lines.some((line) =>
+                      line.placements.some((placement) =>
+                        placement.kind === 'text' && placement.dependency === 'page'))
+                      ? [{ pageIndex, fragment: block }]
+                      : [])));
+        }
+        return [];
       }));
     expect(pageFieldFragments).toHaveLength(1);
     const [{ pageIndex, fragment }] = pageFieldFragments;

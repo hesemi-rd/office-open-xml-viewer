@@ -246,12 +246,18 @@ function tableMeasurementGeometry() {
     rowHeightsPt: tables.flatMap((table) => table.tableRowHeightsPt ?? []),
     cellLineCounts: tables.flatMap((table) => {
       const placed = bodyFragmentFor(table);
-      if (placed?.fragment.kind !== 'table') return [];
-      return placed.fragment.rows.flatMap((row) =>
-        row.cells.flatMap((cell) => cell.blocks.map((block) =>
-          block.kind === 'paragraph' ? block.lines.length : null,
-        )),
-      );
+      if (placed?.fragment.kind === 'table') {
+        return 'flowBounds' in placed.fragment
+          ? placed.fragment.rows.flatMap((row) =>
+              row.cells.flatMap((cell) => cell.blocks.map((block) =>
+                block.layout.kind === 'paragraph' ? block.layout.lines.length : null,
+              )))
+          : placed.fragment.rows.flatMap((row) =>
+              row.cells.flatMap((cell) => cell.blocks.map((block) =>
+                block.kind === 'paragraph' ? block.lines.length : null,
+              )));
+      }
+      return [];
     }),
   };
 }

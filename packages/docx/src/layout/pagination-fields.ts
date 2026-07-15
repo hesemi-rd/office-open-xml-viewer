@@ -149,22 +149,45 @@ export function paginationFieldFlowGeometry(fragment: FlowFragment): unknown {
       })),
     };
   }
-  return {
-    kind: fragment.kind,
-    columnWidthsPt: fragment.columnWidthsPt,
-    continuesFromPreviousPage: fragment.continuesFromPreviousPage,
-    continuesOnNextPage: fragment.continuesOnNextPage,
-    rows: fragment.rows.map((row) => ({
-      sourceRowIndex: row.sourceRowIndex,
-      heightPt: row.heightPt,
-      repeatedHeader: row.repeatedHeader,
-      cells: row.cells.map((cell) => ({
-        verticalMerge: cell.verticalMerge,
-        boxHeightPt: cell.boxHeightPt,
-        blocks: cell.blocks.map(paginationFieldFlowGeometry),
+  if (fragment.kind === 'table') {
+    if (!('flowBounds' in fragment)) {
+      return {
+        kind: fragment.kind,
+        columnWidthsPt: fragment.columnWidthsPt,
+        continuesFromPreviousPage: fragment.continuesFromPreviousPage,
+        continuesOnNextPage: fragment.continuesOnNextPage,
+        rows: fragment.rows.map((row) => ({
+          sourceRowIndex: row.sourceRowIndex,
+          heightPt: row.heightPt,
+          repeatedHeader: row.repeatedHeader,
+          cells: row.cells.map((cell) => ({
+            verticalMerge: cell.verticalMerge,
+            boxHeightPt: cell.boxHeightPt,
+            blocks: cell.blocks.map(paginationFieldFlowGeometry),
+          })),
+        })),
+      };
+    }
+    return {
+      kind: fragment.kind,
+      flowBounds: fragment.flowBounds,
+      inkBounds: fragment.inkBounds,
+      advancePt: fragment.advancePt,
+      columnWidthsPt: fragment.columnWidthsPt,
+      borders: fragment.borders,
+      rows: fragment.rows.map((row) => ({
+        flowBounds: row.flowBounds,
+        contentHeightPt: row.contentHeightPt,
+        cells: row.cells.map((cell) => ({
+          flowBounds: cell.flowBounds,
+          contentBounds: cell.contentBounds,
+          verticalMerge: cell.verticalMerge,
+          blocks: cell.blocks.map((block) => paginationFieldFlowGeometry(block.layout)),
+        })),
       })),
-    })),
-  };
+    };
+  }
+  throw new Error('Unsupported retained flow fragment');
 }
 
 function definedRuntimeGeometry(value: unknown): unknown {

@@ -1,0 +1,456 @@
+import type {
+  TableColumnCellConstraint,
+  TableColumnLayoutInput,
+  TableColumnRowConstraint,
+  TablePreferredWidthConstraint,
+} from './types.js';
+
+const EPSILON_PT = 1e-9;
+
+export interface TableCellHorizontalSpacingInsets {
+  readonly startPt: number;
+  readonly endPt: number;
+}
+
+/** §17.4.43/.44/.45 spacing lives inside the table grid: an outer edge owns
+ * the full spacing and two adjacent cells share one inner gap. This projection
+ * is shared by intrinsic constraints, child acquisition, and final cell boxes
+ * so each stage uses the same content width. */
+export function tableCellHorizontalSpacingInsets(
+  spacingPt: number,
+  columnStart: number,
+  columnSpan: number,
+  columnCount: number,
+): TableCellHorizontalSpacingInsets {
+  const spacing = Number.isFinite(spacingPt) ? Math.max(0, spacingPt) : 0;
+  const start = Math.max(0, columnStart);
+  const end = start + Math.max(1, columnSpan);
+  return {
+    startPt: start === 0 ? spacing : spacing / 2,
+    endPt: end >= Math.max(0, columnCount) ? spacing : spacing / 2,
+  };
+}
+
+function finiteNonNegative(value: number): number {
+  return Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+
+function cleanWidths(widths: readonly number[]): number[] {
+  return widths.map((width) => (Math.abs(width) <= EPSILON_PT ? 0 : width));
+}
+
+function requiredColumnCount(input: TableColumnLayoutInput): number {
+  let count = input.gridWidthsPt.length;
+  for (const row of input.rows) {
+    for (const cell of row.cells) {
+      count = Math.max(count, cell.columnStart + Math.max(1, cell.columnSpan));
+    }
+    const lastCellEnd = row.cells.reduce(
+      (maximum, cell) => Math.max(maximum, cell.columnStart + Math.max(1, cell.columnSpan)),
+      row.before?.columnSpan ?? 0,
+    );
+    count = Math.max(count, lastCellEnd + (row.after?.columnSpan ?? 0));
+  }
+  return count;
+}
+
+function spanSum(widths: readonly number[], start: number, span: number): number {
+  let total = 0;
+  const end = Math.min(widths.length, start + Math.max(1, span));
+  for (let column = Math.max(0, start); column < end; column += 1) {
+    total += widths[column] ?? 0;
+  }
+  return total;
+}
+
+function preferredPoints(
+  preferred: TablePreferredWidthConstraint | null,
+  percentageBasePt: number,
+): number | null {
+  if (!preferred) return null;
+  return preferred.kind === 'pct'
+    ? finiteNonNegative(preferred.value) * percentageBasePt
+    : finiteNonNegative(preferred.value);
+}
+
+function setFirstRowSpan(
+  widths: number[],
+  start: number,
+  span: number,
+  preferredPt: number,
+): void {
+  const safeStart = Math.max(0, start);
+  const safeSpan = Math.max(1, Math.min(span, widths.length - safeStart));
+  if (safeSpan <= 0) return;
+  const currentPt = spanSum(widths, safeStart, safeSpan);
+  if (currentPt <= EPSILON_PT) {
+    widths[safeStart + safeSpan - 1] = preferredPt;
+    return;
+  }
+  // The guidance does not assign a first-row spanning delta to an individual
+  // grid track. Preserve the authored tblGrid proportions inside that span;
+  // subsequent-row disagreements have a separately documented last-ending
+  // column rule below.
+  const scale = preferredPt / currentPt;
+  for (let column = safeStart; column < safeStart + safeSpan; column += 1) {
+    widths[column] = (widths[column] ?? 0) * scale;
+  }
+}
+
+function growLaterRowSpan(
+  widths: number[],
+  start: number,
+  span: number,
+  preferredPt: number,
+): void {
+  const safeStart = Math.max(0, start);
+  const safeSpan = Math.max(1, Math.min(span, widths.length - safeStart));
+  if (safeSpan <= 0) return;
+  const currentPt = spanSum(widths, safeStart, safeSpan);
+  if (preferredPt <= currentPt + EPSILON_PT) return;
+  // §17.18.87's fixed guidance assigns a later-row disagreement to the last
+  // grid column ending at that boundary. Keeping that exact ownership avoids a
+  // sample-dependent distribution rule for merged cells.
+  widths[safeStart + safeSpan - 1] += preferredPt - currentPt;
+}
+
+function rowConstraints(
+  row: TableColumnRowConstraint,
+  columnCount: number,
+): Array<Readonly<{
+  start: number;
+  span: number;
+  preferred: TablePreferredWidthConstraint | null;
+}>> {
+  const constraints: Array<Readonly<{
+    start: number;
+    span: number;
+    preferred: TablePreferredWidthConstraint | null;
+  }>> = [];
+  if (row.before && row.before.columnSpan > 0) {
+    constraints.push({ start: 0, span: row.before.columnSpan, preferred: row.before.preferredWidth });
+  }
+  for (const cell of row.cells) {
+    constraints.push({
+      start: cell.columnStart,
+      span: cell.columnSpan,
+      preferred: cell.preferredWidth,
+    });
+  }
+  if (row.after && row.after.columnSpan > 0) {
+    constraints.push({
+      start: Math.max(0, columnCount - row.after.columnSpan),
+      span: row.after.columnSpan,
+      preferred: row.after.preferredWidth,
+    });
+  }
+  return constraints;
+}
+
+function fixedWidths(input: TableColumnLayoutInput, columnCount: number): number[] {
+  const widths = Array.from({ length: columnCount }, (_unused, column) => (
+    finiteNonNegative(input.gridWidthsPt[column] ?? 0)
+  ));
+  const initialTotalPt = widths.reduce((sum, width) => sum + width, 0);
+  const percentageBasePt = input.tablePreferredWidthPt
+    ?? (initialTotalPt > 0 ? initialTotalPt : finiteNonNegative(input.availableWidthPt));
+
+  input.rows.forEach((row, rowIndex) => {
+    for (const constraint of rowConstraints(row, columnCount)) {
+      const preferredPt = preferredPoints(constraint.preferred, percentageBasePt);
+      if (preferredPt === null) continue;
+      if (rowIndex === 0) {
+        setFirstRowSpan(widths, constraint.start, constraint.span, preferredPt);
+      } else {
+        growLaterRowSpan(widths, constraint.start, constraint.span, preferredPt);
+      }
+    }
+  });
+
+  if (input.tablePreferredWidthPt === null) {
+    resolveSingleColumnPercentages(widths, input.rows);
+  }
+
+  const targetPt = input.tablePreferredWidthPt;
+  const totalPt = widths.reduce((sum, width) => sum + width, 0);
+  if (targetPt !== null && targetPt >= 0 && totalPt <= EPSILON_PT && widths.length > 0) {
+    // tblW still defines the total table width when every declared grid track
+    // has zero width. The standard supplies no internal ratio in that case, so
+    // equal tracks are the only source-independent deterministic allocation.
+    return widths.map(() => targetPt / widths.length);
+  }
+  if (targetPt !== null && targetPt >= 0 && totalPt > EPSILON_PT) {
+    const scale = targetPt / totalPt;
+    return widths.map((width) => width * scale);
+  }
+  return widths;
+}
+
+/**
+ * tcW percentages are relative to the resulting table width (§17.4.71), so a
+ * percentage cannot in general be converted from the initial tblGrid total.
+ * For cells spanning one grid track, solve the minimal fixed point exactly:
+ * each track is max(authored/requested points, percentage * final total).
+ *
+ * Spanning percentage constraints remain represented by their first fixed
+ * pass because the standard does not prescribe how to distribute a span's
+ * circular delta over its internal grid tracks.
+ */
+function resolveSingleColumnPercentages(
+  widths: number[],
+  rows: readonly TableColumnRowConstraint[],
+): void {
+  const percentages = new Array<number>(widths.length).fill(0);
+  for (const row of rows) {
+    for (const cell of row.cells) {
+      if (cell.columnSpan !== 1 || cell.preferredWidth?.kind !== 'pct') continue;
+      const column = cell.columnStart;
+      if (column < 0 || column >= widths.length) continue;
+      percentages[column] = Math.max(
+        percentages[column] ?? 0,
+        finiteNonNegative(cell.preferredWidth.value),
+      );
+    }
+  }
+
+  let totalPt = widths.reduce((sum, width) => sum + width, 0);
+  let active = percentages.map((percentage, column) => (
+    percentage * totalPt > widths[column]! + EPSILON_PT
+  ));
+  const visited = new Set<string>();
+
+  while (active.some(Boolean)) {
+    const signature = active.map((value) => (value ? '1' : '0')).join('');
+    if (visited.has(signature)) return;
+    visited.add(signature);
+
+    let fixedPt = 0;
+    let activeFraction = 0;
+    for (let column = 0; column < widths.length; column += 1) {
+      if (active[column]) activeFraction += percentages[column] ?? 0;
+      else fixedPt += widths[column] ?? 0;
+    }
+    // A set of preferences at or above 100% is internally inconsistent unless
+    // it already spans the whole table. Widths are preferred, so retain the
+    // finite fixed-pass result instead of inventing an unbounded table size.
+    if (activeFraction >= 1 - EPSILON_PT) return;
+
+    totalPt = fixedPt / (1 - activeFraction);
+    const next = percentages.map((percentage, column) => (
+      percentage * totalPt > widths[column]! + EPSILON_PT
+    ));
+    if (next.every((value, column) => value === active[column])) {
+      for (let column = 0; column < widths.length; column += 1) {
+        if (active[column]) widths[column] = percentages[column]! * totalPt;
+      }
+      return;
+    }
+    active = next;
+  }
+}
+
+function singleColumnBounds(
+  rows: readonly TableColumnRowConstraint[],
+  columnCount: number,
+  percentageBasePt: number,
+): Readonly<{ minimums: number[]; maximums: number[] }> {
+  const minimums = new Array<number>(columnCount).fill(0);
+  const maximums = new Array<number>(columnCount).fill(0);
+  for (const row of rows) {
+    for (const cell of row.cells) {
+      if (cell.columnSpan !== 1 || cell.columnStart < 0 || cell.columnStart >= columnCount) continue;
+      minimums[cell.columnStart] = Math.max(
+        minimums[cell.columnStart] ?? 0,
+        finiteNonNegative(cell.minContentWidthPt),
+      );
+      maximums[cell.columnStart] = Math.max(
+        maximums[cell.columnStart] ?? 0,
+        finiteNonNegative(cell.maxContentWidthPt),
+      );
+    }
+  }
+
+  // §17.18.87: the first preferred width in a one-column track overrides that
+  // column's maximum content width. Minimum content remains a hard lower bound
+  // until the final forced-line-break step.
+  const preferredSeen = new Array<boolean>(columnCount).fill(false);
+  for (const row of rows) {
+    for (const cell of row.cells) {
+      const column = cell.columnStart;
+      if (
+        cell.columnSpan !== 1
+        || column < 0
+        || column >= columnCount
+        || preferredSeen[column]
+        || cell.preferredWidth === null
+      ) continue;
+      const preferredPt = preferredPoints(cell.preferredWidth, percentageBasePt);
+      if (preferredPt === null) continue;
+      maximums[column] = Math.max(minimums[column] ?? 0, preferredPt);
+      preferredSeen[column] = true;
+    }
+  }
+  for (let column = 0; column < columnCount; column += 1) {
+    maximums[column] = Math.max(minimums[column] ?? 0, maximums[column] ?? 0);
+  }
+  return { minimums, maximums };
+}
+
+function shrinkOutsideSpan(
+  widths: number[],
+  minimums: readonly number[],
+  start: number,
+  span: number,
+  requestedPt: number,
+): number {
+  const end = Math.min(widths.length, start + span);
+  const outside = widths.map((_width, column) => column).filter((column) => (
+    column < start || column >= end
+  ));
+  const slack = outside.map((column) => Math.max(0, widths[column]! - (minimums[column] ?? 0)));
+  const totalSlackPt = slack.reduce((sum, value) => sum + value, 0);
+  const transferredPt = Math.min(requestedPt, totalSlackPt);
+  if (transferredPt <= EPSILON_PT || totalSlackPt <= EPSILON_PT) return 0;
+  outside.forEach((column, index) => {
+    widths[column] -= transferredPt * ((slack[index] ?? 0) / totalSlackPt);
+  });
+  return transferredPt;
+}
+
+function growSpan(widths: number[], start: number, span: number, amountPt: number): void {
+  if (amountPt <= EPSILON_PT || span <= 0) return;
+  const currentPt = spanSum(widths, start, span);
+  for (let offset = 0; offset < span; offset += 1) {
+    const column = start + offset;
+    // §17.18.87 requires all tracks in a multi-column span to be enlarged but
+    // does not prescribe the distribution. Retain existing grid proportions;
+    // an all-zero span has no authored ratio, so share the delta equally.
+    const ratio = currentPt > EPSILON_PT
+      ? (widths[column] ?? 0) / currentPt
+      : 1 / span;
+    widths[column] += amountPt * ratio;
+  }
+}
+
+function enforceContentConstraint(
+  widths: number[],
+  minimums: readonly number[],
+  maximums: readonly number[],
+  cell: TableColumnCellConstraint,
+): void {
+  const start = Math.max(0, cell.columnStart);
+  const span = Math.max(1, Math.min(cell.columnSpan, widths.length - start));
+  if (span <= 0) return;
+  const requiredPt = finiteNonNegative(cell.minContentWidthPt);
+  const currentPt = spanSum(widths, start, span);
+  if (requiredPt <= currentPt + EPSILON_PT) return;
+  const maximumPt = span === 1
+    ? (maximums[start] ?? requiredPt)
+    : Math.max(requiredPt, finiteNonNegative(cell.maxContentWidthPt));
+
+  // The autofit guidance permits a deficient cell to grow anywhere from its
+  // minimum through maximum while first reclaiming slack from other tracks.
+  // Reclaim toward maximum, then expand the table only as far as its minimum.
+  const transferredPt = shrinkOutsideSpan(
+    widths,
+    minimums,
+    start,
+    span,
+    Math.max(0, maximumPt - currentPt),
+  );
+  growSpan(widths, start, span, transferredPt);
+
+  const afterTransferPt = spanSum(widths, start, span);
+  if (afterTransferPt < requiredPt - EPSILON_PT) {
+    growSpan(widths, start, span, requiredPt - afterTransferPt);
+  }
+}
+
+function fitToAvailableWidth(
+  widths: number[],
+  minimums: readonly number[],
+  cells: readonly TableColumnCellConstraint[],
+  availableWidthPt: number,
+): number[] {
+  const totalPt = widths.reduce((sum, width) => sum + width, 0);
+  if (totalPt <= availableWidthPt + EPSILON_PT || totalPt <= EPSILON_PT) return widths;
+
+  const result = [...widths];
+  const slack = result.map((width, column) => Math.max(0, width - (minimums[column] ?? 0)));
+  const totalSlackPt = slack.reduce((sum, value) => sum + value, 0);
+  const shrinkPt = Math.min(totalPt - availableWidthPt, totalSlackPt);
+  if (shrinkPt > EPSILON_PT && totalSlackPt > EPSILON_PT) {
+    result.forEach((_width, column) => {
+      result[column] -= shrinkPt * ((slack[column] ?? 0) / totalSlackPt);
+    });
+  }
+
+  // A proportional column shrink can violate an otherwise satisfiable minimum
+  // on a spanning cell even though another track still has slack. Restore each
+  // spanning minimum by transferring that outside slack before declaring that
+  // forced line breaks are necessary.
+  for (const cell of cells) {
+    if (cell.columnSpan <= 1) continue;
+    const start = Math.max(0, cell.columnStart);
+    const span = Math.max(1, Math.min(cell.columnSpan, result.length - start));
+    const deficitPt = finiteNonNegative(cell.minContentWidthPt) - spanSum(result, start, span);
+    if (deficitPt <= EPSILON_PT) continue;
+    const transferredPt = shrinkOutsideSpan(result, minimums, start, span, deficitPt);
+    growSpan(result, start, span, transferredPt);
+    if (transferredPt < deficitPt - EPSILON_PT) {
+      growSpan(result, start, span, deficitPt - transferredPt);
+    }
+  }
+
+  const afterSlackPt = result.reduce((sum, width) => sum + width, 0);
+  if (afterSlackPt <= availableWidthPt + EPSILON_PT || afterSlackPt <= EPSILON_PT) {
+    return cleanWidths(result);
+  }
+  // The jointly retained minima do not fit, so §17.18.87 now permits forced
+  // line breaks. It does not prescribe the final track distribution; reuse the
+  // proportional reduction defined by its fixed-layout guidance as an explicit
+  // deterministic solver policy, not as an Office-specific empirical constant.
+  const scale = Math.max(0, availableWidthPt) / afterSlackPt;
+  return cleanWidths(result.map((width) => width * scale));
+}
+
+/**
+ * ECMA-376 §17.18.87 fixed/autofit guidance expressed as a deterministic,
+ * parser-independent constraint solver. `tblGrid` seeds widths; it never
+ * suppresses authored row/cell preferences.
+ */
+export function resolveTableColumnWidths(input: TableColumnLayoutInput): readonly number[] {
+  const columnCount = requiredColumnCount(input);
+  if (columnCount === 0) return Object.freeze([]);
+  const widths = fixedWidths(input, columnCount);
+  if (input.layout === 'fixed') {
+    const totalPt = widths.reduce((sum, width) => sum + width, 0);
+    const maximumPt = finiteNonNegative(input.availableWidthPt);
+    if (totalPt <= maximumPt + EPSILON_PT || totalPt <= EPSILON_PT) {
+      return Object.freeze(widths);
+    }
+    // §17.18.87 fixed layout reduces every grid track proportionally when the
+    // resolved grid exceeds the containing physical boundary.
+    const scale = maximumPt / totalPt;
+    return Object.freeze(cleanWidths(widths.map((width) => width * scale)));
+  }
+
+  const percentageBasePt = widths.reduce((sum, width) => sum + width, 0);
+  const { minimums, maximums } = singleColumnBounds(
+    input.rows,
+    columnCount,
+    percentageBasePt,
+  );
+  const cells = input.rows.flatMap((row) => row.cells);
+  // Single-column min/max bounds are established before spanning constraints.
+  cells.sort((left, right) => left.columnSpan - right.columnSpan);
+  for (const cell of cells) {
+    enforceContentConstraint(widths, minimums, maximums, cell);
+  }
+  return Object.freeze(fitToAvailableWidth(
+    widths,
+    minimums,
+    cells,
+    finiteNonNegative(input.availableWidthPt),
+  ));
+}

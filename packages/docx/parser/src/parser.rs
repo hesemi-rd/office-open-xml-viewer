@@ -16,8 +16,8 @@ use zip::ZipArchive;
 
 use crate::numbering::NumberingMap;
 use crate::styles::{
-    apply_para, apply_run, merge_cond_layers, merge_tab_stops, parse_para_fmt, parse_run_fmt,
-    CondFmt, EdgeBorder, RawTblBorders, RunFmt, StyleMap,
+    apply_para, apply_run, merge_cond_layers, merge_tab_stops, merge_table_margin_layer,
+    parse_para_fmt, parse_run_fmt, CondFmt, EdgeBorder, RawTblBorders, RunFmt, StyleMap,
 };
 use crate::types::*;
 use crate::xml_util::*;
@@ -8669,6 +8669,49 @@ fn parse_docx_chart(
 // parse_table_cell → parse_table and trap the whole parse; past the shared limit
 // the over-deep table is dropped and the rest of the document still parses. See
 // `ooxml_common::depth`.
+fn table_width_acquisition(node: Option<roxmltree::Node>) -> Option<TableWidthAcquisitionWire> {
+    node.map(|n| TableWidthAcquisitionWire {
+        kind: attr_w(n, "type"),
+        value: attr_w(n, "w"),
+    })
+}
+
+fn table_layout_kind_acquisition(
+    node: Option<roxmltree::Node>,
+) -> Option<TableLayoutKindAcquisitionWire> {
+    node.map(|n| TableLayoutKindAcquisitionWire {
+        kind: attr_w(n, "type"),
+    })
+}
+
+fn table_margin_acquisition(node: Option<roxmltree::Node>) -> Option<TableMarginAcquisitionWire> {
+    node.map(|m| TableMarginAcquisitionWire {
+        top: table_width_acquisition(child_w(m, "top")),
+        bottom: table_width_acquisition(child_w(m, "bottom")),
+        // Keep logical and legacy physical names independently. Collapsing
+        // start/end into left/right here loses the information needed to apply
+        // §17.4.68 after bidi direction is known.
+        start: table_width_acquisition(child_w(m, "start")),
+        end: table_width_acquisition(child_w(m, "end")),
+        left: table_width_acquisition(child_w(m, "left")),
+        right: table_width_acquisition(child_w(m, "right")),
+    })
+}
+
+fn table_property_exception_acquisition(
+    node: Option<roxmltree::Node>,
+) -> Option<TablePropertyExceptionAcquisitionWire> {
+    node.map(|p| TablePropertyExceptionAcquisitionWire {
+        preferred_width: table_width_acquisition(child_w(p, "tblW")),
+        layout: table_layout_kind_acquisition(child_w(p, "tblLayout")),
+        justification: child_w(p, "jc").and_then(|n| attr_w(n, "val")),
+        indent: table_width_acquisition(child_w(p, "tblInd")),
+        borders: child_w(p, "tblBorders").map(parse_table_borders),
+        cell_margins: table_margin_acquisition(child_w(p, "tblCellMar")),
+        cell_spacing: table_width_acquisition(child_w(p, "tblCellSpacing")),
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn parse_table(
     node: roxmltree::Node,
@@ -8691,12 +8734,26 @@ fn parse_table(
         .and_then(|p| child_w(p, "tblStyle"))
         .and_then(|s| attr_w(s, "val"));
 
-    // Column widths from tblGrid
+    let grid_columns = tbl_grid
+        .map(|g| {
+            children_w(g, "gridCol")
+                .iter()
+                .map(|c| TableGridColumnAcquisitionWire {
+                    width: attr_w(*c, "w"),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    // Column widths from tblGrid. ECMA-376 §17.4.16 makes a missing `@w`
+    // zero, not a conventional 1-inch column. The grid is an input to the
+    // table-width algorithm and can be augmented later; do not bake a guessed
+    // width into the stable compatibility field.
     let col_widths: Vec<f64> = tbl_grid
         .map(|g| {
             children_w(g, "gridCol")
                 .iter()
-                .map(|c| attr_w(*c, "w").map(|v| twips_to_pt(&v)).unwrap_or(72.0))
+                .map(|c| attr_w(*c, "w").map(|v| twips_to_pt(&v)).unwrap_or(0.0))
                 .collect()
         })
         .unwrap_or_default();
@@ -9029,6 +9086,19 @@ fn parse_table(
             cell_conds.push(cell_cond(r, grid_col, cell_cnf.as_deref()));
             grid_col += span.max(1);
         }
+        // §17.7.6.3/.4: whole-table style spacing is the base layer and a
+        // matching full-row conditional style may override it. Direct table,
+        // tblPrEx, and trPr spacing remain separate higher-precedence wires.
+        let mut style_cell_spacing = tstyle.cell_spacing.clone();
+        let mut style_cell_margins = tstyle.cell_margins.clone();
+        for key in row_conds(r) {
+            if let Some(condition) = tstyle.cond.get(key) {
+                if let Some(spacing) = condition.cell_spacing.clone() {
+                    style_cell_spacing = Some(spacing);
+                }
+                merge_table_margin_layer(&mut style_cell_margins, &condition.cell_margins);
+            }
+        }
         let row = parse_table_row(
             *tr_node,
             style_map,
@@ -9047,10 +9117,49 @@ fn parse_table(
             // attributes.
             effective_table_style_id,
             &cell_conds,
+            style_cell_spacing,
+            style_cell_margins,
             depth,
         );
         rows.push(row);
         all_cell_conds.push(cell_conds);
+    }
+
+    // §17.4.14/.15: offsets which conflict with an authored table grid are
+    // ignored; they do not manufacture columns. Cell spans may still extend an
+    // insufficient grid (§17.4.16/.17/.48), so validate gridAfter against the
+    // grid after those content-driven extensions are known.
+    if tbl_grid.is_some() {
+        let authored_grid_count = grid_columns.len() as u32;
+        for row in &mut rows {
+            if row.grid_before > authored_grid_count {
+                row.grid_before = 0;
+            }
+        }
+        let content_grid_count = rows
+            .iter()
+            .map(|row| {
+                row.grid_before.saturating_add(
+                    row.cells
+                        .iter()
+                        .map(|cell| cell.col_span.max(1))
+                        .sum::<u32>(),
+                )
+            })
+            .max()
+            .unwrap_or(0)
+            .max(authored_grid_count);
+        for row in &mut rows {
+            let occupied = row.grid_before.saturating_add(
+                row.cells
+                    .iter()
+                    .map(|cell| cell.col_span.max(1))
+                    .sum::<u32>(),
+            );
+            if occupied.saturating_add(row.grid_after) > content_grid_count {
+                row.grid_after = 0;
+            }
+        }
     }
 
     // Apply table-style cell shading + vAlign where the cell didn't set them
@@ -9164,6 +9273,34 @@ fn parse_table(
         .and_then(|p| child_w(p, "tblOverlap"))
         .and_then(|n| attr_w(n, "val"));
 
+    let required_column_count = rows
+        .iter()
+        .map(|row| {
+            row.grid_before
+                .saturating_add(
+                    row.cells
+                        .iter()
+                        .map(|cell| cell.col_span.max(1))
+                        .sum::<u32>(),
+                )
+                .saturating_add(row.grid_after)
+        })
+        .max()
+        .unwrap_or(0)
+        .max(grid_columns.len() as u32);
+    let table_layout = TableLayoutAcquisitionWire {
+        effective_style_id: effective_table_style_id.map(str::to_string),
+        grid: TableGridAcquisitionWire {
+            authored: tbl_grid.is_some(),
+            columns: grid_columns,
+            required_column_count,
+        },
+        preferred_width: table_width_acquisition(tbl_pr.and_then(|p| child_w(p, "tblW"))),
+        layout: table_layout_kind_acquisition(tbl_pr.and_then(|p| child_w(p, "tblLayout"))),
+        cell_spacing: table_width_acquisition(tbl_pr.and_then(|p| child_w(p, "tblCellSpacing"))),
+        cell_margins: table_margin_acquisition(tbl_pr.and_then(|p| child_w(p, "tblCellMar"))),
+    };
+
     DocTable {
         col_widths,
         rows,
@@ -9180,6 +9317,7 @@ fn parse_table(
         bidi_visual,
         tblp_pr,
         overlap,
+        table_layout,
     }
 }
 
@@ -9197,6 +9335,8 @@ fn parse_table_row(
     // precedence order), threaded into each cell's content as a base layer below
     // paragraph/char styles. Indexed positionally against the row's `tc` nodes.
     cell_conds: &[CondFmt],
+    style_cell_spacing: Option<TableWidthAcquisitionWire>,
+    style_cell_margins: Option<TableMarginAcquisitionWire>,
     // Recursion-depth guard threaded from the owning table (see `parse_table`).
     depth: DepthGuard,
 ) -> DocTableRow {
@@ -9209,15 +9349,34 @@ fn parse_table_row(
     let row_height_rule = tr_height_node
         .and_then(|h| attr_w(h, "hRule"))
         .unwrap_or_else(|| "auto".to_string());
+    let table_row_layout = TableRowLayoutAcquisitionWire {
+        height: tr_height_node.map(|h| {
+            let authored_rule = attr_w(h, "hRule");
+            TableRowHeightAcquisitionWire {
+                value: attr_w(h, "val"),
+                rule: authored_rule.clone().unwrap_or_else(|| "auto".to_string()),
+                rule_authored: authored_rule.is_some(),
+            }
+        }),
+        justification: tr_pr
+            .and_then(|p| child_w(p, "jc"))
+            .and_then(|n| attr_w(n, "val")),
+        before_width: table_width_acquisition(tr_pr.and_then(|p| child_w(p, "wBefore"))),
+        after_width: table_width_acquisition(tr_pr.and_then(|p| child_w(p, "wAfter"))),
+        cell_spacing: table_width_acquisition(tr_pr.and_then(|p| child_w(p, "tblCellSpacing"))),
+        style_cell_spacing,
+        style_cell_margins,
+        // §17.4.60 places tblPrEx directly under tr, not inside trPr.
+        exception: table_property_exception_acquisition(child_w(node, "tblPrEx")),
+    };
     let is_header = tr_pr.and_then(|p| child_w(p, "tblHeader")).is_some();
     let cant_split = tr_pr
         .and_then(|p| bool_prop(p, "cantSplit"))
         .unwrap_or(false);
     // ECMA-376 §17.4.15 / §17.4.14 — these are structural offsets into the
     // shared tblGrid. They determine which grid columns the row's first/last
-    // cells occupy; wBefore/wAfter only supply preferred widths for those
-    // skipped columns and the saved tblGrid already carries their resolved
-    // widths for the renderer's fixed-grid placement.
+    // cells occupy; wBefore/wAfter remain preferred-width constraints for those
+    // skipped columns (§17.18.87).
     let grid_before = tr_pr
         .and_then(|p| child_w(p, "gridBefore"))
         .and_then(|n| attr_w(n, "val"))
@@ -9255,6 +9414,7 @@ fn parse_table_row(
         row_height_rule,
         is_header,
         cant_split,
+        table_row_layout,
     }
 }
 
@@ -9281,7 +9441,7 @@ fn parse_table_cell(
         .and_then(|v| v.parse().ok())
         .unwrap_or(1);
 
-    // ECMA-376 §17.4.85: ST_Merge default is "continue", so a <w:vMerge/>
+    // ECMA-376 §17.4.84: ST_Merge default is "continue", so a <w:vMerge/>
     // element with no val attribute means the cell continues the merged
     // region from the row above. Only val="restart" begins a new merge.
     let v_merge = tc_pr
@@ -9346,6 +9506,10 @@ fn parse_table_cell(
     let margin_bottom = edge_mar("bottom");
     let margin_left = edge_mar("left");
     let margin_right = edge_mar("right");
+    let table_cell_layout = TableCellLayoutAcquisitionWire {
+        preferred_width: table_width_acquisition(tc_w),
+        margins: table_margin_acquisition(tc_mar),
+    };
 
     // ECMA-376 §17.4.7: a cell may contain paragraphs AND nested tables in
     // any order. element_children_flat unwraps sdt wrappers like elsewhere.
@@ -9406,6 +9570,7 @@ fn parse_table_cell(
         margin_bottom,
         margin_left,
         margin_right,
+        table_cell_layout,
     }
 }
 
@@ -9771,6 +9936,188 @@ mod tests {
         let row = serde_json::to_value(&table.rows[0]).expect("serialize table row");
         assert_eq!(row["gridBefore"], 1);
         assert_eq!(row["gridAfter"], 1);
+    }
+
+    #[test]
+    fn table_layout_wire_preserves_authored_grid_width_and_style_facts() {
+        let table = parse_tbl(
+            r#"
+            <w:tblPr>
+              <w:tblStyle w:val="SyntheticTableStyle"/>
+              <w:tblW w:w="3750" w:type="pct"/>
+              <w:tblLayout w:type="fixed"/>
+              <w:tblCellSpacing w:w="40" w:type="dxa"/>
+            </w:tblPr>
+            <w:tblGrid><w:gridCol w:w="720"/><w:gridCol/></w:tblGrid>
+            <w:tr>
+              <w:trPr>
+                <w:jc w:val="end"/>
+                <w:gridBefore w:val="1"/><w:wBefore w:w="15%" w:type="pct"/>
+                <w:gridAfter w:val="1"/><w:wAfter w:w="auto" w:type="auto"/>
+                <w:trHeight w:val="480"/>
+                <w:tblCellSpacing w:w="20" w:type="dxa"/>
+              </w:trPr>
+              <w:tblPrEx>
+                <w:tblW w:w="1440" w:type="dxa"/>
+                <w:tblLayout w:type="autofit"/>
+                <w:jc w:val="center"/>
+                <w:tblInd w:w="120" w:type="dxa"/>
+                <w:tblCellSpacing w:w="10" w:type="dxa"/>
+                <w:tblCellMar><w:start w:w="90" w:type="dxa"/></w:tblCellMar>
+                <w:tblBorders><w:top w:val="double" w:sz="8"/></w:tblBorders>
+              </w:tblPrEx>
+              <w:tc>
+                <w:tcPr>
+                  <w:gridSpan w:val="3"/>
+                  <w:tcW w:w="2500" w:type="pct"/>
+                  <w:tcMar>
+                    <w:start w:w="100" w:type="dxa"/>
+                    <w:end w:w="500" w:type="pct"/>
+                  </w:tcMar>
+                </w:tcPr>
+                <w:p/>
+              </w:tc>
+            </w:tr>
+            "#,
+        );
+
+        let wire = serde_json::to_value(&table).expect("serialize table layout wire");
+        assert_eq!(wire["colWidths"], serde_json::json!([36.0, 0.0]));
+        assert_eq!(
+            wire["__tableLayout"]["effectiveStyleId"],
+            "SyntheticTableStyle"
+        );
+        assert_eq!(wire["__tableLayout"]["grid"]["authored"], true);
+        assert_eq!(wire["__tableLayout"]["grid"]["columns"][0]["width"], "720");
+        assert_eq!(
+            wire["__tableLayout"]["grid"]["columns"][1]["width"],
+            serde_json::Value::Null
+        );
+        assert_eq!(wire["__tableLayout"]["grid"]["requiredColumnCount"], 4);
+        assert_eq!(
+            wire["__tableLayout"]["preferredWidth"],
+            serde_json::json!({
+                "kind": "pct", "value": "3750"
+            })
+        );
+        assert_eq!(
+            wire["__tableLayout"]["layout"],
+            serde_json::json!({ "kind": "fixed" })
+        );
+        assert_eq!(
+            wire["__tableLayout"]["cellSpacing"],
+            serde_json::json!({
+                "kind": "dxa", "value": "40"
+            })
+        );
+
+        let row = &wire["rows"][0]["__tableRowLayout"];
+        assert_eq!(
+            row["height"],
+            serde_json::json!({
+                "value": "480", "rule": "auto", "ruleAuthored": false
+            })
+        );
+        assert_eq!(row["justification"], "end");
+        assert_eq!(wire["rows"][0]["gridAfter"], 0);
+        assert_eq!(
+            row["beforeWidth"],
+            serde_json::json!({ "kind": "pct", "value": "15%" })
+        );
+        assert_eq!(
+            row["afterWidth"],
+            serde_json::json!({ "kind": "auto", "value": "auto" })
+        );
+        assert_eq!(
+            row["cellSpacing"],
+            serde_json::json!({ "kind": "dxa", "value": "20" })
+        );
+        assert_eq!(
+            row["exception"]["layout"],
+            serde_json::json!({ "kind": "autofit" })
+        );
+        assert_eq!(
+            row["exception"]["preferredWidth"],
+            serde_json::json!({
+                "kind": "dxa", "value": "1440"
+            })
+        );
+        assert_eq!(row["exception"]["justification"], "center");
+        assert_eq!(
+            row["exception"]["indent"],
+            serde_json::json!({
+                "kind": "dxa", "value": "120"
+            })
+        );
+        assert_eq!(
+            row["exception"]["cellSpacing"],
+            serde_json::json!({
+                "kind": "dxa", "value": "10"
+            })
+        );
+        assert_eq!(
+            row["exception"]["cellMargins"]["start"],
+            serde_json::json!({
+                "kind": "dxa", "value": "90"
+            })
+        );
+        assert_eq!(row["exception"]["borders"]["top"]["style"], "double");
+
+        let cell = &wire["rows"][0]["cells"][0]["__tableCellLayout"];
+        assert_eq!(
+            cell["preferredWidth"],
+            serde_json::json!({
+                "kind": "pct", "value": "2500"
+            })
+        );
+        assert_eq!(
+            cell["margins"]["start"],
+            serde_json::json!({
+                "kind": "dxa", "value": "100"
+            })
+        );
+        assert_eq!(
+            cell["margins"]["end"],
+            serde_json::json!({
+                "kind": "pct", "value": "500"
+            })
+        );
+    }
+
+    #[test]
+    fn table_layout_wire_distinguishes_explicit_and_omitted_height_rule() {
+        let table = parse_tbl(
+            r#"
+            <w:tr><w:trPr><w:trHeight w:val="240"/></w:trPr><w:tc><w:p/></w:tc></w:tr>
+            <w:tr><w:trPr><w:trHeight w:val="240" w:hRule="auto"/></w:trPr><w:tc><w:p/></w:tc></w:tr>
+            "#,
+        );
+        let wire = serde_json::to_value(&table).expect("serialize table layout wire");
+        assert_eq!(
+            wire["rows"][0]["__tableRowLayout"]["height"]["ruleAuthored"],
+            false
+        );
+        assert_eq!(
+            wire["rows"][1]["__tableRowLayout"]["height"]["ruleAuthored"],
+            true
+        );
+    }
+
+    #[test]
+    fn authored_grid_ignores_before_and_after_offsets_which_do_not_fit() {
+        let table = parse_tbl(
+            r#"
+            <w:tblGrid><w:gridCol w:w="400"/><w:gridCol w:w="800"/></w:tblGrid>
+            <w:tr>
+              <w:trPr><w:gridBefore w:val="3"/><w:gridAfter w:val="1"/></w:trPr>
+              <w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p/></w:tc>
+            </w:tr>
+            "#,
+        );
+        let wire = serde_json::to_value(table).expect("serialize normalized table grid");
+        assert_eq!(wire["rows"][0]["gridBefore"], 0);
+        assert_eq!(wire["rows"][0]["gridAfter"], 0);
+        assert_eq!(wire["__tableLayout"]["grid"]["requiredColumnCount"], 2);
     }
 
     // ── Nested-table recursion depth guard (RB2) ───────────────────────────
@@ -10502,8 +10849,114 @@ mod tests {
         )
     }
 
-    /// sample-3 root cause: a table whose `<w:tblPr>` carries NO
-    /// `<w:tblCellMar>` must inherit per-edge margins from the default table
+    #[test]
+    fn table_layout_wire_retains_implicit_default_table_style_identity() {
+        let styles = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="table" w:default="1" w:styleId="DefaultTableStyle"/>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        let table = parse_tbl_with_styles(r#"<w:tr><w:tc><w:p/></w:tc></w:tr>"#, &styles);
+        let wire = serde_json::to_value(table).expect("serialize effective table style");
+        assert_eq!(
+            wire["__tableLayout"]["effectiveStyleId"],
+            "DefaultTableStyle"
+        );
+    }
+
+    #[test]
+    fn table_layout_wire_retains_based_on_and_conditional_style_spacing() {
+        let styles = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="table" w:styleId="BaseTable">
+                <w:tblPr>
+                  <w:tblCellSpacing w:w="60"/>
+                  <w:tblCellMar><w:start w:w="100"/><w:end w:w="140"/></w:tblCellMar>
+                </w:tblPr>
+              </w:style>
+              <w:style w:type="table" w:styleId="DerivedTable">
+                <w:basedOn w:val="BaseTable"/>
+                <w:tblStylePr w:type="firstRow">
+                  <w:tblPr>
+                    <w:tblCellSpacing w:w="20"/>
+                    <w:tblCellMar><w:end w:w="40"/></w:tblCellMar>
+                  </w:tblPr>
+                </w:tblStylePr>
+              </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        let table = parse_tbl_with_styles(
+            r#"<w:tblPr>
+                 <w:tblStyle w:val="DerivedTable"/>
+                 <w:tblLook w:firstRow="1"/>
+               </w:tblPr>
+               <w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
+               <w:tr><w:tc><w:p/></w:tc></w:tr>
+               <w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+            &styles,
+        );
+        let wire = serde_json::to_value(table).expect("serialize inherited style spacing");
+        assert_eq!(
+            wire["rows"][0]["__tableRowLayout"]["styleCellSpacing"],
+            serde_json::json!({ "kind": null, "value": "20" })
+        );
+        assert_eq!(
+            wire["rows"][1]["__tableRowLayout"]["styleCellSpacing"],
+            serde_json::json!({ "kind": null, "value": "60" })
+        );
+        assert_eq!(
+            wire["rows"][0]["__tableRowLayout"]["styleCellMargins"]["start"],
+            serde_json::json!({ "kind": null, "value": "100" })
+        );
+        assert_eq!(
+            wire["rows"][0]["__tableRowLayout"]["styleCellMargins"]["end"],
+            serde_json::json!({ "kind": null, "value": "40" })
+        );
+        assert_eq!(
+            wire["rows"][1]["__tableRowLayout"]["styleCellMargins"]["end"],
+            serde_json::json!({ "kind": null, "value": "140" })
+        );
+    }
+
+    #[test]
+    fn table_layout_wire_retains_default_style_logical_margins_and_spacing() {
+        let styles = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="table" w:default="1" w:styleId="DefaultTable">
+                <w:tblPr>
+                  <w:tblCellSpacing w:w="40"/>
+                  <w:tblCellMar>
+                    <w:start w:w="120"/><w:end w:w="140"/>
+                  </w:tblCellMar>
+                </w:tblPr>
+              </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        let table = parse_tbl_with_styles(
+            r#"<w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
+               <w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+            &styles,
+        );
+        let wire = serde_json::to_value(table).expect("serialize default style table facts");
+        assert_eq!(
+            wire["rows"][0]["__tableRowLayout"]["styleCellMargins"]["start"],
+            serde_json::json!({ "kind": null, "value": "120" })
+        );
+        assert_eq!(
+            wire["rows"][0]["__tableRowLayout"]["styleCellMargins"]["end"],
+            serde_json::json!({ "kind": null, "value": "140" })
+        );
+        assert_eq!(
+            wire["rows"][0]["__tableRowLayout"]["styleCellSpacing"],
+            serde_json::json!({ "kind": null, "value": "40" })
+        );
+    }
+
+    /// A table whose `<w:tblPr>` carries no `<w:tblCellMar>` must inherit
+    /// per-edge margins from the default table
     /// style `<w:style w:type="table" w:default="1">` (typically
     /// "TableNormal"). ECMA-376 §17.4.42 explicitly says an omitted
     /// `<w:tblCellMar>` inherits from the associated table style; §17.7.4

@@ -1510,12 +1510,9 @@ export interface DocTable {
    *  when the resolved `jc` is left/leading (§17.4.50). */
   tblInd?: number;
   /** ECMA-376 §17.4.52 `<w:tblLayout w:type>` — 'fixed' | 'autofit'. Absent
-   *  (undefined) ⇒ spec default 'autofit'. Both paths size columns from the
-   *  tblGrid (§17.4.48) scaled to fit: 'fixed' uses the grid verbatim; 'autofit'
-   *  additionally lets content min-width grow a column. Per-cell `widthPt`/
-   *  `widthPct` (`<w:tcW>`) is NOT re-applied — Word bakes the resolved widths
-   *  into the saved grid (see resolveColumnWidths). Only a degenerate all-zero
-   *  grid falls back to tcW-preference sizing. */
+   *  (undefined) means the specification default, 'autofit'. The table grid is
+   *  the initial shared grid for §17.18.87; preferred table/cell widths remain
+   *  constraints on both layout modes. */
   layout?: string;
   /** ECMA-376 §17.4.63 `<w:tblW>` preferred table width (type="dxa"), pt. */
   widthPt?: number;
@@ -1582,15 +1579,10 @@ export interface DocTableCell {
   borders: CellBorders;
   background: string | null;
   vAlign: 'top' | 'center' | 'bottom';
-  /** ECMA-376 §17.4.71 `<w:tcW>` preferred cell width (type="dxa"), pt. A
-   *  PREFERRED width only: autofit column sizing is driven by the tblGrid
-   *  (§17.4.48), not by re-applying this (Word bakes the resolved widths into
-   *  the saved grid — see resolveColumnWidths). Consulted only for the
-   *  degenerate all-zero-grid fallback. */
+  /** ECMA-376 §17.4.71 `<w:tcW>` preferred cell width (type="dxa"), pt. This is
+   *  a preferred constraint, not an exact cell box width. */
   widthPt: number | null;
-  /** `<w:tcW>` type="pct": 50ths of a percent of available content width.
-   *  Resolved against the available width at render time. Preferred width only
-   *  (see `widthPt`). */
+  /** `<w:tcW>` type="pct": 50ths of a percent of the final table width. */
   widthPct?: number;
   /** Per-cell margins (pt) from `<w:tcPr><w:tcMar>` (ECMA-376 §17.4.42). Each
    *  edge overrides the table-level `cellMargin*` default when set; null/absent

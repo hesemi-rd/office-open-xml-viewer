@@ -943,7 +943,8 @@ describe('computePages — mid-page split of rows with vMerge restart cells (§1
     // roles are restart/continue/continue.
     const placedFirst = bodyFragmentFor(first as PaginatedBodyElement);
     const placedSecond = bodyFragmentFor(second as PaginatedBodyElement);
-    if (placedFirst?.fragment.kind === 'table' && placedSecond?.fragment.kind === 'table') {
+    if (placedFirst?.fragment.kind === 'table' && !('flowBounds' in placedFirst.fragment)
+      && placedSecond?.fragment.kind === 'table' && !('flowBounds' in placedSecond.fragment)) {
       expect(placedFirst.fragment.rows.map((r) => r.sourceRowIndex)).toEqual([0]);
       expect(placedSecond.fragment.rows.map((r) => r.sourceRowIndex)).toEqual([0, 1, 2]);
       expect(placedSecond.fragment.rows.map((r) => r.cells[0]?.verticalMerge)).toEqual([
@@ -973,7 +974,7 @@ describe('computePages — mid-page split of rows with vMerge restart cells (§1
       const el = tblOn(pg);
       if (!el) continue;
       const placed = bodyFragmentFor(el as PaginatedBodyElement);
-      if (placed?.fragment.kind !== 'table') throw new Error('expected a table fragment');
+      if (placed?.fragment.kind !== 'table' || 'flowBounds' in placed.fragment) throw new Error('expected a table fragment');
       expect(placed.heightPt).toBeLessThanOrEqual(100 + 1e-6);
     }
   });
@@ -993,7 +994,7 @@ describe('computePages — mid-page split of rows with vMerge restart cells (§1
       const el = tblOn(pg);
       if (!el) continue;
       const placed = bodyFragmentFor(el as PaginatedBodyElement);
-      if (placed?.fragment.kind !== 'table') throw new Error('expected a table fragment');
+      if (placed?.fragment.kind !== 'table' || 'flowBounds' in placed.fragment) throw new Error('expected a table fragment');
       expect(placed.heightPt).toBeLessThanOrEqual(100 + 1e-6);
     }
 
@@ -1050,7 +1051,7 @@ describe('computePages — mid-page split of rows with vMerge restart cells (§1
         const el = tblOn(pg);
         if (!el) continue;
         const placed = bodyFragmentFor(el as PaginatedBodyElement);
-        if (placed?.fragment.kind !== 'table') throw new Error('expected a table fragment');
+        if (placed?.fragment.kind !== 'table' || 'flowBounds' in placed.fragment) throw new Error('expected a table fragment');
         expect(placed.heightPt).toBeLessThanOrEqual(100 + 1e-6);
       }
     }

@@ -555,8 +555,39 @@ export interface ParagraphLayout extends LayoutNodeBase {
   }>;
 }
 
+export type ResolvedBorderSegment = BorderSegment;
+
+export interface TableCellBlockLayout {
+  readonly layout: ParagraphLayout | TableLayout;
+  /** Final block origin from the cell border-box top. */
+  readonly offsetPt: number;
+  readonly advancePt: number;
+}
+
+export interface TableCellLayout extends LayoutNodeBase {
+  readonly kind: 'table-cell';
+  readonly contentBounds: LayoutRect;
+  readonly verticalMerge: 'none' | 'restart' | 'continue';
+  readonly vAlign: 'top' | 'center' | 'bottom';
+  readonly background?: FillPaint;
+  readonly blocks: readonly TableCellBlockLayout[];
+}
+
+export interface TableRowLayout extends LayoutNodeBase {
+  readonly kind: 'table-row';
+  readonly cells: readonly TableCellLayout[];
+  /** Resolved row track height. Kept explicit while the A5 page-slice adapter
+   * still consumes the historical row-height projection. */
+  readonly heightPt: number;
+  readonly contentHeightPt: number;
+  readonly repeatedHeader?: boolean;
+}
+
 export interface TableLayout extends LayoutNodeBase {
   readonly kind: 'table';
+  readonly columnWidthsPt: readonly number[];
+  readonly rows: readonly TableRowLayout[];
+  readonly borders: readonly ResolvedBorderSegment[];
 }
 
 export interface TextBoxLayout extends LayoutNodeBase {
@@ -702,9 +733,150 @@ export interface AcquiredParagraphLayoutInput {
   }>;
 }
 
+export interface TableBorderInput {
+  readonly widthPt: number;
+  readonly color: string;
+  readonly authoredStyle: string;
+}
+
+export interface TableEdgeInputs {
+  readonly top: TableBorderInput | null;
+  readonly right: TableBorderInput | null;
+  readonly bottom: TableBorderInput | null;
+  readonly left: TableBorderInput | null;
+  readonly insideH: TableBorderInput | null;
+  readonly insideV: TableBorderInput | null;
+}
+
+export interface TableCellBlockInput {
+  readonly layout: ParagraphLayout | TableLayout;
+  /** The required empty paragraph after a nested table owns no row-height ink. */
+  readonly structuralTrailing?: boolean;
+}
+
+export type TablePreferredWidthConstraint = Readonly<{
+  kind: 'dxa' | 'pct';
+  /** Points for dxa; a fraction whose OOXML owner defines the pct base. */
+  value: number;
+}>;
+
+export interface TableColumnCellConstraint {
+  readonly columnStart: number;
+  readonly columnSpan: number;
+  readonly preferredWidth: TablePreferredWidthConstraint | null;
+  readonly minContentWidthPt: number;
+  readonly maxContentWidthPt: number;
+}
+
+export interface TableSkippedColumnConstraint {
+  readonly columnSpan: number;
+  readonly preferredWidth: TablePreferredWidthConstraint | null;
+}
+
+export interface TableColumnRowConstraint {
+  readonly before: TableSkippedColumnConstraint | null;
+  readonly after: TableSkippedColumnConstraint | null;
+  readonly cells: readonly TableColumnCellConstraint[];
+}
+
+/** Plain inputs for the §17.18.87 fixed/autofit column algorithm. */
+export interface TableColumnLayoutInput {
+  readonly layout: 'fixed' | 'autofit';
+  readonly availableWidthPt: number;
+  readonly gridWidthsPt: readonly number[];
+  readonly tablePreferredWidthPt: number | null;
+  readonly rows: readonly TableColumnRowConstraint[];
+}
+
+/** Parser/model-normalized row height. Authored-presence and OOXML lexical
+ * units are resolved before this value crosses into layout. */
+export interface TableRowHeightInput {
+  readonly rule: 'auto' | 'atLeast' | 'exact';
+  readonly valuePt: number | null;
+}
+
+export interface TableCellMarginsInput {
+  readonly top: number;
+  readonly bottom: number;
+  readonly left: number;
+  readonly right: number;
+}
+
+export interface TableRowExceptionInput {
+  /** Whether tblPrEx/tblW was authored, including auto/nil/zero values which
+   * deliberately shadow the parent table width without producing a length. */
+  readonly preferredWidthAuthored: boolean;
+  readonly preferredWidth: TablePreferredWidthConstraint | null;
+  readonly layout: 'fixed' | 'autofit' | null;
+  readonly justification: string | null;
+  /** Whether tblPrEx/tblInd was authored. A nil/zero indent must suppress the
+   * parent tblInd instead of being mistaken for omission. */
+  readonly indentAuthored: boolean;
+  readonly indentPt: number | null;
+  readonly borders: import('../types.js').TableBorders | null;
+}
+
+export interface TableRowFormatInput {
+  readonly height: TableRowHeightInput | null;
+  readonly cellSpacingPt: number;
+  readonly justification: string | null;
+  readonly exception: TableRowExceptionInput | null;
+  readonly cells: readonly { readonly marginsPt: TableCellMarginsInput }[];
+}
+
+/** Immutable parser/model projection consumed by table acquisition. */
+export interface TableFormatInput {
+  readonly rows: readonly TableRowFormatInput[];
+  readonly firstRowException: TableRowExceptionInput | null;
+}
+
+export interface TableCellLayoutInput {
+  readonly id: LayoutNodeId;
+  readonly source: SourceRef;
+  readonly columnStart: number;
+  readonly columnSpan: number;
+  readonly verticalMerge: 'none' | 'restart' | 'continue';
+  readonly margins: Readonly<{
+    topPt: number;
+    rightPt: number;
+    bottomPt: number;
+    leftPt: number;
+  }>;
+  readonly vAlign: 'top' | 'center' | 'bottom';
+  readonly background?: FillPaint;
+  readonly borders: TableEdgeInputs;
+  readonly blocks: readonly TableCellBlockInput[];
+}
+
+export interface TableRowLayoutInput {
+  readonly id: LayoutNodeId;
+  readonly source: SourceRef;
+  readonly heightPt: number | null;
+  readonly heightRule: 'auto' | 'atLeast' | 'exact';
+  /** Effective §17.4.43/.44/.45 dxa spacing for this row. */
+  readonly cellSpacingPt: number;
+  /** §17.4.39 table-level border exception for this row, if authored. */
+  readonly exceptionBorders: TableEdgeInputs | null;
+  /** Effective §17.4.27/.26 row alignment. */
+  readonly alignment: 'left' | 'center' | 'right';
+  /** Effective table indent after Word's first-row tblPrEx rule. */
+  readonly indentPt: number;
+  readonly cells: readonly TableCellLayoutInput[];
+  readonly repeatedHeader?: boolean;
+}
+
 export interface TableLayoutInput {
   readonly kind: 'table';
+  readonly id: LayoutNodeId;
   readonly source: SourceRef;
+  readonly flowDomainId: string;
+  readonly ordinaryFlow: boolean;
+  readonly alignment: 'left' | 'center' | 'right';
+  readonly indentPt: number;
+  readonly bidiVisual: boolean;
+  readonly columnWidthsPt: readonly number[];
+  readonly borders: TableEdgeInputs;
+  readonly rows: readonly TableRowLayoutInput[];
 }
 
 export type FlowBlockInput = ParagraphLayoutInput | TableLayoutInput;

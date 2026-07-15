@@ -51,7 +51,7 @@ export interface RetainedCellBlockPlacement {
   readonly inkBlock: Readonly<{ topPt: number; heightPt: number }>;
 }
 
-function isStructuralTrailingParagraph(
+export function isStructuralTrailingParagraph(
   content: readonly CellElement[],
   index: number,
 ): boolean {
@@ -118,7 +118,7 @@ export function resolveRetainedCellBlockPlacement(
 
     if (previousParagraph) cursorPt += previousAfterPt;
     const advancePt = block.kind === 'table'
-      ? tableFragmentHeightPt(block)
+      ? ('flowBounds' in block ? block.advancePt : tableFragmentHeightPt(block))
       : paragraphFragmentAdvancePt(block);
     blockPlacements.push({ offsetPt: cursorPt, advancePt });
     firstInkTopPt ??= cursorPt;
