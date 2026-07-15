@@ -7,5 +7,11 @@ export default defineConfig({
   test: {
     include: ['packages/**/src/**/*.test.ts'],
     exclude: ['**/node_modules/**', '**/dist/**', '**/tests/visual/**'],
+    // The suite includes WASM parsing and native Skia render probes. Letting
+    // Vitest run near the available CPU parallelism makes those files contend
+    // for host resources, increasing wall time enough to trigger unrelated
+    // per-test timeouts. Half the available parallelism leaves headroom for the
+    // native work performed inside each worker and reduces CI wall time.
+    maxWorkers: '50%',
   },
 });
