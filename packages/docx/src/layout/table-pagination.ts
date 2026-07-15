@@ -173,6 +173,11 @@ function leadingHeaderCount(input: TableLayoutInput): number {
 function paginationRowHeight(source: RetainedTableAcquisition, rowIndex: number): number {
   const row = source.layout.rows[rowIndex];
   if (!row) return 0;
+  // ECMA-376 §17.4.80 requires exact content to remain inside the authored row
+  // box. `layoutTable` has already resolved that track, including Word's largest
+  // bottom-cell-padding addition ([MS-OI29500] 2.1.180(d)); content overflow is
+  // paint-time clip ink and must not turn a fitting exact row into continuations.
+  if (source.input.rows[rowIndex]?.heightRule === 'exact') return Math.max(0, row.heightPt);
   // A vertically merged owner's content requirement and its physical track can
   // land on different source rows. Considering both permits a legal boundary
   // through the span without rewriting restart/continue semantics.

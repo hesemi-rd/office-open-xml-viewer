@@ -806,6 +806,93 @@ describe('retained table pagination', () => {
     expect(fresh.nextCursor).toBeNull();
   });
 
+  it('clips overflowing content to a fitting exact row instead of creating continuations', () => {
+    const retainedContent = paragraph('overflowing-exact-content', [30, 30, 30]);
+    const source = acquisition([row(0, 40, {
+      heightRule: 'exact',
+      paragraph: retainedContent,
+    })]);
+
+    expect(source.layout.rows[0]).toMatchObject({
+      heightPt: 40,
+      contentHeightPt: 90,
+    });
+
+    const result = take(source, 50, startTableFragmentCursor(), {
+      freshPageHeightPt: 50,
+    });
+
+    expect(result.requiresFreshPage).toBe(false);
+    expect(result.fragment?.advancePt).toBe(40);
+    expect(result.fragment?.flowBounds.heightPt).toBe(40);
+    expect(result.fragment?.rows).toHaveLength(1);
+    expect(result.fragment?.rows[0]?.flowBounds.heightPt).toBe(40);
+    expect(result.fragment?.rows[0]?.cells[0]?.flowBounds.heightPt).toBe(40);
+    const retainedBlock = result.fragment?.rows[0]?.cells[0]?.blocks[0]?.layout;
+    expect(retainedBlock).toMatchObject({
+      id: retainedContent.id,
+      kind: 'paragraph',
+      flowBounds: { heightPt: 90 },
+      lines: [{}, {}, {}],
+    });
+    expect(retainedBlock?.kind === 'paragraph' ? retainedBlock.continuation : null)
+      .toBeUndefined();
+    expect(result.fragment?.rows[0]?.cells[0]?.contentRanges).toEqual([
+      { kind: 'whole', blockIndex: 0 },
+    ]);
+    expect(result.nextCursor).toBeNull();
+    expect(source.input.rows[0]).toMatchObject({ heightPt: 40, heightRule: 'exact' });
+  });
+
+  it('fits exact rows by the resolved track including Word bottom padding', () => {
+    const exact = row(0, 40, {
+      heightRule: 'exact',
+      paragraph: paragraph('padded-exact-content', [30, 30, 30]),
+    });
+    const source = acquisition([{
+      ...exact,
+      cells: exact.cells.map((cell) => ({
+        ...cell,
+        margins: { ...cell.margins, bottomPt: 5 },
+      })),
+    }]);
+
+    expect(source.input.rows[0]?.heightPt).toBe(40);
+    expect(source.layout.rows[0]).toMatchObject({
+      heightPt: 45,
+      contentHeightPt: 95,
+    });
+
+    const result = take(source, 45, startTableFragmentCursor(), {
+      freshPageHeightPt: 45,
+    });
+
+    expect(result.fragment?.advancePt).toBe(45);
+    expect(result.fragment?.rows[0]?.cells[0]?.contentRanges).toEqual([
+      { kind: 'whole', blockIndex: 0 },
+    ]);
+    expect(result.nextCursor).toBeNull();
+  });
+
+  it('still splits an exact row whose authored box exceeds the fresh page band', () => {
+    const source = acquisition([row(0, 120, {
+      heightRule: 'exact',
+      paragraph: paragraph('over-page-exact', [40, 40, 40]),
+    })]);
+
+    const first = take(source, 100, startTableFragmentCursor(), {
+      freshPageHeightPt: 100,
+      compatibility: 'standard',
+    });
+
+    expect(first.requiresFreshPage).toBe(false);
+    expect(first.fragment?.rows[0]?.cells[0]?.contentRanges).toEqual([
+      { kind: 'paragraph', blockIndex: 0, lineStart: 0, lineEnd: 2 },
+    ]);
+    expect(first.nextCursor).toMatchObject({ rowIndex: 0, rowFragmentIndex: 1 });
+    expect(source.input.rows[0]).toMatchObject({ heightPt: 120, heightRule: 'exact' });
+  });
+
   it('keeps the largest fitting exact-row prefix before considering a fresh page', () => {
     const source = acquisition([
       row(0, 50, { heightRule: 'exact', paragraph: paragraph('first', [20]) }),
