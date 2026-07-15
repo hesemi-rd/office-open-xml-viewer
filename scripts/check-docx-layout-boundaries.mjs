@@ -963,6 +963,49 @@ function normalizedSyntaxHash(node, source) {
 function normalizedComputePagesHash(node, source) {
   const compactText = (current, currentSource) =>
     current.getText(currentSource).replace(/\s+/g, '');
+  const exactFittingOuterFinalization = 'withColumnBand(()=>{stampTableLayout(elasPaginatedBodyElement,first.layout.colWidths,first.layout.rowHeights,first.contentWPt,);constside=floatTableWrapSide(first.box,measureState);registerTableFloat(first.box,tp,measureState,side,tbl.overlap!==\'never\');});';
+  const fittingOuterStatements = [];
+  const findFittingOuterStatement = (current) => {
+    if (ts.isExpressionStatement(current)
+      && compactText(current, source) === exactFittingOuterFinalization) {
+      fittingOuterStatements.push(current);
+    }
+    ts.forEachChild(current, findFittingOuterStatement);
+  };
+  findFittingOuterStatement(node);
+  if (fittingOuterStatements.length === 1) {
+    const statement = fittingOuterStatements[0];
+    const nodeStart = node.getStart(source);
+    const relativeStart = statement.getStart(source) - nodeStart;
+    const relativeEnd = statement.getEnd() - nodeStart;
+    const nodeText = node.getText(source);
+    const legacySequence = [
+      'withColumnBand(() => {',
+      '  const side = floatTableWrapSide(first.box, measureState);',
+      "  registerTableFloat(first.box, tp, measureState, side, tbl.overlap !== 'never');",
+      '});',
+      'stampTableLayout(',
+      '  el as PaginatedBodyElement,',
+      '  first.layout.colWidths,',
+      '  first.layout.rowHeights,',
+      '  first.contentWPt,',
+      ');',
+    ].join('\n');
+    const virtualText = nodeText.slice(0, relativeStart)
+      + legacySequence
+      + nodeText.slice(relativeEnd);
+    const virtualSource = ts.createSourceFile(
+      'compute-pages-a5-fitting-outer-virtual.ts',
+      virtualText,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const virtualNode = virtualSource.statements.find((candidate) => (
+      ts.isFunctionDeclaration(candidate) && candidate.name?.text === 'computePages'
+    ));
+    if (virtualNode) return normalizedComputePagesHash(virtualNode, virtualSource);
+  }
   const exactUprightRelocation =
     'if(y+h>effContentH()-tblReservePt&&y>colTopY)nextColumnOrPage(i);';
   const exactUprightStamp = 'withColumnBand(()=>stampTableLayout(tableEl,colWidthsPt,rowHeightsPt,bandPt,{...measureState,pageIndex:pages.length-1,displayPageNumber:pages.length,},));';

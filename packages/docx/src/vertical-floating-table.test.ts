@@ -17,12 +17,18 @@ import type {
 } from './types.js';
 import type { TableFragmentLayout } from './layout/table-pagination.js';
 
+type PaintEvent =
+  | Readonly<{ kind: 'text'; text: string }>
+  | Readonly<{ kind: 'stroke'; color: string }>;
+
 function recordingCanvas(): {
   canvas: HTMLCanvasElement;
+  paintEvents: PaintEvent[];
   measureCalls: () => number;
 } {
   let font = '10px serif';
   let measures = 0;
+  const paintEvents: PaintEvent[] = [];
   const ctx = {
     get font() { return font; },
     set font(value: string) { font = value; },
@@ -39,7 +45,9 @@ function recordingCanvas(): {
       } as TextMetrics;
     },
     save() {}, restore() {}, beginPath() {}, closePath() {},
-    moveTo() {}, lineTo() {}, stroke() {}, fill() {}, fillRect() {}, strokeRect() {},
+    moveTo() {}, lineTo() {}, stroke() {
+      paintEvents.push({ kind: 'stroke', color: String(ctx.strokeStyle) });
+    }, fill() {}, fillRect() {}, strokeRect() {},
     rect() {}, clip() {}, scale() {}, translate() {}, rotate() {}, setTransform() {},
     setLineDash() {}, clearRect() {}, arc() {}, quadraticCurveTo() {}, bezierCurveTo() {},
     createLinearGradient() { return { addColorStop() {} }; },
@@ -58,7 +66,11 @@ function recordingCanvas(): {
     getContext: () => ctx,
   };
   (ctx as unknown as { canvas: unknown }).canvas = canvas;
-  return { canvas: canvas as unknown as HTMLCanvasElement, measureCalls: () => measures };
+  return {
+    canvas: canvas as unknown as HTMLCanvasElement,
+    paintEvents,
+    measureCalls: () => measures,
+  };
 }
 
 function emptyBorders() {
@@ -177,6 +189,91 @@ describe('vertical outer floating tables retain the canonical logical paint doma
     expect(coordinateSpace).not.toBe('upright-physical-page-points');
     expect(paint.measureCalls()).toBe(0);
     expect(runs.filter((run) => run.text === 'OUTER-FLOAT')).toHaveLength(1);
+  });
+
+  it('finalizes a fitting nested float before registering and painting its outer tblpPr parent', async () => {
+    const outer = floatingTable([{ text: 'unused', heightPt: 90 }]);
+    const parentBorder = { style: 'single', width: 1, color: 'ff00ff' };
+    outer.borders = {
+      top: parentBorder,
+      bottom: parentBorder,
+      left: parentBorder,
+      right: parentBorder,
+      insideH: null,
+      insideV: null,
+    };
+    const nestedTable = floatingTable([{ text: 'FITTING-NESTED', heightPt: 20 }]);
+    nestedTable.tblpPr = {
+      ...nestedTable.tblpPr!,
+      horzAnchor: 'page',
+      vertAnchor: 'page',
+      tblpX: 20,
+      tblpY: 30,
+    };
+    outer.rows[0]!.cells[0]!.content = [
+      { type: 'table', ...nestedTable },
+      { type: 'paragraph', ...paragraph('FITTING-ANCHOR') },
+    ] as unknown as DocTableCell['content'];
+    const doc = documentWith(outer);
+    const measure = recordingCanvas();
+    const pages = computePages(
+      doc.body,
+      __test_verticalLayoutSection(PHYSICAL_SECTION),
+      measure.canvas.getContext('2d') as CanvasRenderingContext2D,
+      doc.fontFamilyClasses,
+    );
+    const table = pages[0]?.find((element) => element.type === 'table');
+    const retained = table ? bodyFragmentFor(table) : undefined;
+    if (retained?.fragment.kind !== 'table'
+      || !('resolvedFloatingTables' in retained.fragment)) {
+      throw new Error('expected a fitting logical outer fragment with a selected nested float');
+    }
+    const fragment = retained.fragment as TableFragmentLayout;
+    const [nested] = fragment.resolvedFloatingTables;
+    if (!nested) throw new Error('expected a retained fitting nested float');
+    const anchor = fragment.rows[0]?.cells[0]?.blocks.find(
+      (block) => block.layout.kind === 'paragraph',
+    );
+    const expectedLocalExclusion = {
+      xPt: nested.exclusionBounds.xPt - nested.source.anchorBounds.xPt,
+      yPt: nested.exclusionBounds.yPt - nested.source.anchorBounds.yPt,
+      widthPt: nested.exclusionBounds.widthPt,
+      heightPt: nested.exclusionBounds.heightPt,
+    };
+
+    expect(pages).toHaveLength(1);
+    expect(fragment.floatingTableCoordinateSpace).toBe('logical-page-points');
+    expect(fragment.resolvedFloatingTables).toHaveLength(1);
+    expect(nested.bounds).toEqual({
+      xPt: 20,
+      yPt: 30,
+      widthPt: nested.child.columnWidthsPt.reduce((sum, width) => sum + width, 0),
+      heightPt: 20,
+    });
+    expect(anchor?.layout.kind === 'paragraph' ? anchor.layout.exclusions : [])
+      .toContainEqual(expect.objectContaining({ bounds: expectedLocalExclusion }));
+
+    const paint = recordingCanvas();
+    const runs: DocxTextRunInfo[] = [];
+    await expect(renderDocumentToCanvas(doc, paint.canvas, 0, {
+      dpr: 1,
+      width: PHYSICAL_SECTION.pageWidth,
+      prebuiltPages: pages,
+      onTextRun: (run) => {
+        runs.push(run);
+        paint.paintEvents.push({ kind: 'text', text: run.text });
+      },
+    })).resolves.toBeUndefined();
+    expect(paint.measureCalls()).toBe(0);
+    expect(runs.filter((run) => run.text === 'FITTING-NESTED')).toHaveLength(1);
+    const childPaint = paint.paintEvents.findIndex(
+      (event) => event.kind === 'text' && event.text === 'FITTING-NESTED',
+    );
+    const parentBorderPaint = paint.paintEvents.findIndex(
+      (event) => event.kind === 'stroke' && event.color === '#ff00ff',
+    );
+    expect(childPaint).toBeGreaterThanOrEqual(0);
+    expect(parentBorderPaint).toBeGreaterThan(childPaint);
   });
 
   it('keeps every split outer tblpPr slice in the logical domain and paints each row once', async () => {

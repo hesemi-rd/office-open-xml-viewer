@@ -4354,17 +4354,19 @@ export function computePages(
         // Register the wrap float against the column band so the box x / wrap side
         // match the column the table sits in. (page/margin: the box may be clamped
         // up by computeFloatTableBox; the float band follows the clamped box.)
+        // Finalize selected nested floats against the pre-parent registry.
+        // stampTableLayout commits that exact child delta before the parent
+        // exclusion below receives the next paragraph id.
         withColumnBand(() => {
+          stampTableLayout(
+            el as PaginatedBodyElement,
+            first.layout.colWidths,
+            first.layout.rowHeights,
+            first.contentWPt,
+          );
           const side = floatTableWrapSide(first.box, measureState);
           registerTableFloat(first.box, tp, measureState, side, tbl.overlap !== 'never');
         });
-        // B2 stage 1b — stamp the whole-table layout so the paint pass reuses it.
-        stampTableLayout(
-          el as PaginatedBodyElement,
-          first.layout.colWidths,
-          first.layout.rowHeights,
-          first.contentWPt,
-        );
         pushTagged(el as PaginatedBodyElement);
         continue;
       }
@@ -7020,7 +7022,120 @@ function stampTableLayout(
   const placementState = finalState ?? retained.state;
   const physical = table.tblpPr ? undefined : placementState.verticalPhys;
   const services = placementState.layoutServices;
-  if (physical && services) {
+  if (table.tblpPr && services) {
+    const pageHeightPt = placementState.pageH / placementState.scale;
+    const pageIndex = placementState.pageIndex;
+    const logicalBandHeightPt = Math.max(
+      retained.acquisition.layout.advancePt,
+      pageHeightPt - placementState.marginTop - placementState.marginBottom,
+    );
+    const logicalFragment = takeTableFragment(
+      retained.acquisition,
+      startTableFragmentCursor(),
+      {
+        availableHeightPt: logicalBandHeightPt,
+        freshPageHeightPt: logicalBandHeightPt,
+        placement: {
+          container: {
+            id: `logical-page:${pageIndex}:fitting-outer`,
+            kind: 'body',
+            bounds: {
+              xPt: 0,
+              yPt: 0,
+              widthPt: tableWidthPt,
+              heightPt: logicalBandHeightPt,
+            },
+          },
+          cursor: { xPt: 0, yPt: 0 },
+          availableBounds: {
+            xPt: 0,
+            yPt: 0,
+            widthPt: tableWidthPt,
+            heightPt: logicalBandHeightPt,
+          },
+        },
+        services,
+        compatibility: 'word',
+        oversizedRowPolicy: 'atomic',
+        page: {
+          physicalPageIndex: pageIndex,
+          displayPageNumber: placementState.displayPageNumber ?? pageIndex + 1,
+          occurrenceId: `${retained.acquisition.input.id}:fitting-outer:${pageIndex}`,
+        },
+        floatingTableFrames: {
+          page: {
+            xPt: 0,
+            yPt: 0,
+            widthPt: placementState.pageWidth,
+            heightPt: pageHeightPt,
+          },
+          margin: {
+            xPt: placementState.marginLeft,
+            yPt: placementState.marginTop,
+            widthPt: Math.max(
+              0,
+              placementState.pageWidth
+                - placementState.marginLeft - placementState.marginRight,
+            ),
+            heightPt: Math.max(
+              0,
+              pageHeightPt - placementState.marginTop - placementState.marginBottom,
+            ),
+          },
+          column: {
+            xPt: placementState.contentX / placementState.scale,
+            yPt: placementState.marginTop,
+            widthPt: placementState.contentW / placementState.scale,
+            heightPt: logicalBandHeightPt,
+          },
+        },
+        floatingTableRegistry: {
+          coordinateSpace: 'logical-page-points',
+          flowDomainId: `logical-page:${pageIndex}`,
+          entries: Object.freeze(placementState.floats.map((float, index) => Object.freeze({
+            kind: float.kind,
+            occurrenceId: float.imageKey || `page-float:${index}`,
+            paragraphId: float.paraId,
+            bounds: Object.freeze({
+              xPt: float.imageX / placementState.scale,
+              yPt: float.imageY / placementState.scale,
+              widthPt: float.imageW / placementState.scale,
+              heightPt: float.imageH / placementState.scale,
+            }),
+            exclusionBounds: Object.freeze({
+              xPt: float.xLeft / placementState.scale,
+              yPt: float.yTop / placementState.scale,
+              widthPt: (float.xRight - float.xLeft) / placementState.scale,
+              heightPt: (float.yBottom - float.yTop) / placementState.scale,
+            }),
+          }))),
+          nextParagraphId: placementState.floatParaSeq,
+        },
+        finalPlacementTranslationPt: { xPt, yPt },
+        reacquirePageDependentBlock: (request) => bodyFlowFragments.sourceIndices
+          .retainedTableMeasureBySource.reacquirePageBlock(
+            table,
+            sourceIndex,
+            retained.acquisition,
+            placementState,
+            services,
+            request,
+          ),
+      },
+    );
+    if (!logicalFragment.fragment || logicalFragment.nextCursor) {
+      throw new Error('Fitting outer table final-frame layout must remain atomic');
+    }
+    if (logicalFragment.floatingTableRegistryDelta?.entries.length) {
+      bodyFlowFragments.sourceIndices.retainedTableMeasureBySource.commitFloatRegistryDelta(
+        placementState,
+        logicalFragment.floatingTableRegistryDelta,
+        'logical-page-points',
+        `logical-page:${pageIndex}`,
+      );
+    }
+    layout = logicalFragment.fragment;
+  } else if (physical && services) {
     const physicalLeftPt = (
       physical.cssWidthPx - placementState.y
     ) / placementState.scale - tableWidthPt;

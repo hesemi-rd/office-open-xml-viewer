@@ -110,6 +110,57 @@ function initializeComputePagesUprightRepository() {
   return root;
 }
 
+const computePagesFittingOuterBaseline = `
+export function computePages() {
+  withColumnBand(() => {
+    const side = floatTableWrapSide(first.box, measureState);
+    registerTableFloat(first.box, tp, measureState, side, tbl.overlap !== 'never');
+  });
+  stampTableLayout(
+    el as PaginatedBodyElement,
+    first.layout.colWidths,
+    first.layout.rowHeights,
+    first.contentWPt,
+  );
+  pushTagged(el as PaginatedBodyElement);
+  return [];
+}
+export function computeTableLayout() { return []; }
+`;
+
+const computePagesFittingOuterMigration = `
+export function computePages() {
+  withColumnBand(() => {
+    stampTableLayout(
+      el as PaginatedBodyElement,
+      first.layout.colWidths,
+      first.layout.rowHeights,
+      first.contentWPt,
+    );
+    const side = floatTableWrapSide(first.box, measureState);
+    registerTableFloat(first.box, tp, measureState, side, tbl.overlap !== 'never');
+  });
+  pushTagged(el as PaginatedBodyElement);
+  return [];
+}
+export function computeTableLayout() { return []; }
+`;
+
+function initializeComputePagesFittingOuterRepository() {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-fitting-outer-finalize-'));
+  write(root, 'packages/docx/src/renderer.ts', computePagesFittingOuterBaseline);
+  write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
+  write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
+  git(root, 'init', '-b', 'main');
+  git(root, 'config', 'user.email', 'boundary-test@example.invalid');
+  git(root, 'config', 'user.name', 'Boundary Test');
+  git(root, 'add', '.');
+  git(root, 'commit', '-m', 'base');
+  git(root, 'switch', '-c', 'a1');
+  establishA1Baseline(root);
+  return root;
+}
+
 function initializeComputePagesTableStampRepository() {
   const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-compute-pages-table-stamp-'));
   write(root, 'packages/docx/src/renderer.ts', computePagesTableStampBaseline);
@@ -1291,6 +1342,37 @@ test('rejects altered or adjacent upright finalization edits inside computePages
   ];
   for (const source of variants) {
     const root = initializeComputePagesUprightRepository();
+    write(root, 'packages/docx/src/renderer.ts', source);
+    const result = runChecker(root, '--base-ref', 'main');
+    assert.notEqual(result.status, 0, source);
+    assert.match(result.output, /LEGACY_DECLARATION_CHANGED|BASELINE_EXPANSION/);
+  }
+});
+
+test('allows only child-before-parent finalization for fitting outer floats', () => {
+  const root = initializeComputePagesFittingOuterRepository();
+  write(root, 'packages/docx/src/renderer.ts', computePagesFittingOuterMigration);
+
+  const result = runChecker(root, '--base-ref', 'main');
+
+  assert.equal(result.status, 0, result.output);
+});
+
+test('rejects altered or adjacent fitting outer-float finalization edits', () => {
+  const variants = [
+    computePagesFittingOuterMigration.replace('first.contentWPt', 'measureState.contentW'),
+    computePagesFittingOuterMigration.replace(
+      "tbl.overlap !== 'never'",
+      'true',
+    ),
+    computePagesFittingOuterMigration.replace(
+      '    const side =',
+      '    sideEffect();\n    const side =',
+    ),
+    computePagesFittingOuterMigration.replace('  return [];', '  sideEffect();\n  return [];'),
+  ];
+  for (const source of variants) {
+    const root = initializeComputePagesFittingOuterRepository();
     write(root, 'packages/docx/src/renderer.ts', source);
     const result = runChecker(root, '--base-ref', 'main');
     assert.notEqual(result.status, 0, source);
