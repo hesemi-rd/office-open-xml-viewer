@@ -14,16 +14,17 @@ import type {
 // txBox=1><wps:txbx>`), noFill + noLine, anchored to the FIRST body paragraph
 // (positionV relativeFrom="paragraph", wrapNone, behindDoc=0). The shape carries
 // no panel, so if its txbx text is not drawn the whole line vanishes. The parser
-// emits it as a `{type:'shape'}` run with `textBlocks`; `renderShapeText` draws
+// emits it as a `{type:'shape'}` run with `textBlocks`; retained text-box paint draws
 // such blocks (renderer.textbox-image.test.ts). This test exercises the
 // END-TO-END pipeline (renderDocumentToCanvas → renderAnchorImagesAndShapes →
-// renderAnchorShape → renderShapeText) to verify the anchored text box on the
+// renderAnchorShape → retained text-box paint) to verify the anchored text box on the
 // first paragraph actually reaches the draw.
 
 interface FillTextEvent { text: string; x: number; y: number }
 
 function makeRecordingCanvas(): { canvas: HTMLCanvasElement; fillTexts: FillTextEvent[] } {
   let font = '11px serif';
+  let painting = false;
   const px = () => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '11');
   const fillTexts: FillTextEvent[] = [];
   const ctx = {
@@ -31,6 +32,7 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; fillTexts: FillText
     set font(v: string) { font = v; },
     letterSpacing: '0px',
     measureText: (s: string) => {
+      if (painting) throw new Error('paint must not measure anchored textbox text');
       const p = px();
       return {
         width: [...s].length * p,
@@ -40,7 +42,8 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; fillTexts: FillText
     },
     save() {}, restore() {}, beginPath() {}, closePath() {},
     moveTo() {}, lineTo() {}, stroke() {}, fill() {}, clip() {}, rect() {},
-    scale() {}, translate() {}, rotate() {}, setLineDash() {}, drawImage() {}, clearRect() {},
+    scale() {}, translate() {}, rotate() {}, setLineDash() {}, drawImage() {},
+    clearRect() { painting = true; },
     arc() {}, quadraticCurveTo() {}, bezierCurveTo() {},
     createLinearGradient() { return { addColorStop() {} }; },
     fillRect() {}, strokeRect() {},

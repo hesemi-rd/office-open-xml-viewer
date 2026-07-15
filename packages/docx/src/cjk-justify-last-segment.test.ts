@@ -25,19 +25,20 @@ import type {
 
 const FONT_PX = 20; // glyph advance per CJK char in the stub (scale = 1)
 
-/** Recording 2D context: glyph advance = charCount × fontPx, font box 0.8/0.2 em.
- *  letterSpacing is ignored on purpose (the grid draw must not depend on it). */
+/** Recording 2D context: glyph advance = charCount × fontPx, font box 0.8/0.2 em. */
 function makeRecordingCanvas(): {
   canvas: HTMLCanvasElement;
-  fillTextCalls: { text: string; x: number; y: number }[];
+  fillTextCalls: { text: string; x: number; y: number; letterSpacing: number }[];
 } {
   let font = `${FONT_PX}px serif`;
+  let letterSpacing = '0px';
   const px = () => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? String(FONT_PX));
-  const fillTextCalls: { text: string; x: number; y: number }[] = [];
+  const fillTextCalls: { text: string; x: number; y: number; letterSpacing: number }[] = [];
   const ctx = {
     get font() { return font; },
     set font(v: string) { font = v; },
-    letterSpacing: '0px',
+    get letterSpacing() { return letterSpacing; },
+    set letterSpacing(v: string) { letterSpacing = v; },
     measureText: (s: string) => {
       const p = px();
       return {
@@ -53,7 +54,9 @@ function makeRecordingCanvas(): {
     strokeRect() {}, clip() {}, rect() {}, scale() {}, translate() {},
     setLineDash() {}, drawImage() {}, clearRect() {}, arc() {}, quadraticCurveTo() {},
     bezierCurveTo() {}, createLinearGradient() { return { addColorStop() {} }; },
-    fillText(text: string, x: number, y: number) { fillTextCalls.push({ text, x, y }); },
+    fillText(text: string, x: number, y: number) {
+      fillTextCalls.push({ text, x, y, letterSpacing: parseFloat(letterSpacing) });
+    },
     strokeText() {},
     fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
     textAlign: 'left' as CanvasTextAlign, direction: 'ltr' as CanvasDirection,
@@ -133,7 +136,7 @@ describe('CJK justification — even slack distribution across the last segment 
     expect(calls.length).toBeGreaterThan(0);
 
     // Group glyphs by baseline y; the first (top) line is the justified one.
-    const byY = new Map<number, { text: string; x: number }[]>();
+    const byY = new Map<number, { text: string; x: number; letterSpacing: number }[]>();
     for (const c of calls) {
       const key = Math.round(c.y);
       (byY.get(key) ?? byY.set(key, []).get(key)!).push(c);
@@ -141,16 +144,13 @@ describe('CJK justification — even slack distribution across the last segment 
     const firstY = Math.min(...byY.keys());
     const line = byY.get(firstY)!.slice().sort((p, q) => p.x - q.x);
 
-    // The justified line carries the run boundary: run A (4) + part of run B (6).
-    expect(line.length).toBe(10);
-
-    // Consecutive inter-glyph advances must be uniform across the run boundary.
-    const advances: number[] = [];
-    for (let i = 1; i < line.length; i++) advances.push(line[i].x - line[i - 1].x);
-    const max = Math.max(...advances);
-    const min = Math.min(...advances);
-    // Pre-fix: run A advanced ~23.25 px (cell 19.5 + 15/4 perGap), run B ~19.5 px
-    // (excluded) → spread ~3.75. Post-fix: one uniform pitch (cell + 15/9).
-    expect(max - min).toBeLessThan(0.01);
+    // Contextual paint remains split only at the authored run boundary: run A
+    // (4) plus the first-line prefix of run B (6). Both retain the same uniform
+    // inter-glyph pitch, including the visually-last segment.
+    expect(line.map((operation) => operation.text)).toEqual([
+      'ああああ', 'いいいいいい',
+    ]);
+    expect(line[0].letterSpacing).toBeCloseTo(line[1].letterSpacing, 9);
+    expect(line[1].letterSpacing).toBeGreaterThan(-0.5);
   });
 });

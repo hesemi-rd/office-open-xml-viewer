@@ -11,3 +11,7 @@ export function imageResourceKey(source: SourceRef, partPath: string): string {
 export function mathResourceKey(source: SourceRef, localName: string): string {
   return `math:${sourceKey(source)}:${encodeURIComponent(localName)}`;
 }
+
+export function anchorOccurrenceKey(source: SourceRef, parserLocalId: string): string {
+  return `anchor:${sourceKey(source)}:${encodeURIComponent(parserLocalId)}`;
+}

@@ -20,6 +20,8 @@ interface Call { text: string; y: number; }
 function makeRecordingCanvas(): { canvas: HTMLCanvasElement; calls: Call[] } {
   let font = '10px serif';
   const calls: Call[] = [];
+  let transform = { scaleX: 1, scaleY: 1, translateX: 0, translateY: 0 };
+  const transformStack: typeof transform[] = [];
   const ctx = {
     get font() { return font; },
     set font(v: string) { font = v; },
@@ -32,14 +34,29 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; calls: Call[] } {
         actualBoundingBoxAscent: p * 0.8, actualBoundingBoxDescent: p * 0.2,
       } as TextMetrics;
     },
-    save() {}, restore() {}, beginPath() {}, closePath() {},
+    save() { transformStack.push({ ...transform }); },
+    restore() { transform = transformStack.pop() ?? transform; },
+    beginPath() {}, closePath() {},
     moveTo() {}, lineTo() {}, stroke() {}, fill() {}, fillRect() {},
-    strokeRect() {}, clip() {}, rect() {}, scale() {}, translate() {}, rotate() {},
+    strokeRect() {}, clip() {}, rect() {},
+    scale(x: number, y: number) {
+      transform.scaleX *= x;
+      transform.scaleY *= y;
+    },
+    translate(x: number, y: number) {
+      transform.translateX += transform.scaleX * x;
+      transform.translateY += transform.scaleY * y;
+    },
+    rotate() {},
     setLineDash() {}, clearRect() {}, arc() {}, quadraticCurveTo() {},
     bezierCurveTo() {}, createLinearGradient() { return { addColorStop() {} }; },
     drawImage() {},
-    fillText(s: string, _x: number, y: number) { calls.push({ text: s, y }); },
-    strokeText(s: string, _x: number, y: number) { calls.push({ text: s, y }); },
+    fillText(s: string, _x: number, y: number) {
+      calls.push({ text: s, y: transform.translateY + transform.scaleY * y });
+    },
+    strokeText(s: string, _x: number, y: number) {
+      calls.push({ text: s, y: transform.translateY + transform.scaleY * y });
+    },
     fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
     textAlign: 'left' as CanvasTextAlign, direction: 'ltr' as CanvasDirection,
     globalAlpha: 1, lineCap: 'butt' as CanvasLineCap, lineJoin: 'miter' as CanvasLineJoin,
@@ -83,13 +100,14 @@ function paraWithFootnoteRef(text: string, noteId: string): DocParagraph {
 function docWithFooter(
   body: BodyElement[],
   footer: HeaderFooter | null,
-  opts: { footnotes?: DocNote[]; marginBottom?: number } = {},
+  opts: { footnotes?: DocNote[]; marginBottom?: number; vAlign?: SectionProps['vAlign'] } = {},
 ): DocxDocumentModel {
   const section: SectionProps = {
     pageWidth: 400, pageHeight: 600,
     marginTop: 10, marginRight: 10, marginBottom: opts.marginBottom ?? 10, marginLeft: 10,
     headerDistance: 4, footerDistance: 4, titlePage: false, evenAndOddHeaders: false,
     sectionStart: 'nextPage',
+    vAlign: opts.vAlign ?? null,
   } as SectionProps;
   return {
     section,
@@ -109,6 +127,12 @@ async function renderPage0(doc: DocxDocumentModel): Promise<Call[]> {
       localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]), measureContext: canvas.getContext('2d'),
     }),
   });
+  return calls;
+}
+
+async function renderPage0Default(doc: DocxDocumentModel): Promise<Call[]> {
+  const { canvas, calls } = makeRecordingCanvas();
+  await renderDocumentToCanvas(doc, canvas, 0, { dpr: 1, width: 400 });
   return calls;
 }
 
@@ -147,6 +171,29 @@ describe('footer reserve — content never overlaps a tall footer (ECMA-376 §17
     // satisfied trivially (the body genuinely reaches into that band) and that the
     // reservation, not a short body, is what clears the footer.
     expect(maxBodyNone).toBeGreaterThan(minFooter);
+  });
+
+  it('bottom-aligns body ink to the effective top edge of a tall footer', async () => {
+    const calls = await renderPage0Default(docWithFooter(
+      [para('BODY') as unknown as BodyElement],
+      tallFooter,
+      { vAlign: 'bottom' },
+    ));
+    const topAligned = await renderPage0Default(docWithFooter(
+      [para('BODY') as unknown as BodyElement],
+      null,
+      { vAlign: 'top' },
+    ));
+    const footerBaselines = calls.filter((call) => call.text === 'FTR').map((call) => call.y);
+    const lineAdvance = footerBaselines[1]! - footerBaselines[0]!;
+    const baselineFromFlowTop = topAligned.find((call) => call.text === 'BODY')!.y - 10;
+    const bodyFlowBottom = calls.find((call) => call.text === 'BODY')!.y
+      + lineAdvance - baselineFromFlowTop;
+    const footerFlowTop = footerBaselines[0]! - baselineFromFlowTop;
+
+    // Both stories use the same retained line metrics. Deriving the flow-box edges
+    // from their baselines avoids hard-coded ascent/descent guesses (+2/-8).
+    expect(bodyFlowBottom).toBeCloseTo(footerFlowTop, 8);
   });
 
   it('raises the footnote block above a tall footer so notes do not overlap it', async () => {

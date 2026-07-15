@@ -41,6 +41,8 @@ function makeRecordingCanvas(): {
   const segments: Seg[] = [];
   let cur = { x: 0, y: 0 };
   let align: CanvasTextAlign = 'left';
+  let transform = { tx: 0, ty: 0, sx: 1, sy: 1 };
+  const stack: typeof transform[] = [];
   const ctx = {
     get font() { return font; },
     set font(v: string) { font = v; },
@@ -57,15 +59,27 @@ function makeRecordingCanvas(): {
         actualBoundingBoxDescent: p * 0.2,
       } as TextMetrics;
     },
-    save() {}, restore() {}, beginPath() {}, closePath() {},
+    save() { stack.push({ ...transform }); },
+    restore() { transform = stack.pop() ?? transform; }, beginPath() {}, closePath() {},
     moveTo(x: number, y: number) { cur = { x, y }; },
     lineTo(x: number, y: number) { segments.push({ x1: cur.x, y1: cur.y, x2: x, y2: y }); cur = { x, y }; },
     stroke() {}, fill() {}, fillRect() {},
-    strokeRect() {}, clip() {}, rect() {}, scale() {}, translate() {},
+    strokeRect() {}, clip() {}, rect() {},
+    scale(x: number, y: number) { transform.sx *= x; transform.sy *= y; },
+    translate(x: number, y: number) {
+      transform.tx += x * transform.sx;
+      transform.ty += y * transform.sy;
+    },
     setLineDash() {}, drawImage() {}, clearRect() {}, arc() {}, quadraticCurveTo() {},
     bezierCurveTo() {}, createLinearGradient() { return { addColorStop() {} }; },
     fillText(text: string, x: number, y: number) {
-      fillTextCalls.push({ text, x, y, font, align });
+      fillTextCalls.push({
+        text,
+        x: transform.tx + x * transform.sx,
+        y: transform.ty + y * transform.sy,
+        font,
+        align,
+      });
     },
     strokeText() {},
     fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,

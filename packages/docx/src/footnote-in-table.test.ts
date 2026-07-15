@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { renderDocumentToCanvas } from './renderer.js';
+import {
+  createLayoutServices,
+  paginateDocument,
+  renderDocumentToCanvas,
+} from './renderer.js';
 import type {
   BodyElement, CellElement, DocNote, DocParagraph, DocTable, DocTableCell,
   DocTableRow, DocxDocumentModel, SectionProps,
@@ -194,5 +198,99 @@ describe('footnote referenced from a table cell (ECMA-376 §17.11.10)', () => {
     const body: BodyElement[] = [{ type: 'table', ...table } as unknown as BodyElement];
     const calls = await renderPage0(docWith(body, footnotes));
     expect(calls.filter((c) => c.text === 'NOTE').length).toBe(0);
+  });
+
+  it('remeasures a footnote PAGE field with its section display number', () => {
+    const notePage = para([{
+      type: 'field', fieldType: 'page', instruction: 'PAGE', fallbackText: '?',
+      bold: false, italic: false, underline: false, strikethrough: false,
+      fontSize: 10, color: null, fontFamily: TEST_FONT, background: null, vertAlign: null,
+    }]);
+    const reference = para([
+      textRun('REFERENCE'),
+      textRun('', { noteRef: { kind: 'footnote', id: 'fn-page' }, vertAlign: 'super' }),
+    ]);
+    const model = docWith(
+      [reference as unknown as BodyElement],
+      [{ id: 'fn-page', content: [notePage as unknown as BodyElement] }],
+    );
+    model.section.pageNumType = { start: 10, fmt: 'upperRoman' };
+    const { canvas } = makeRecordingCanvas();
+    const ctx = canvas.getContext('2d') as CanvasRenderingContext2D;
+    const base = createLayoutServices(model, { measureContext: ctx });
+    const shapedTexts: string[] = [];
+    const services = Object.freeze({
+      ...base,
+      text: Object.freeze({
+        ...base.text,
+        shape(request: Parameters<typeof base.text.shape>[0]) {
+          shapedTexts.push(request.text);
+          return base.text.shape(request);
+        },
+      }),
+    });
+
+    const globals = globalThis as unknown as { OffscreenCanvas?: unknown };
+    const previousOffscreenCanvas = globals.OffscreenCanvas;
+    globals.OffscreenCanvas = class {
+      getContext() { return ctx; }
+    };
+    try {
+      paginateDocument(model, services);
+    } finally {
+      if (previousOffscreenCanvas === undefined) delete globals.OffscreenCanvas;
+      else globals.OffscreenCanvas = previousOffscreenCanvas;
+    }
+
+    expect(shapedTexts).toContain('X');
+  });
+
+  it('uses the final split-table page that owns the footnote reserve', () => {
+    const notePage = para([{
+      type: 'field', fieldType: 'page', instruction: 'PAGE', fallbackText: '?',
+      bold: false, italic: false, underline: false, strikethrough: false,
+      fontSize: 10, color: null, fontFamily: TEST_FONT, background: null, vertAlign: null,
+    }]);
+    const rows = Array.from({ length: 12 }, (_, rowIndex) => row([cell([para([
+      textRun(`ROW${rowIndex}`),
+      ...(rowIndex === 0
+        ? [textRun('', { noteRef: { kind: 'footnote', id: 'fn-page' }, vertAlign: 'super' })]
+        : []),
+    ]) as unknown as CellElement])]));
+    const model = docWith(
+      [{ type: 'table', ...tableOf(rows) } as unknown as BodyElement],
+      [{ id: 'fn-page', content: [notePage as unknown as BodyElement] }],
+    );
+    model.section.pageHeight = 80;
+    model.section.pageNumType = { start: 10, fmt: 'decimal' };
+    const { canvas } = makeRecordingCanvas();
+    const ctx = canvas.getContext('2d') as CanvasRenderingContext2D;
+    const base = createLayoutServices(model, { measureContext: ctx });
+    const shapedTexts: string[] = [];
+    const services = Object.freeze({
+      ...base,
+      text: Object.freeze({
+        ...base.text,
+        shape(request: Parameters<typeof base.text.shape>[0]) {
+          shapedTexts.push(request.text);
+          return base.text.shape(request);
+        },
+      }),
+    });
+    const globals = globalThis as unknown as { OffscreenCanvas?: unknown };
+    const previousOffscreenCanvas = globals.OffscreenCanvas;
+    globals.OffscreenCanvas = class {
+      getContext() { return ctx; }
+    };
+    let pages: ReturnType<typeof paginateDocument>;
+    try {
+      pages = paginateDocument(model, services);
+    } finally {
+      if (previousOffscreenCanvas === undefined) delete globals.OffscreenCanvas;
+      else globals.OffscreenCanvas = previousOffscreenCanvas;
+    }
+
+    expect(pages.length).toBeGreaterThan(1);
+    expect(shapedTexts).toContain(String(9 + pages.length));
   });
 });

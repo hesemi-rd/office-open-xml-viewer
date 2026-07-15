@@ -247,27 +247,20 @@ describe('docGrid character grid — 約物半角 brackets are drawn contiguousl
     expect(fillTextCalls.filter((c) => c.text === EA_TEXT).length).toBe(1);
   });
 
-  // (4) Justify + grid: a `distribute` line inserts a gap at every inter-CJK
-  //     boundary, so the EA segment is sliced into one-glyph pieces (call count
-  //     == gaps+1). Each piece is a contiguous fillText with letterSpacing=Δ; the
-  //     path does NOT regress to per-code-point isolated draws that ignore Δ.
-  it('slices the EA segment at justify gaps under distribute, each piece keeps letterSpacing=Δ', async () => {
+  // (4) Justify + grid: a `distribute` line retains one contextual EA operation
+  //     whose uniform pitch combines the active grid delta and line slack.
+  it('keeps the contextual EA segment under distribute with its uniform pitch', async () => {
     // Narrow page so the line is stretched and gets internal distribute gaps.
     const { fillTextCalls } = await render(
       [para([textRun('あいうえお')], { alignment: 'distribute' })],
       section({ ...charGrid(CHARSPACE), pageWidth: 200 }),
     );
 
-    // distribute on 5 EA glyphs ⇒ 4 inter-CJK gaps ⇒ 5 single-glyph pieces.
-    const eaGlyphs = [...'あいうえお'];
-    const pieceCalls = fillTextCalls.filter((c) => eaGlyphs.includes(c.text));
-    expect(pieceCalls.length).toBe(eaGlyphs.length); // gaps + 1
-    // Every piece carries the grid delta as letterSpacing (字詰め kept under justify).
-    for (const c of pieceCalls) {
-      expect(c.letterSpacing).toBe(`${DELTA}px`);
-    }
-    // Strictly increasing x (no overlap / scramble).
-    const xs = pieceCalls.map((c) => c.x);
-    for (let i = 1; i < xs.length; i++) expect(xs[i]).toBeGreaterThan(xs[i - 1]);
+    const contextual = fillTextCalls.filter((operation) => operation.text === 'あいうえお');
+    expect(contextual).toHaveLength(1);
+    const uniformPitch = parseFloat(contextual[0].letterSpacing);
+    expect(uniformPitch).toBeGreaterThan(DELTA);
+    const finalGlyphOrigin = contextual[0].x + 4 * (FONT_PX + uniformPitch);
+    expect(finalGlyphOrigin).toBeGreaterThan(4 * FONT_PX);
   });
 });

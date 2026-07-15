@@ -99,6 +99,41 @@ describe('font layout services', () => {
     expect(forced.spans[0]?.font).toMatchObject({ source: 'substitute', resolvedFamily: 'Noto Naskh Arabic' });
   });
 
+  it('retains aggregate glyph ink bounds independently from typographic metrics', () => {
+    const service = createTextLayoutService({
+      fonts: createFontResolver(faces),
+      measurer: {
+        fingerprint: 'ink-bounds-v1',
+        measure: (request) => request.text === 'A'
+          ? {
+              advancePt: 8, ascentPt: 9, descentPt: 3,
+              inkBounds: { xMinPt: -1, xMaxPt: 7, ascentPt: 7, descentPt: 2 },
+            }
+          : {
+              advancePt: 6, ascentPt: 10, descentPt: 4,
+              inkBounds: { xMinPt: 0, xMaxPt: 8, ascentPt: 8, descentPt: 1 },
+            },
+      },
+    });
+
+    const result = service.shape({
+      text: 'A国', fontSizePt: 10,
+      fonts: { ascii: 'Embedded Sans', eastAsia: 'Meiryo' },
+    });
+
+    expect(result.inkBounds).toEqual({
+      xMinPt: -1,
+      xMaxPt: 16,
+      ascentPt: 8,
+      descentPt: 2,
+    });
+    expect(result.spans.map((span) => span.inkBounds)).toEqual([
+      { xMinPt: -1, xMaxPt: 7, ascentPt: 7, descentPt: 2 },
+      { xMinPt: 0, xMaxPt: 8, ascentPt: 8, descentPt: 1 },
+    ]);
+    expect(structuredClone(result.inkBounds)).toEqual(result.inkBounds);
+  });
+
   it('uses theme slots without collapsing mixed-script runs to one family', () => {
     const service = createTextLayoutService({
       fonts: createFontResolver(faces),
@@ -278,15 +313,83 @@ describe('font layout services', () => {
     expect(shape('a\u0301').spans.map((span) => [span.text, span.script]))
       .toEqual([['a', 'ascii'], ['\u0301', 'highAnsi']]);
     expect(shape('a\u0301').graphemeBoundaries).toEqual([0, 2]);
+    expect(shape('a\u0301').clusters).toEqual([
+      { range: { start: 0, end: 2 }, offsetPt: 0, advancePt: 2 },
+    ]);
     expect(shape('a\u0301').spans.map((span) => span.breakBefore)).toEqual([true, false]);
     expect(shape('国\u{E0100}').spans.map((span) => [span.text, span.script]))
       .toEqual([['国\u{E0100}', 'eastAsia']]);
     expect(shape('\u{20000}').spans.map((span) => [span.text, span.script]))
       .toEqual([['\u{20000}', 'eastAsia']]);
+    expect(shape('\u{20000}観').clusters).toEqual([
+      { range: { start: 0, end: 2 }, offsetPt: 0, advancePt: 1 },
+      { range: { start: 2, end: 3 }, offsetPt: 1, advancePt: 1 },
+    ]);
     expect(shape('👩‍💻').spans.map((span) => [span.text, span.script]))
       .toEqual([['👩', 'eastAsia'], ['\u200d', 'highAnsi'], ['💻', 'eastAsia']]);
     expect(shape('𠀀').spans.flatMap((span) => [...span.text])).toEqual(['𠀀']);
     expect(shape('ش-12').spans.every((span) => span.script !== 'complexScript')).toBe(true);
+  });
+
+  it('measures each contextual grapheme boundary once', () => {
+    const measured: string[] = [];
+    const service = createTextLayoutService({
+      fonts: createFontResolver(faces),
+      measurer: {
+        fingerprint: 'contextual-boundary-count-v1',
+        measure: (request) => {
+          measured.push(request.text);
+          return {
+            advancePt: request.text.length ** 2,
+            ascentPt: 1,
+            descentPt: 0,
+          };
+        },
+      },
+    });
+
+    const request = {
+      text: 'abcd',
+      fontSizePt: 10,
+      fonts: { ascii: 'Embedded Sans' },
+    } as const;
+    const shaped = service.shape(request);
+
+    // Cluster advances remain contextual prefix differences. The acquisition
+    // boundary must not ask the native measurer for the same prefix twice just
+    // because it is both one cluster's end and the next cluster's start.
+    expect(shaped.clusters).toEqual([
+      { range: { start: 0, end: 1 }, offsetPt: 0, advancePt: 1 },
+      { range: { start: 1, end: 2 }, offsetPt: 1, advancePt: 3 },
+      { range: { start: 2, end: 3 }, offsetPt: 4, advancePt: 5 },
+      { range: { start: 3, end: 4 }, offsetPt: 9, advancePt: 7 },
+    ]);
+    expect(measured).toEqual(['abcd', 'a', 'ab', 'abc']);
+  });
+
+  it('can acquire aggregate metrics without contextual cluster geometry', () => {
+    const measured: string[] = [];
+    const service = createTextLayoutService({
+      fonts: createFontResolver(faces),
+      measurer: {
+        fingerprint: 'aggregate-only-v1',
+        measure: (request) => {
+          measured.push(request.text);
+          return { advancePt: request.text.length, ascentPt: 1, descentPt: 0 };
+        },
+      },
+    });
+
+    const shaped = service.shape({
+      text: 'abcd',
+      fontSizePt: 10,
+      fonts: { ascii: 'Embedded Sans' },
+      clusterGeometry: false,
+    });
+
+    expect(shaped.advancePt).toBe(4);
+    expect(shaped.clusters).toBeUndefined();
+    expect(measured).toEqual(['abcd']);
   });
 
   it('implements the complete ECMA-376 §17.3.2.26 character-range table', () => {

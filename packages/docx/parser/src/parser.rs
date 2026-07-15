@@ -3,7 +3,7 @@ use ooxml_common::blip::{
     svg_blip_rid, Duotone,
 };
 use ooxml_common::depth::{parse_guarded, DepthGuard};
-use ooxml_common::drawing::{DrawingGroupSpec, DrawingGroupTransform, DrawingRect};
+use ooxml_common::drawing::{parse_xsd_bool, DrawingGroupSpec, DrawingGroupTransform, DrawingRect};
 use ooxml_common::ns::{attr_ns, is_w_ns, math, relationships, wordprocessingml};
 use ooxml_common::zip::read_zip_string;
 // Production parses go through `ooxml_common::depth::parse_guarded` (depth-guarded
@@ -38,6 +38,206 @@ pub(crate) type Zip = ZipArchive<std::io::Cursor<Vec<u8>>>;
 struct SectionRefs {
     headers: HashMap<String, String>,
     footers: HashMap<String, String>,
+}
+
+#[cfg(test)]
+mod private_typography_wire_tests {
+    use super::*;
+    use crate::xml_util::W_NS;
+
+    fn parse_p(inner: &str, styles: &StyleMap) -> DocParagraph {
+        let xml = format!(r#"<w:p xmlns:w="{W_NS}">{inner}</w:p>"#);
+        let doc = roxmltree::Document::parse(&xml).expect("paragraph XML");
+        let mut num_map = NumberingMap::default();
+        let media = HashMap::new();
+        let relationships = HashMap::new();
+        let theme = ThemeColors::default();
+        let mut field = FieldState::default();
+        parse_paragraph(
+            doc.root_element(),
+            styles,
+            &mut num_map,
+            &media,
+            &HashMap::new(),
+            &relationships,
+            &theme,
+            None,
+            &mut field,
+        )
+    }
+
+    fn first_run_json(paragraph: &DocParagraph, kind: &str) -> serde_json::Value {
+        let run = paragraph
+            .runs
+            .iter()
+            .find(|run| {
+                matches!(
+                    (kind, run),
+                    ("text", DocRun::Text(_)) | ("field", DocRun::Field(_))
+                )
+            })
+            .expect("requested run");
+        serde_json::to_value(run).expect("run serializes")
+    }
+
+    #[test]
+    fn private_run_typography_is_identical_for_text_and_field_results() {
+        let rpr = r#"<w:rPr>
+          <w:u w:val="words" w:color="FF0000" w:themeColor="accent2" w:themeTint="20"/>
+          <w:strike/><w:dstrike w:val="0"/><w:caps/><w:smallCaps w:val="0"/>
+          <w:vertAlign w:val="superscript"/><w:position w:val="4"/>
+          <w:color w:val="auto"/><w:snapToGrid w:val="0"/><w:spacing w:val="20"/>
+          <w:w w:val="80"/><w:fitText w:val="2400" w:id="-7"/><w:kern w:val="24"/>
+          <w:em w:val="dot"/><w:lang w:eastAsia="ja-JP" w:bidi="ar-SA"/>
+          <w:eastAsianLayout w:vert="1" w:vertCompress="0" w:combine="1" w:combineBrackets="round"/>
+          <w:bdr w:val="double" w:color="Auto" w:themeColor="accent1"
+                 w:themeTint="80" w:themeShade="40" w:sz="24" w:space="2"
+                 w:shadow="1" w:frame="0"/>
+        </w:rPr>"#;
+        let styles = StyleMap::parse("");
+        let text = parse_p(&format!(r#"<w:r>{rpr}<w:t>ABC</w:t></w:r>"#), &styles);
+        let field = parse_p(
+            &format!(r#"<w:fldSimple w:instr="PAGE"><w:r>{rpr}<w:t>ABC</w:t></w:r></w:fldSimple>"#),
+            &styles,
+        );
+
+        let text_wire = first_run_json(&text, "text")["__typographyAcquisition"].clone();
+        let field_wire = first_run_json(&field, "field")["__typographyAcquisition"].clone();
+
+        assert_eq!(
+            field_wire, text_wire,
+            "field results must retain every text typography axis"
+        );
+        assert_eq!(text_wire["underline"]["val"]["value"], "words");
+        assert_eq!(text_wire["underline"]["themeTint"]["value"], "20");
+        assert_eq!(text_wire["border"]["sizePt"]["value"], 3.0);
+        assert_eq!(text_wire["border"]["shadow"]["value"], true);
+        assert_eq!(text_wire["verticalAlign"]["value"], "super");
+        assert_eq!(text_wire["positionPt"]["value"], 2.0);
+        assert_eq!(text_wire["colorAuto"], true);
+        assert_eq!(text_wire["snapToGrid"], false);
+        assert_eq!(text_wire["characterSpacingPt"], 1.0);
+        assert_eq!(text_wire["characterScale"], 0.8);
+        assert_eq!(text_wire["fitText"]["valTwips"], 2400.0);
+        assert_eq!(text_wire["fitText"]["id"], "-7");
+        assert_eq!(text_wire["kerningThresholdPt"], 12.0);
+        assert_eq!(text_wire["languages"]["eastAsia"], "ja-jp");
+        assert_eq!(
+            text_wire["eastAsianLayout"]["combineBrackets"]["value"],
+            "round"
+        );
+    }
+
+    #[test]
+    fn private_run_typography_inherits_complete_underline_and_border_facts() {
+        let styles = StyleMap::parse(&format!(
+            r#"<w:styles xmlns:w="{W_NS}">
+              <w:style w:type="character" w:styleId="Typographic">
+                <w:rPr>
+                  <w:u w:val="wave" w:themeColor="accent3" w:themeShade="55"/>
+                  <w:bdr w:val="single" w:sz="8" w:space="0" w:color="auto" w:frame="1"/>
+                </w:rPr>
+              </w:style>
+            </w:styles>"#,
+        ));
+        let paragraph = parse_p(
+            r#"<w:r><w:rPr><w:rStyle w:val="Typographic"/></w:rPr><w:t>x</w:t></w:r>"#,
+            &styles,
+        );
+        let wire = &first_run_json(&paragraph, "text")["__typographyAcquisition"];
+
+        assert_eq!(wire["underline"]["val"]["value"], "wave");
+        assert_eq!(wire["underline"]["themeColor"]["value"], "accent3");
+        assert_eq!(wire["border"]["val"]["value"], "single");
+        assert_eq!(wire["border"]["frame"]["value"], true);
+    }
+
+    #[test]
+    fn malformed_required_and_enum_values_are_not_guessed() {
+        let styles = StyleMap::parse("");
+        let paragraph = parse_p(
+            r#"<w:ins w:author="A"><w:r><w:rPr><w:u w:val="bogus"/><w:bdr w:sz="8"/></w:rPr><w:t>x</w:t></w:r></w:ins>"#,
+            &styles,
+        );
+        let wire = &first_run_json(&paragraph, "text")["__typographyAcquisition"];
+
+        assert_eq!(wire["underline"]["val"]["status"], "invalid");
+        assert_eq!(wire["underline"]["val"]["raw"], "bogus");
+        assert!(wire["underline"]["val"]["value"].is_null());
+        assert_eq!(wire["border"]["val"]["status"], "missing");
+        assert_eq!(wire["revision"]["id"]["status"], "missing");
+    }
+
+    #[test]
+    fn invalid_ct_border_enums_remain_diagnostic_facts() {
+        let styles = StyleMap::parse("");
+        let paragraph = parse_p(
+            r#"<w:r><w:rPr><w:bdr w:val="notABorder" w:themeColor="notATheme"/></w:rPr><w:t>x</w:t></w:r>"#,
+            &styles,
+        );
+        let border = &first_run_json(&paragraph, "text")["__typographyAcquisition"]["border"];
+
+        assert_eq!(border["val"]["status"], "invalid");
+        assert_eq!(border["val"]["raw"], "notABorder");
+        assert!(border["val"]["value"].is_null());
+        assert_eq!(border["themeColor"]["status"], "invalid");
+        assert_eq!(border["themeColor"]["raw"], "notATheme");
+        assert!(border["themeColor"]["value"].is_null());
+    }
+
+    #[test]
+    fn ruby_private_wire_retains_alignment_metrics_language_and_rich_guide_runs() {
+        let styles = StyleMap::parse("");
+        let paragraph = parse_p(
+            r#"<w:r><w:ruby>
+              <w:rubyPr>
+                <w:rubyAlign w:val="distributeSpace"/><w:hps w:val="12"/>
+                <w:hpsBaseText w:val="24"/><w:hpsRaise w:val="10"/><w:lid w:val="ja-JP"/>
+              </w:rubyPr>
+              <w:rt><w:r><w:rPr><w:rFonts w:ascii="Yu Gothic"/><w:sz w:val="12"/>
+                <w:b/><w:i/><w:color w:val="112233"/><w:lang w:val="ja-JP"/></w:rPr><w:t>かん</w:t></w:r></w:rt>
+              <w:rubyBase><w:r><w:t>漢</w:t></w:r></w:rubyBase>
+            </w:ruby></w:r>"#,
+            &styles,
+        );
+        let ruby = &first_run_json(&paragraph, "text")["__typographyAcquisition"]["ruby"];
+
+        assert_eq!(ruby["align"]["value"], "distributeSpace");
+        assert_eq!(ruby["baseFontSizePt"]["value"], 12.0);
+        assert_eq!(ruby["raisePt"]["value"], 5.0);
+        assert_eq!(ruby["language"]["value"], "ja-jp");
+        assert_eq!(ruby["guideRuns"][0]["text"], "かん");
+        assert_eq!(ruby["guideRuns"][0]["fontFamily"], "Yu Gothic");
+        assert_eq!(ruby["guideRuns"][0]["fontSizePt"], 6.0);
+        assert_eq!(ruby["guideRuns"][0]["bold"], true);
+        assert_eq!(ruby["guideRuns"][0]["italic"], true);
+        assert_eq!(ruby["guideRuns"][0]["color"], "112233");
+    }
+
+    #[test]
+    fn paragraph_private_wire_retains_bar_and_complete_ct_border_attributes() {
+        let styles = StyleMap::parse("");
+        let paragraph = parse_p(
+            r#"<w:pPr><w:pBdr>
+              <w:top w:val="single" w:sz="8"/>
+              <w:between w:val="dashed" w:space="3"/>
+              <w:bar w:val="double" w:color="Auto" w:themeColor="accent4"
+                     w:themeTint="44" w:themeShade="22" w:sz="16" w:space="1"
+                     w:shadow="1" w:frame="0"/>
+            </w:pBdr></w:pPr><w:r><w:t>x</w:t></w:r>"#,
+            &styles,
+        );
+        let json = serde_json::to_value(paragraph).expect("paragraph serializes");
+        let borders = &json["__paragraphTypographyAcquisition"]["borders"];
+
+        assert_eq!(borders["top"]["val"]["value"], "single");
+        assert_eq!(borders["between"]["spacePt"]["value"], 3.0);
+        assert_eq!(borders["bar"]["val"]["value"], "double");
+        assert_eq!(borders["bar"]["themeTint"]["value"], "44");
+        assert_eq!(borders["bar"]["themeShade"]["value"], "22");
+        assert_eq!(borders["bar"]["sizePt"]["value"], 2.0);
+        assert_eq!(borders["bar"]["shadow"]["value"], true);
+    }
 }
 
 /// A section's effective header/footer set + its own `<w:titlePg>` flag, ready to
@@ -1273,6 +1473,7 @@ fn parse_body_elements(
     section_hf: &HashMap<roxmltree::NodeId, ResolvedSectionHf>,
 ) -> Vec<BodyElement> {
     let mut body: Vec<BodyElement> = Vec::new();
+    let mut section_ordinal = 0usize;
     // The body-level sectPr (the last element) defines the final section and
     // is not a page break. Mid-body sectPrs (nested in pPr) DO imply a page break.
     // The walk also flags the end of any "Cover Pages" building block so the
@@ -1355,7 +1556,12 @@ fn parse_body_elements(
                         if let Some(sect_pr) =
                             child_w(child, "pPr").and_then(|ppr| child_w(ppr, "sectPr"))
                         {
-                            body.push(section_break_element(sect_pr, section_hf));
+                            body.push(section_break_element(
+                                sect_pr,
+                                section_hf,
+                                format!("section:{section_ordinal}"),
+                            ));
+                            section_ordinal += 1;
                         }
                     }
                 }
@@ -1378,7 +1584,12 @@ fn parse_body_elements(
             // pPr-nested case above). The final body-level sectPr only defines
             // section settings (surfaced on Document.section) — skip it.
             "sectPr" if Some(child.id()) != body_level_sect_id => {
-                body.push(section_break_element(child, section_hf));
+                body.push(section_break_element(
+                    child,
+                    section_hf,
+                    format!("section:{section_ordinal}"),
+                ));
+                section_ordinal += 1;
             }
             _ => {}
         }
@@ -1826,6 +2037,7 @@ fn section_geom(sect_pr: roxmltree::Node) -> Option<SectionGeom> {
 fn section_break_element(
     sect_pr: roxmltree::Node,
     section_hf: &HashMap<roxmltree::NodeId, ResolvedSectionHf>,
+    section_id: String,
 ) -> BodyElement {
     let kind = match read_section_break_type(sect_pr).as_deref() {
         Some("continuous") => "continuous",
@@ -1851,6 +2063,13 @@ fn section_break_element(
         // ECMA-376 §17.6.20 — this ending section's flow direction (issue #1000
         // per-section mixing); lrTb/absent ⇒ None, others verbatim.
         text_direction: read_text_direction(sect_pr),
+        section_placement: Box::new(SectionPlacementWire {
+            section_id,
+            v_align: child_w(sect_pr, "vAlign")
+                .and_then(|node| attr_w(node, "val"))
+                .filter(|value| value != "top"),
+            line_numbering: parse_line_numbering(sect_pr),
+        }),
     }
 }
 
@@ -2650,6 +2869,7 @@ fn parse_paragraph_cond(
         // ECMA-376 §17.3.1.11 — text-frame / drop-cap properties, resolved
         // through the style chain. Some ⇒ paragraph is part of a text frame.
         frame_pr: base_para.frame_pr.clone(),
+        paragraph_typography_acquisition: base_para.paragraph_typography.clone(),
     }
 }
 
@@ -2774,10 +2994,26 @@ fn parse_para_content(
                 } else {
                     "deletion"
                 };
+                let id_raw = attr_w(child, "id");
+                let id_value = id_raw.as_deref().and_then(|value| {
+                    let value = value.trim();
+                    let digits = value.strip_prefix(['-', '+']).unwrap_or(value);
+                    (!digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()))
+                        .then(|| value.to_string())
+                });
                 let inner = RunRevision {
                     kind: kind.to_string(),
                     author: attr_w(child, "author"),
                     date: attr_w(child, "date"),
+                    typography_id: TypographyValueWire {
+                        status: match (&id_raw, id_value.is_some()) {
+                            (None, _) => TypographyValueStatusWire::Missing,
+                            (Some(_), true) => TypographyValueStatusWire::Valid,
+                            (Some(_), false) => TypographyValueStatusWire::Invalid,
+                        },
+                        raw: id_raw,
+                        value: id_value,
+                    },
                 };
                 parse_para_content(
                     child,
@@ -2812,7 +3048,7 @@ fn parse_para_content(
                     }
                 }
                 let fallback = extract_text_from_runs(child);
-                runs.push(make_field_run(&instr, &fmt, &fallback, theme));
+                runs.push(make_field_run(&instr, &fmt, &fallback, theme, revision));
             }
             "oMath" => {
                 let nodes = crate::math::parse_omath_nodes(child);
@@ -2927,6 +3163,7 @@ fn handle_run_in_para(
                             &fmt,
                             &frame.fallback,
                             theme,
+                            revision,
                         ));
                     }
                 }
@@ -3084,9 +3321,188 @@ fn resolved_run_font_facts(fmt: &RunFmt, theme: &ThemeColors) -> RunFontFacts {
     }
 }
 
-fn make_field_run(instr: &str, fmt: &RunFmt, fallback: &str, theme: &ThemeColors) -> DocRun {
+fn missing_typography_value<T>() -> TypographyValueWire<T> {
+    TypographyValueWire {
+        status: TypographyValueStatusWire::Missing,
+        raw: None,
+        value: None,
+    }
+}
+
+fn parsed_typography_value<T>(raw: Option<String>, value: Option<T>) -> TypographyValueWire<T> {
+    TypographyValueWire {
+        status: match (&raw, value.is_some()) {
+            (None, _) => TypographyValueStatusWire::Missing,
+            (Some(_), true) => TypographyValueStatusWire::Valid,
+            (Some(_), false) => TypographyValueStatusWire::Invalid,
+        },
+        raw,
+        value,
+    }
+}
+
+/// Preserve the complete phonetic-guide input before the stable public
+/// RubyAnnotation projection flattens it. ECMA-376 §§17.3.3.11/.12/.14/.25-.28
+/// make ruby alignment, base size, raise, language, and guide-run formatting
+/// independent facts; [MS-OI29500] §2.1.552 additionally needs the authored
+/// left/right alignment token for RTL compatibility behavior downstream.
+fn ruby_typography_wire(
+    ruby: roxmltree::Node,
+    base_fmt: &RunFmt,
+    style_map: &StyleMap,
+    theme: &ThemeColors,
+) -> RubyTypographyWire {
+    let ruby_pr = child_w(ruby, "rubyPr");
+    let element_value = |name: &str| {
+        ruby_pr
+            .and_then(|properties| child_w(properties, name))
+            .and_then(|element| attr_w(element, "val"))
+    };
+    let align_raw = element_value("rubyAlign");
+    let align_value = align_raw.as_deref().and_then(|value| {
+        matches!(
+            value,
+            "center" | "distributeLetter" | "distributeSpace" | "left" | "right" | "rightVertical"
+        )
+        .then(|| value.to_string())
+    });
+    let half_points = |name: &str| {
+        let raw = element_value(name);
+        let value = raw
+            .as_deref()
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .map(|value| value / 2.0);
+        parsed_typography_value(raw, value)
+    };
+    let language_raw = element_value("lid");
+    let language_value = language_raw
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_lowercase);
+    let guide_runs = child_w(ruby, "rt")
+        .into_iter()
+        .flat_map(|rt| {
+            rt.children()
+                .filter(|node| node.is_element() && node.tag_name().name() == "r")
+        })
+        .filter_map(|run| {
+            let text = run
+                .descendants()
+                .filter(|node| {
+                    node.is_element()
+                        && is_w_ns(node.tag_name().namespace())
+                        && matches!(node.tag_name().name(), "t" | "delText")
+                })
+                .filter_map(|node| node.text())
+                .collect::<String>();
+            if text.is_empty() {
+                return None;
+            }
+            let mut fmt = base_fmt.clone();
+            let rpr = child_w(run, "rPr");
+            if let Some(style_id) = rpr
+                .and_then(|properties| child_w(properties, "rStyle"))
+                .and_then(|style| attr_w(style, "val"))
+            {
+                apply_direct_run(&mut fmt, &style_map.resolve_run_style(&style_id));
+            }
+            if let Some(properties) = rpr {
+                apply_direct_run(&mut fmt, &parse_run_fmt(properties));
+            }
+            let language = rpr
+                .and_then(|properties| child_w(properties, "lang"))
+                .and_then(|lang| attr_w(lang, "val"))
+                .map(|value| value.to_lowercase());
+            let east_asia = theme.resolve_font_ref(fmt.font_family_east_asia.clone());
+            Some(RubyGuideRunTypographyWire {
+                text,
+                font_family: theme
+                    .resolve_font_ref(fmt.font_family_ascii.clone())
+                    .or(east_asia),
+                font_size_pt: fmt.font_size,
+                bold: fmt.bold.unwrap_or(false),
+                italic: fmt.italic.unwrap_or(false),
+                color: fmt.color.clone(),
+                language,
+            })
+        })
+        .collect();
+    RubyTypographyWire {
+        align: parsed_typography_value(align_raw, align_value),
+        base_font_size_pt: half_points("hpsBaseText"),
+        raise_pt: half_points("hpsRaise"),
+        language: parsed_typography_value(language_raw, language_value),
+        guide_runs,
+    }
+}
+
+fn run_typography_wire(
+    fmt: &RunFmt,
+    ruby: Option<&RubyAnnotation>,
+    revision: Option<&RunRevision>,
+) -> RunTypographyWire {
+    RunTypographyWire {
+        underline: fmt.underline_typography.clone(),
+        strike: fmt.strikethrough.unwrap_or(false),
+        double_strike: fmt.dstrike.unwrap_or(false),
+        caps: fmt.all_caps.unwrap_or(false),
+        small_caps: fmt.small_caps.unwrap_or(false),
+        color_auto: fmt.color_auto,
+        vertical_align: fmt
+            .vertical_align_typography
+            .clone()
+            .unwrap_or_else(missing_typography_value),
+        position_pt: fmt
+            .position_typography
+            .clone()
+            .unwrap_or_else(missing_typography_value),
+        snap_to_grid: fmt.snap_to_grid,
+        character_spacing_pt: fmt.char_spacing,
+        character_scale: fmt.char_scale,
+        fit_text: fmt.fit_text.as_ref().map(|fit_text| FitTextSpecWire {
+            val_twips: fit_text.val,
+            id: fit_text.id.clone(),
+        }),
+        kerning_threshold_pt: fmt.kerning,
+        emphasis: fmt
+            .emphasis_typography
+            .clone()
+            .unwrap_or_else(missing_typography_value),
+        languages: TypographyLanguagesWire {
+            east_asia: fmt.lang_east_asia.clone(),
+            bidi: fmt.lang_bidi.clone(),
+        },
+        east_asian_layout: EastAsianLayoutTypographyWire {
+            vert: fmt.east_asian_vert,
+            vert_compress: fmt.east_asian_vert_compress,
+            combine: fmt.east_asian_combine,
+            combine_brackets: fmt
+                .combine_brackets_typography
+                .clone()
+                .unwrap_or_else(missing_typography_value),
+        },
+        border: fmt.border_typography.clone(),
+        ruby: ruby.and_then(|annotation| annotation.typography.clone()),
+        revision: revision.map(|revision| RevisionTypographyWire {
+            kind: revision.kind.clone(),
+            id: revision.typography_id.clone(),
+            author: revision.author.clone(),
+            date: revision.date.clone(),
+        }),
+    }
+}
+
+fn make_field_run(
+    instr: &str,
+    fmt: &RunFmt,
+    fallback: &str,
+    theme: &ThemeColors,
+    revision: Option<&RunRevision>,
+) -> DocRun {
     let field_type = classify_field(instr);
-    DocRun::Field(FieldRun {
+    DocRun::Field(Box::new(FieldRun {
         field_type,
         instruction: instr.trim().to_string(),
         fallback_text: fallback.to_string(),
@@ -3118,7 +3534,8 @@ fn make_field_run(instr: &str, fmt: &RunFmt, fallback: &str, theme: &ThemeColors
         double_strikethrough: fmt.dstrike.unwrap_or(false),
         highlight: fmt.highlight.clone(),
         emphasis_mark: fmt.emphasis_mark.clone(),
-    })
+        typography_acquisition: Some(run_typography_wire(fmt, None, revision)),
+    }))
 }
 
 fn classify_field(instr: &str) -> String {
@@ -3206,6 +3623,10 @@ fn text_runs_mergeable(a: &TextRun, b: &TextRun) -> bool {
         && a.kerning == b.kerning
         && a.east_asian_vert == b.east_asian_vert
         && a.east_asian_vert_compress == b.east_asian_vert_compress
+        // Public-equivalent runs can still differ in theme/shadow/frame or raw
+        // diagnostic facts. Merging them would discard the second run's private
+        // acquisition contract before retained layout sees it.
+        && a.typography_acquisition == b.typography_acquisition
 }
 
 /// Prepend the zero-advance host-character metrics for a floating DrawingML
@@ -3222,7 +3643,18 @@ fn prepend_anchor_host_metrics(
         _ => false,
     });
     if has_floating_drawing {
-        drawing_runs.insert(0, DocRun::AnchorHost(anchor_host_metrics.clone()));
+        let occurrence_id = drawing_runs
+            .iter()
+            .find_map(|run| match run {
+                DocRun::Image(image) => image.anchor_acquisition.as_ref(),
+                DocRun::Chart(chart) => chart.anchor_acquisition.as_ref(),
+                DocRun::Shape(shape) => shape.anchor_acquisition.as_ref(),
+                _ => None,
+            })
+            .map(|facts| facts.occurrence_id.clone());
+        let mut host = anchor_host_metrics.clone();
+        host.anchor_occurrence_id = occurrence_id;
+        drawing_runs.insert(0, DocRun::AnchorHost(host));
     }
 }
 
@@ -3339,6 +3771,7 @@ fn parse_run_inner(
         font_family_east_asia: font_family_east_asia.clone(),
         bold,
         italic,
+        anchor_occurrence_id: None,
     };
     let attach_anchor_host_metrics = |drawing_runs: &mut Vec<DocRun>| {
         prepend_anchor_host_metrics(drawing_runs, &anchor_host_metrics);
@@ -3403,6 +3836,7 @@ fn parse_run_inner(
     let east_asian_vert_compress = fmt.east_asian_vert_compress;
     let east_asian_combine = fmt.east_asian_combine;
     let east_asian_combine_brackets = fmt.east_asian_combine_brackets.clone();
+    let typography_acquisition = Some(run_typography_wire(&fmt, None, revision));
 
     // Set by the "noBreakHyphen" arm below when it just pushed/extended a text
     // run for a `<w:noBreakHyphen/>` — tells the VERY NEXT loop iteration's
@@ -3472,6 +3906,7 @@ fn parse_run_inner(
                         east_asian_combine,
                         east_asian_combine_brackets: east_asian_combine_brackets.clone(),
                         note_ref: None,
+                        typography_acquisition: typography_acquisition.clone(),
                     };
                     match runs.last_mut() {
                         Some(DocRun::Text(prev))
@@ -3556,6 +3991,7 @@ fn parse_run_inner(
                         east_asian_combine,
                         east_asian_combine_brackets: east_asian_combine_brackets.clone(),
                         note_ref: None,
+                        typography_acquisition: typography_acquisition.clone(),
                     })));
                 }
             }
@@ -3610,6 +4046,7 @@ fn parse_run_inner(
                     east_asian_combine,
                     east_asian_combine_brackets: east_asian_combine_brackets.clone(),
                     note_ref: None,
+                    typography_acquisition: typography_acquisition.clone(),
                 })));
             }
             "br" => {
@@ -3709,6 +4146,7 @@ fn parse_run_inner(
                     east_asian_combine,
                     east_asian_combine_brackets: east_asian_combine_brackets.clone(),
                     note_ref: None,
+                    typography_acquisition: typography_acquisition.clone(),
                 };
                 match runs.last_mut() {
                     Some(DocRun::Text(prev)) if text_runs_mergeable(prev, &this) => {
@@ -3794,11 +4232,13 @@ fn parse_run_inner(
                     .and_then(|hps_raise| attr_w(hps_raise, "val"))
                     .and_then(|v| v.parse::<f64>().ok())
                     .map(|hp| hp / 2.0); // half-points → points (§17.3.3.12)
+                let ruby_typography = ruby_typography_wire(child, &fmt, style_map, theme);
                 let ruby = if !rt_text.is_empty() {
                     Some(RubyAnnotation {
                         text: rt_text,
                         font_size_pt: rt_size_pt,
                         hps_raise_pt,
+                        typography: Some(ruby_typography),
                     })
                 } else {
                     None
@@ -3832,6 +4272,9 @@ fn parse_run_inner(
                         for r in &mut runs[before..] {
                             if let DocRun::Text(t) = r {
                                 t.ruby = Some(rb_anno.clone());
+                                if let Some(typography) = &mut t.typography_acquisition {
+                                    typography.ruby = rb_anno.typography.clone();
+                                }
                                 break;
                             }
                         }
@@ -3918,6 +4361,7 @@ fn parse_run_inner(
                         kind: kind.to_string(),
                         id: id_str,
                     }),
+                    typography_acquisition: typography_acquisition.clone(),
                 })));
             }
             "AlternateContent" => {
@@ -3956,7 +4400,7 @@ fn parse_run_inner(
                 // The imagedata form is tried first so a picture pict is not
                 // mistaken for an (empty) text-box panel.
                 if let Some(img) = parse_vml_pict_image(child, media_map) {
-                    runs.push(DocRun::Image(img));
+                    runs.push(DocRun::Image(Box::new(img)));
                 } else if let Some(shp) =
                     parse_vml_pict(style_map, num_map, child, theme, media_map)
                 {
@@ -3988,7 +4432,7 @@ fn parse_run_inner(
                     attach_anchor_host_metrics(&mut drawing_runs);
                     runs.extend(drawing_runs);
                 } else if let Some(img) = parse_object_ole_image(child, media_map) {
-                    runs.push(DocRun::Image(img));
+                    runs.push(DocRun::Image(Box::new(img)));
                 }
             }
             _ => {}
@@ -4035,7 +4479,7 @@ struct InlineBlip {
     image_path: String,
     mime_type: String,
     svg_image_path: Option<String>,
-    /// ECMA-376 §20.1.8.55 `<a:srcRect>` crop (fractions 0..1), or `None`.
+    /// ECMA-376 §20.1.8.55 `<a:srcRect>` crop (signed fractions), or `None`.
     src_rect: Option<SrcRect>,
     /// ECMA-376 §20.1.8.23 `<a:duotone>` recolour resolved through the theme,
     /// or `None`.
@@ -4264,6 +4708,7 @@ fn parse_inline_drawing(
                                     anchor_y_align: None,
                                     anchor_x_relative_from: None,
                                     anchor_y_relative_from: None,
+                                    anchor_acquisition: None,
                                 }))];
                             }
                         }
@@ -4289,7 +4734,7 @@ fn parse_inline_drawing(
             Some(b) => b,
             None => return vec![],
         };
-        return vec![DocRun::Image(ImageRun {
+        return vec![DocRun::Image(Box::new(ImageRun {
             image_path,
             mime_type,
             svg_image_path,
@@ -4323,7 +4768,8 @@ fn parse_inline_drawing(
             // anchor-only (ECMA-376 §20.4.3.2/§20.4.3.5).
             anchor_x_relative_from: None,
             anchor_y_relative_from: None,
-        })];
+            anchor_acquisition: None,
+        }))];
     }
 
     // ── Anchor image/shape ─────────────────────────────────
@@ -4344,6 +4790,7 @@ fn parse_inline_drawing(
     let (pct_h, pct_v, rel_h, rel_v) = parse_anchor_pct_pos(&container);
     let (size_w_pct, size_h_pct, size_w_rel, size_h_rel) = parse_anchor_size_rel(&container);
     let anchor_meta = parse_anchor_wrap(&container);
+    let anchor_acquisition = parse_anchor_acquisition_wire(&container);
     // ECMA-376 §20.4.2.3 wp:anchor/@relativeHeight — stacking order among
     // floating drawings. Word emits large values here for front-layer shapes;
     // lower values paint first, higher values paint on top.
@@ -4443,6 +4890,7 @@ fn parse_inline_drawing(
                                 anchor_y_align: y_align.clone(),
                                 anchor_x_relative_from: rel_h.clone(),
                                 anchor_y_relative_from: rel_v.clone(),
+                                anchor_acquisition: Some(anchor_acquisition.clone()),
                             }))];
                         }
                     }
@@ -4457,7 +4905,8 @@ fn parse_inline_drawing(
         .find(|n| n.tag_name().name() == "wgp")
     {
         let mut out: Vec<DocRun> = Vec::new();
-        for img in parse_wgp_images(
+        let group_metadata = anchor_group_metadata_index(wgp);
+        let mut images = parse_wgp_images_with_metadata(
             wgp,
             media_map,
             theme,
@@ -4466,10 +4915,9 @@ fn parse_inline_drawing(
             pos_y,
             y_from_para,
             &anchor_meta,
-        ) {
-            out.push(DocRun::Image(img));
-        }
-        for mut shp in parse_wgp_shapes(
+            &group_metadata,
+        );
+        let mut shapes = parse_wgp_shapes_with_metadata(
             style_map,
             num_map,
             wgp,
@@ -4481,9 +4929,22 @@ fn parse_inline_drawing(
             y_from_para,
             &anchor_meta,
             anchor_z_order,
-        ) {
+            &group_metadata,
+        );
+        for mut img in images.drain(..) {
+            let group = img.anchor_acquisition.take().and_then(|facts| facts.group);
+            let mut facts = anchor_acquisition.clone();
+            facts.group = group;
+            img.anchor_acquisition = Some(facts);
+            out.push(DocRun::Image(Box::new(img)));
+        }
+        for mut shp in shapes.drain(..) {
             shp.behind_doc = behind_doc;
             apply_pos_meta(&mut shp);
+            let group = shp.anchor_acquisition.take().and_then(|facts| facts.group);
+            let mut facts = anchor_acquisition.clone();
+            facts.group = group;
+            shp.anchor_acquisition = Some(facts);
             out.push(DocRun::Shape(Box::new(shp)));
         }
         return out;
@@ -4506,10 +4967,12 @@ fn parse_inline_drawing(
             y_from_para,
             &anchor_meta,
             None,
+            None,
             anchor_z_order,
         ) {
             shp.behind_doc = behind_doc;
             apply_pos_meta(&mut shp);
+            shp.anchor_acquisition = Some(anchor_acquisition.clone());
             return vec![DocRun::Shape(Box::new(shp))];
         }
     }
@@ -4531,7 +4994,7 @@ fn parse_inline_drawing(
         Some(b) => b,
         None => return vec![],
     };
-    vec![DocRun::Image(ImageRun {
+    vec![DocRun::Image(Box::new(ImageRun {
         image_path,
         mime_type,
         svg_image_path,
@@ -4572,7 +5035,470 @@ fn parse_inline_drawing(
         // `anchor_*_from_*` boolean hints.
         anchor_x_relative_from: rel_h.clone(),
         anchor_y_relative_from: rel_v.clone(),
-    })]
+        anchor_acquisition: Some(anchor_acquisition),
+    }))]
+}
+
+fn parse_on_off(value: &str) -> Option<bool> {
+    match value {
+        "1" | "true" | "on" => Some(true),
+        "0" | "false" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn anchor_emu_pt(value: Option<&str>) -> Option<f64> {
+    value
+        .and_then(|raw| raw.parse::<f64>().ok())
+        .map(|emu| emu / 12700.0)
+}
+
+fn anchor_value_status<T>(raw: Option<&str>, parsed: Option<T>) -> AnchorValueStatusWire {
+    match (raw, parsed.is_some()) {
+        (None, _) => AnchorValueStatusWire::Missing,
+        (Some(_), true) => AnchorValueStatusWire::Valid,
+        (Some(_), false) => AnchorValueStatusWire::Invalid,
+    }
+}
+
+fn anchor_edges(node: roxmltree::Node) -> AnchorEdgesWire {
+    let top_raw = node.attribute("distT").or_else(|| node.attribute("t"));
+    let right_raw = node.attribute("distR").or_else(|| node.attribute("r"));
+    let bottom_raw = node.attribute("distB").or_else(|| node.attribute("b"));
+    let left_raw = node.attribute("distL").or_else(|| node.attribute("l"));
+    let top_pt = anchor_emu_pt(top_raw);
+    let right_pt = anchor_emu_pt(right_raw);
+    let bottom_pt = anchor_emu_pt(bottom_raw);
+    let left_pt = anchor_emu_pt(left_raw);
+    AnchorEdgesWire {
+        top_pt,
+        top_status: anchor_value_status(top_raw, top_pt),
+        right_pt,
+        right_status: anchor_value_status(right_raw, right_pt),
+        bottom_pt,
+        bottom_status: anchor_value_status(bottom_raw, bottom_pt),
+        left_pt,
+        left_status: anchor_value_status(left_raw, left_pt),
+    }
+}
+
+fn parse_anchor_axis(container: &roxmltree::Node, name: &str) -> AnchorAxisWire {
+    let Some(node) = find_position_node(container, name) else {
+        return AnchorAxisWire::default();
+    };
+    let relative_from_raw = node.attribute("relativeFrom");
+    let relative_from = relative_from_raw.map(str::to_string);
+    let relative_from_valid = relative_from_raw.filter(|value| {
+        if name == "positionH" {
+            matches!(
+                *value,
+                "character"
+                    | "column"
+                    | "insideMargin"
+                    | "leftMargin"
+                    | "margin"
+                    | "outsideMargin"
+                    | "page"
+                    | "rightMargin"
+            )
+        } else {
+            matches!(
+                *value,
+                "bottomMargin"
+                    | "insideMargin"
+                    | "line"
+                    | "margin"
+                    | "outsideMargin"
+                    | "page"
+                    | "paragraph"
+                    | "topMargin"
+            )
+        }
+    });
+    let percent_name = if name == "positionH" {
+        "pctPosHOffset"
+    } else {
+        "pctPosVOffset"
+    };
+    let percent_node = node
+        .descendants()
+        .find(|child| child.is_element() && child.tag_name().name() == percent_name);
+    let percent = percent_node
+        .and_then(|child| child.text())
+        .and_then(|raw| raw.trim().parse::<f64>().ok())
+        .map(|value| value / 100_000.0);
+    let align_node = node
+        .children()
+        .find(|child| child.is_element() && child.tag_name().name() == "align");
+    let align = align_node
+        .and_then(|child| child.text())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .filter(|value| {
+            if name == "positionH" {
+                matches!(*value, "center" | "inside" | "left" | "outside" | "right")
+            } else {
+                matches!(*value, "bottom" | "center" | "inside" | "outside" | "top")
+            }
+        })
+        .map(str::to_string);
+    let offset_node = node
+        .children()
+        .find(|child| child.is_element() && child.tag_name().name() == "posOffset");
+    let offset = offset_node.and_then(|child| anchor_emu_pt(child.text()));
+    let authored = usize::from(percent_node.is_some())
+        + usize::from(align_node.is_some())
+        + usize::from(offset_node.is_some());
+    let choice = if authored != 1 {
+        if authored == 0 {
+            AnchorAxisChoiceWire::Missing
+        } else {
+            AnchorAxisChoiceWire::Invalid
+        }
+    } else if percent_node.is_some() {
+        percent.map_or(AnchorAxisChoiceWire::Invalid, |fraction| {
+            AnchorAxisChoiceWire::Percent { fraction }
+        })
+    } else if align_node.is_some() {
+        align.map_or(AnchorAxisChoiceWire::Invalid, |value| {
+            AnchorAxisChoiceWire::Align { value }
+        })
+    } else {
+        offset.map_or(AnchorAxisChoiceWire::Invalid, |value_pt| {
+            AnchorAxisChoiceWire::Offset { value_pt }
+        })
+    };
+    AnchorAxisWire {
+        relative_from,
+        relative_from_status: anchor_value_status(relative_from_raw, relative_from_valid),
+        choice,
+    }
+}
+
+fn parse_effect_extent(node: roxmltree::Node) -> AnchorEdgesWire {
+    anchor_edges(node)
+}
+
+fn parse_relative_size_axis(
+    container: &roxmltree::Node,
+    outer: &str,
+    inner: &str,
+) -> Option<AnchorRelativeSizeAxisWire> {
+    let node = find_position_node(container, outer)?;
+    let relative_from_raw = node.attribute("relativeFrom");
+    let fraction_node = node
+        .descendants()
+        .find(|child| child.is_element() && child.tag_name().name() == inner);
+    let raw_fraction = fraction_node.and_then(|child| child.text());
+    let fraction = raw_fraction
+        .and_then(|raw| raw.trim().parse::<f64>().ok())
+        .map(|value| value / 100_000.0);
+    let relative_from_valid = relative_from_raw.filter(|value| {
+        if outer == "sizeRelH" {
+            matches!(
+                *value,
+                "margin" | "page" | "leftMargin" | "rightMargin" | "insideMargin" | "outsideMargin"
+            )
+        } else {
+            matches!(
+                *value,
+                "margin" | "page" | "topMargin" | "bottomMargin" | "insideMargin" | "outsideMargin"
+            )
+        }
+    });
+    Some(AnchorRelativeSizeAxisWire {
+        relative_from: relative_from_raw.map(str::to_string),
+        relative_from_status: anchor_value_status(relative_from_raw, relative_from_valid),
+        fraction,
+        fraction_status: match fraction_node {
+            None => AnchorValueStatusWire::Missing,
+            Some(_) if fraction.is_some() => AnchorValueStatusWire::Valid,
+            Some(_) => AnchorValueStatusWire::Invalid,
+        },
+    })
+}
+
+fn parse_raw_transform(xfrm: roxmltree::Node) -> AnchorRawTransformWire {
+    let parse = |node: Option<roxmltree::Node>, attr: &str| {
+        node.and_then(|value| value.attribute(attr))
+            .and_then(|raw| raw.parse::<f64>().ok())
+    };
+    let off = xfrm
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "off");
+    let ext = xfrm
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "ext");
+    let child_off = xfrm
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "chOff");
+    let child_ext = xfrm
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "chExt");
+    AnchorRawTransformWire {
+        offset_x_emu: parse(off, "x"),
+        offset_y_emu: parse(off, "y"),
+        extent_width_emu: parse(ext, "cx"),
+        extent_height_emu: parse(ext, "cy"),
+        child_offset_x_emu: parse(child_off, "x"),
+        child_offset_y_emu: parse(child_off, "y"),
+        child_extent_width_emu: parse(child_ext, "cx"),
+        child_extent_height_emu: parse(child_ext, "cy"),
+        rotation_units: xfrm.attribute("rot").and_then(|raw| raw.parse().ok()),
+        flip_h: xfrm.attribute("flipH").and_then(parse_on_off),
+        flip_v: xfrm.attribute("flipV").and_then(parse_on_off),
+    }
+}
+
+#[derive(Clone)]
+struct AnchorGroupMetadata {
+    child_source_id: String,
+    source_index: usize,
+    source_count: usize,
+    transform_chain: Vec<AnchorRawTransformWire>,
+    child_transform: Option<AnchorRawTransformWire>,
+}
+
+type AnchorGroupMetadataIndex = HashMap<usize, AnchorGroupMetadata>;
+
+#[cfg(test)]
+std::thread_local! {
+    static ANCHOR_GROUP_METADATA_INDEX_BUILDS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+fn anchor_group_metadata_index(wgp: roxmltree::Node) -> AnchorGroupMetadataIndex {
+    #[cfg(test)]
+    ANCHOR_GROUP_METADATA_INDEX_BUILDS.with(|count| count.set(count.get() + 1));
+    let source_count = wgp
+        .descendants()
+        .filter(|node| node.is_element() && matches!(node.tag_name().name(), "pic" | "wsp"))
+        .count();
+    fn visit(
+        group: roxmltree::Node,
+        inherited_chain: &[AnchorRawTransformWire],
+        source_count: usize,
+        source_index: &mut usize,
+        result: &mut AnchorGroupMetadataIndex,
+    ) {
+        let mut chain = inherited_chain.to_vec();
+        if let Some(xfrm) = group_xfrm(group) {
+            chain.push(parse_raw_transform(xfrm));
+        }
+        for child in group.children().filter(|node| node.is_element()) {
+            match child.tag_name().name() {
+                "pic" | "wsp" => {
+                    let child_transform = child
+                        .children()
+                        .find(|node| node.is_element() && node.tag_name().name() == "spPr")
+                        .and_then(|sp_pr| {
+                            sp_pr
+                                .children()
+                                .find(|node| node.is_element() && node.tag_name().name() == "xfrm")
+                        })
+                        .map(parse_raw_transform);
+                    result.insert(
+                        child.range().start,
+                        AnchorGroupMetadata {
+                            child_source_id: format!("group-child-{}", child.range().start),
+                            source_index: *source_index,
+                            source_count,
+                            transform_chain: chain.clone(),
+                            child_transform,
+                        },
+                    );
+                    *source_index += 1;
+                }
+                "grpSp" => visit(child, &chain, source_count, source_index, result),
+                _ => {}
+            }
+        }
+    }
+    let mut result = HashMap::new();
+    let mut source_index = 0;
+    visit(wgp, &[], source_count, &mut source_index, &mut result);
+    result
+}
+
+fn parse_anchor_group_wire(
+    metadata: &AnchorGroupMetadata,
+    resolved_child_frame: DrawingRect,
+) -> AnchorGroupWire {
+    AnchorGroupWire {
+        child_source_id: metadata.child_source_id.clone(),
+        source_index: metadata.source_index,
+        source_count: metadata.source_count,
+        transform_chain: metadata.transform_chain.clone(),
+        child_transform: metadata.child_transform.clone(),
+        resolved_child_frame: AnchorResolvedChildFrameWire {
+            offset_x_pt: resolved_child_frame.x / 12700.0,
+            offset_y_pt: resolved_child_frame.y / 12700.0,
+            width_pt: resolved_child_frame.width / 12700.0,
+            height_pt: resolved_child_frame.height / 12700.0,
+            rotation_deg: resolved_child_frame.rotation_degrees,
+            flip_h: resolved_child_frame.flip_h,
+            flip_v: resolved_child_frame.flip_v,
+        },
+    }
+}
+
+/// Private, lossless acquisition facts for retained layout. The public run
+/// model intentionally remains unchanged. ECMA-376 Part 1 §§20.4.2.3,
+/// 20.4.2.6 and 20.4.2.16 require anchor and child-wrap distances/effects to
+/// remain distinct; [MS-OI29500] §§2.1.1354/.1357 define Word's polygon points
+/// in a fixed 21600×21600 shape coordinate space.
+fn parse_anchor_acquisition_wire(container: &roxmltree::Node) -> AnchorAcquisitionWire {
+    let simple = container
+        .children()
+        .find(|child| child.is_element() && child.tag_name().name() == "simplePos");
+    let simple_attr = container.attribute("simplePos");
+    let extent = container
+        .children()
+        .find(|child| child.is_element() && child.tag_name().name() == "extent");
+    let parent_effect = container
+        .children()
+        .find(|child| child.is_element() && child.tag_name().name() == "effectExtent");
+    let wrap_nodes: Vec<_> = container
+        .children()
+        .filter(|child| {
+            child.is_element()
+                && matches!(
+                    child.tag_name().name(),
+                    "wrapNone" | "wrapSquare" | "wrapTight" | "wrapThrough" | "wrapTopAndBottom"
+                )
+        })
+        .collect();
+    let authored_kinds = wrap_nodes
+        .iter()
+        .map(|node| node.tag_name().name().to_string())
+        .collect::<Vec<_>>();
+    let wrap = if wrap_nodes.len() == 1 {
+        let node = wrap_nodes[0];
+        let polygon_node = node
+            .children()
+            .find(|child| child.is_element() && child.tag_name().name() == "wrapPolygon");
+        let polygon = polygon_node.map(|polygon| {
+            let points: Vec<_> = polygon
+                .children()
+                .filter(|point| {
+                    point.is_element() && matches!(point.tag_name().name(), "start" | "lineTo")
+                })
+                .map(|point| {
+                    let raw_x = point.attribute("x").map(str::to_string);
+                    let raw_y = point.attribute("y").map(str::to_string);
+                    AnchorPointWire {
+                        x: raw_x.as_deref().and_then(|raw| raw.parse::<i64>().ok()),
+                        y: raw_y.as_deref().and_then(|raw| raw.parse::<i64>().ok()),
+                        raw_x,
+                        raw_y,
+                    }
+                })
+                .collect();
+            let invalid_point_count = points
+                .iter()
+                .filter(|point| point.x.is_none() || point.y.is_none())
+                .count();
+            AnchorPolygonWire {
+                edited: polygon
+                    .attribute("edited")
+                    .and_then(parse_on_off)
+                    .unwrap_or(false),
+                coordinate_space: AnchorPolygonSpaceWire {
+                    width: 21600,
+                    height: 21600,
+                },
+                points,
+                invalid_point_count,
+            }
+        });
+        AnchorWrapWire {
+            kind: match node.tag_name().name() {
+                "wrapNone" => AnchorWrapKindWire::None,
+                "wrapSquare" => AnchorWrapKindWire::Square,
+                "wrapTight" => AnchorWrapKindWire::Tight,
+                "wrapThrough" => AnchorWrapKindWire::Through,
+                "wrapTopAndBottom" => AnchorWrapKindWire::TopAndBottom,
+                _ => unreachable!(),
+            },
+            authored_kinds,
+            side: node.attribute("wrapText").map(str::to_string),
+            distances: anchor_edges(node),
+            effect_extent: node
+                .children()
+                .find(|child| child.is_element() && child.tag_name().name() == "effectExtent")
+                .map(parse_effect_extent),
+            polygon,
+        }
+    } else {
+        AnchorWrapWire {
+            kind: if wrap_nodes.is_empty() {
+                AnchorWrapKindWire::Missing
+            } else {
+                AnchorWrapKindWire::Invalid
+            },
+            authored_kinds,
+            ..Default::default()
+        }
+    };
+    let simple_enabled = simple_attr.and_then(parse_xsd_bool);
+    let simple_x_raw = simple.and_then(|node| node.attribute("x"));
+    let simple_y_raw = simple.and_then(|node| node.attribute("y"));
+    let simple_x = anchor_emu_pt(simple_x_raw);
+    let simple_y = anchor_emu_pt(simple_y_raw);
+    let extent_width_raw = extent.and_then(|node| node.attribute("cx"));
+    let extent_height_raw = extent.and_then(|node| node.attribute("cy"));
+    let extent_width = anchor_emu_pt(extent_width_raw);
+    let extent_height = anchor_emu_pt(extent_height_raw);
+    let behind_raw = container.attribute("behindDoc");
+    let behind_doc = behind_raw.and_then(parse_xsd_bool);
+    let relative_height_raw = container.attribute("relativeHeight");
+    let relative_height = relative_height_raw.and_then(|raw| raw.parse().ok());
+    let locked_raw = container.attribute("locked");
+    let locked = locked_raw.and_then(parse_xsd_bool);
+    let allow_overlap_raw = container.attribute("allowOverlap");
+    let allow_overlap = allow_overlap_raw.and_then(parse_xsd_bool);
+    let layout_in_cell_raw = container.attribute("layoutInCell");
+    let layout_in_cell = layout_in_cell_raw.and_then(parse_xsd_bool);
+    AnchorAcquisitionWire {
+        occurrence_id: format!("wp-anchor-{}", container.range().start),
+        simple_position: AnchorSimplePositionWire {
+            enabled: simple_enabled,
+            status: anchor_value_status(simple_attr, simple_enabled),
+            x_pt: simple_x,
+            x_status: anchor_value_status(simple_x_raw, simple_x),
+            y_pt: simple_y,
+            y_status: anchor_value_status(simple_y_raw, simple_y),
+        },
+        horizontal: parse_anchor_axis(container, "positionH"),
+        vertical: parse_anchor_axis(container, "positionV"),
+        extent: AnchorExtentWire {
+            width_pt: extent_width,
+            height_pt: extent_height,
+            width_status: anchor_value_status(extent_width_raw, extent_width),
+            height_status: anchor_value_status(extent_height_raw, extent_height),
+        },
+        parent_effect_extent: parent_effect.map(parse_effect_extent).unwrap_or_default(),
+        anchor_distances: anchor_edges(*container),
+        relative_size: AnchorRelativeSizeWire {
+            horizontal: parse_relative_size_axis(container, "sizeRelH", "pctWidth"),
+            vertical: parse_relative_size_axis(container, "sizeRelV", "pctHeight"),
+        },
+        wrap,
+        behavior: AnchorBehaviorWire {
+            behind_doc,
+            behind_doc_status: anchor_value_status(behind_raw, behind_doc),
+            relative_height,
+            relative_height_status: anchor_value_status(relative_height_raw, relative_height),
+            locked,
+            locked_status: anchor_value_status(locked_raw, locked),
+            allow_overlap,
+            allow_overlap_status: anchor_value_status(allow_overlap_raw, allow_overlap),
+            layout_in_cell,
+            layout_in_cell_status: anchor_value_status(layout_in_cell_raw, layout_in_cell),
+        },
+        group: None,
+    }
 }
 
 #[derive(Clone)]
@@ -4584,11 +5510,10 @@ struct AnchorMeta {
     dist_left: f64,
     dist_right: f64,
     /// ECMA-376 §20.4.2.3 `wp:anchor/@allowOverlap` — whether this floating
-    /// object may overlap other floating objects. Spec default is **true**
-    /// (the attribute is optional). `false` mandates the object be repositioned
-    /// to prevent overlap. We implement `Default` by hand so the spec default of
-    /// `true` is preserved everywhere `AnchorMeta::default()` is used (a derived
-    /// `Default` would wrongly yield `false`).
+    /// object may overlap other floating objects. CT_Anchor requires the
+    /// attribute; this legacy public-model adapter uses true only as its
+    /// compatibility fallback. The private acquisition wire separately retains
+    /// missing/invalid/explicit values for diagnostics.
     allow_overlap: bool,
 }
 
@@ -4601,7 +5526,7 @@ impl Default for AnchorMeta {
             dist_bottom: 0.0,
             dist_left: 0.0,
             dist_right: 0.0,
-            // §20.4.2.3: omitted @allowOverlap ⇒ true.
+            // Legacy public-model compatibility fallback, not a schema default.
             allow_overlap: true,
         }
     }
@@ -4616,7 +5541,8 @@ fn parse_anchor_wrap(container: &roxmltree::Node) -> AnchorMeta {
     let dist_right = container.attribute("distR").map(to_pt).unwrap_or(0.0);
 
     // ECMA-376 §20.4.2.3 `wp:anchor/@allowOverlap`: "1"/"true" ⇒ true,
-    // "0"/"false" ⇒ false, omitted ⇒ true (spec default).
+    // "0"/"false" ⇒ false. Missing is malformed CT_Anchor; this old adapter
+    // retains its prior true fallback while the private wire records missing.
     let allow_overlap = container
         .attribute("allowOverlap")
         .map(|v| v == "1" || v == "true")
@@ -4670,9 +5596,9 @@ fn parse_anchor_wrap(container: &roxmltree::Node) -> AnchorMeta {
 /// "column" and "margin" relative offsets both mean: add marginLeft in the renderer.
 /// `<wp:positionH>` / `<wp:positionV>` may live directly under `<wp:anchor>`,
 /// or be wrapped in `<mc:AlternateContent>` for Word 2010+ pct-based positioning.
-/// In the wrapped form `<mc:Choice>` holds the wp14 pct-based variant and
-/// `<mc:Fallback>` holds a posOffset variant. Always pick Choice (matches what
-/// Word renders in 2010+); never read from Fallback.
+/// In the common wrapped form an understood wp14 Choice holds percentage
+/// positioning and Fallback holds posOffset. ECMA-376 Part 3 §9.3 selects the
+/// first fully understood Choice, otherwise Fallback.
 fn find_position_node<'a, 'i>(
     container: &roxmltree::Node<'a, 'i>,
     name: &str,
@@ -4684,8 +5610,13 @@ fn find_position_node<'a, 'i>(
         .children()
         .filter(|n| n.tag_name().name() == "AlternateContent")
     {
-        if let Some(choice) = ac.children().find(|n| n.tag_name().name() == "Choice") {
-            if let Some(n) = choice
+        // ECMA-376 Part 3 §9.3: resolve Requires by namespace URI and use the
+        // fallback when no supported Choice exists. Reuse the common MCE seam
+        // used by DOCX/PPTX/XLSX instead of treating the first Choice as live.
+        if let Some(selected) =
+            ooxml_common::mce::select_alternate_content(ac, &docx_understands_drawing_ns)
+        {
+            if let Some(n) = selected
                 .descendants()
                 .find(|n| n.is_element() && n.tag_name().name() == name)
             {
@@ -4809,6 +5740,7 @@ fn parse_anchor_size_rel(
 /// Expand a wp:wgp group into individual ImageRun entries.
 /// Each pic child gets page-relative coordinates: group anchor origin + child offset within group.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn parse_wgp_images(
     wgp: roxmltree::Node,
     media_map: &HashMap<String, String>,
@@ -4818,6 +5750,32 @@ fn parse_wgp_images(
     anchor_pos_y: f64,
     y_from_para: bool,
     anchor_meta: &AnchorMeta,
+) -> Vec<ImageRun> {
+    let group_metadata = anchor_group_metadata_index(wgp);
+    parse_wgp_images_with_metadata(
+        wgp,
+        media_map,
+        theme,
+        anchor_pos_x,
+        x_from_margin,
+        anchor_pos_y,
+        y_from_para,
+        anchor_meta,
+        &group_metadata,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_wgp_images_with_metadata(
+    wgp: roxmltree::Node,
+    media_map: &HashMap<String, String>,
+    theme: &ThemeColors,
+    anchor_pos_x: f64,
+    x_from_margin: bool,
+    anchor_pos_y: f64,
+    y_from_para: bool,
+    anchor_meta: &AnchorMeta,
+    group_metadata: &AnchorGroupMetadataIndex,
 ) -> Vec<ImageRun> {
     // Pictures inside a wpg group live in the group's child coordinate space and
     // must be mapped to page space through the cumulative transform of every
@@ -4842,6 +5800,7 @@ fn parse_wgp_images(
         anchor_pos_y,
         y_from_para,
         anchor_meta,
+        group_metadata,
         &mut results,
     );
     results
@@ -4863,6 +5822,7 @@ fn walk_group_images(
     anchor_pos_y: f64,
     y_from_para: bool,
     anchor_meta: &AnchorMeta,
+    group_metadata: &AnchorGroupMetadataIndex,
     results: &mut Vec<ImageRun>,
 ) {
     for child in group.children().filter(|n| n.is_element()) {
@@ -4882,6 +5842,7 @@ fn walk_group_images(
                     anchor_pos_y,
                     y_from_para,
                     anchor_meta,
+                    group_metadata.get(&child.range().start),
                 ) {
                     results.push(img);
                 }
@@ -4901,6 +5862,7 @@ fn walk_group_images(
                     anchor_pos_y,
                     y_from_para,
                     anchor_meta,
+                    group_metadata,
                     results,
                 );
             }
@@ -4926,6 +5888,7 @@ fn parse_group_pic(
     anchor_pos_y: f64,
     y_from_para: bool,
     anchor_meta: &AnchorMeta,
+    group_metadata: Option<&AnchorGroupMetadata>,
 ) -> Option<ImageRun> {
     // Position and size come from the pic's spPr > a:xfrm (child-coord EMU).
     let sp_pr = pic.children().find(|n| n.tag_name().name() == "spPr")?;
@@ -5037,6 +6000,10 @@ fn parse_group_pic(
         // Leave None so the renderer doesn't double-resolve the container.
         anchor_x_relative_from: None,
         anchor_y_relative_from: None,
+        anchor_acquisition: group_metadata.map(|metadata| AnchorAcquisitionWire {
+            group: Some(parse_anchor_group_wire(metadata, mapped)),
+            ..Default::default()
+        }),
     })
 }
 
@@ -5112,6 +6079,7 @@ fn group_xfrm<'a, 'i>(group: roxmltree::Node<'a, 'i>) -> Option<roxmltree::Node<
 /// the cumulative child→page transform must be the product of every group on
 /// the path from the wgp down to the wsp — not just the outermost grpSpPr.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn parse_wgp_shapes(
     style_map: &StyleMap,
     num_map: &mut NumberingMap,
@@ -5124,6 +6092,38 @@ fn parse_wgp_shapes(
     y_from_para: bool,
     anchor_meta: &AnchorMeta,
     anchor_z_order: u32,
+) -> Vec<ShapeRun> {
+    let group_metadata = anchor_group_metadata_index(wgp);
+    parse_wgp_shapes_with_metadata(
+        style_map,
+        num_map,
+        wgp,
+        theme,
+        media_map,
+        anchor_pos_x,
+        x_from_margin,
+        anchor_pos_y,
+        y_from_para,
+        anchor_meta,
+        anchor_z_order,
+        &group_metadata,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_wgp_shapes_with_metadata(
+    style_map: &StyleMap,
+    num_map: &mut NumberingMap,
+    wgp: roxmltree::Node,
+    theme: &ThemeColors,
+    media_map: &HashMap<String, String>,
+    anchor_pos_x: f64,
+    x_from_margin: bool,
+    anchor_pos_y: f64,
+    y_from_para: bool,
+    anchor_meta: &AnchorMeta,
+    anchor_z_order: u32,
+    group_metadata: &AnchorGroupMetadataIndex,
 ) -> Vec<ShapeRun> {
     // Base transform = the outermost wgp grpSpPr/xfrm (chOff/chExt → off/ext).
     let base = match group_xfrm(wgp) {
@@ -5172,6 +6172,7 @@ fn parse_wgp_shapes(
         group_w_pt,
         group_h_pt,
         anchor_z_order,
+        group_metadata,
         &mut z_order,
         &mut results,
     );
@@ -5199,6 +6200,7 @@ fn walk_group_children(
     group_w_pt: f64,
     group_h_pt: f64,
     anchor_z_order: u32,
+    group_metadata: &AnchorGroupMetadataIndex,
     z_order: &mut u32,
     results: &mut Vec<ShapeRun>,
 ) {
@@ -5224,6 +6226,7 @@ fn walk_group_children(
                     y_from_para,
                     anchor_meta,
                     Some(xform),
+                    group_metadata.get(&child.range().start),
                     anchor_z_order.saturating_add(idx),
                 ) {
                     shape.group_width_pt = Some(group_w_pt);
@@ -5252,6 +6255,7 @@ fn walk_group_children(
                     group_w_pt,
                     group_h_pt,
                     anchor_z_order,
+                    group_metadata,
                     z_order,
                     results,
                 );
@@ -5281,6 +6285,7 @@ fn parse_wsp_shape(
     y_from_para: bool,
     anchor_meta: &AnchorMeta,
     group_transform: Option<GroupTransform>,
+    group_metadata: Option<&AnchorGroupMetadata>,
     z_order: u32,
 ) -> Option<ShapeRun> {
     let sp_pr = wsp
@@ -5522,7 +6527,7 @@ fn parse_wsp_shape(
         text_inset_b,
     ) = parse_shape_text_body(style_map, num_map, wsp, theme, media_map);
 
-    Some(ShapeRun {
+    let mut shape = ShapeRun {
         width_pt,
         height_pt,
         anchor_x_pt,
@@ -5554,7 +6559,25 @@ fn parse_wsp_shape(
         text_inset_r,
         text_inset_b,
         ..Default::default()
-    })
+    };
+    if let Some(metadata) = group_metadata {
+        shape.anchor_acquisition = Some(AnchorAcquisitionWire {
+            group: Some(parse_anchor_group_wire(
+                metadata,
+                DrawingRect {
+                    x: local_x_pt * 12700.0,
+                    y: local_y_pt * 12700.0,
+                    width: width_pt * 12700.0,
+                    height: height_pt * 12700.0,
+                    rotation_degrees: rotation,
+                    flip_h,
+                    flip_v,
+                },
+            )),
+            ..Default::default()
+        });
+    }
+    Some(shape)
 }
 
 /// Parse the adjust handles from a `<a:prstGeom>`'s `<a:avLst>` into an
@@ -5893,6 +6916,7 @@ fn extract_simple_paragraph_text(
                         text: rt_text,
                         font_size_pt,
                         hps_raise_pt,
+                        typography: None,
                     })
                 };
                 // §17.3.3.25 + §17.3.3.32 — split the base at tabs so the shared
@@ -6421,12 +7445,32 @@ fn parse_vml_pict(
     // ECMA-376 Part 4 §19.1.2.5 `<v:fill opacity>` — fill alpha (default opaque).
     let fill_opacity = resolved_fill.opacity;
 
-    // §19.1.2.23 `<v:textpath>` — WordArt text (a watermark). When present this
-    // shape draws stretched rotated text instead of a fill/stroke panel + body.
-    let text_path = shape
+    // §19.1.2.23 `<v:textpath>` — preserve WordArt text plus the resolved
+    // CT_Path / CT_TextPath controls. `textpathok` and `on` decide whether the
+    // path text is enabled; `fitshape` / `fitpath` decide fitting downstream.
+    let text_path_node = shape
         .children()
-        .find(|n| n.is_element() && n.tag_name().name() == "textpath")
-        .and_then(parse_vml_textpath);
+        .find(|n| n.is_element() && n.tag_name().name() == "textpath");
+    let inherited_text_path_node = shape_type.and_then(|node| {
+        node.children()
+            .find(|child| child.is_element() && child.tag_name().name() == "textpath")
+    });
+    let text_path_ok = shape
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "path")
+        .and_then(|node| node.attribute("textpathok"))
+        .and_then(parse_vml_true_false)
+        .or_else(|| {
+            shape_type
+                .and_then(|node| {
+                    node.children()
+                        .find(|child| child.is_element() && child.tag_name().name() == "path")
+                })
+                .and_then(|node| node.attribute("textpathok"))
+                .and_then(parse_vml_true_false)
+        });
+    let text_path = text_path_node
+        .and_then(|node| parse_vml_textpath(node, inherited_text_path_node, text_path_ok));
 
     // §19.1.2.19 style `rotation` — degrees clockwise (default 0).
     let rotation = vml_css_length_pt(style, "rotation").unwrap_or(0.0);
@@ -6951,9 +7995,16 @@ fn parse_vml_opacity(raw: &str) -> Option<f64> {
 /// element's CSS `style` (`font-family`, `font-weight`, `font-style`, and the
 /// `bold`/`italic` keywords of the `font` shorthand). Quotes around the family
 /// are stripped. Returns `None` when the element carries no `string`.
-fn parse_vml_textpath(textpath: roxmltree::Node) -> Option<TextPath> {
+fn parse_vml_textpath(
+    textpath: roxmltree::Node,
+    inherited: Option<roxmltree::Node>,
+    text_path_ok: Option<bool>,
+) -> Option<TextPath> {
     let string = textpath.attribute("string")?.to_string();
     let style = textpath.attribute("style").unwrap_or("");
+    let inherited_style = inherited
+        .and_then(|node| node.attribute("style"))
+        .unwrap_or("");
 
     // font-family: prefer the explicit property, else the last token of the
     // `font` shorthand (`style variant weight size/line family`). Strip quotes.
@@ -6965,6 +8016,15 @@ fn parse_vml_textpath(textpath: roxmltree::Node) -> Option<TextPath> {
                 // The family is everything after the size token; a simple,
                 // robust take is the substring after the last size-like token.
                 // Fall back to the last whitespace-delimited token.
+                shorthand
+                    .rsplit(|c: char| c.is_whitespace())
+                    .find(|t| !t.is_empty())
+                    .map(strip_quotes)
+            })
+        })
+        .or_else(|| vml_css_str(inherited_style, "font-family").map(strip_quotes))
+        .or_else(|| {
+            vml_css_str(inherited_style, "font").and_then(|shorthand| {
                 shorthand
                     .rsplit(|c: char| c.is_whitespace())
                     .find(|t| !t.is_empty())
@@ -6992,7 +8052,38 @@ fn parse_vml_textpath(textpath: roxmltree::Node) -> Option<TextPath> {
         font_family,
         bold,
         italic,
+        vml: VmlTextPathFacts {
+            text_path_ok: Some(text_path_ok.unwrap_or(false)),
+            on: Some(resolved_vml_textpath_bool(textpath, inherited, "on").unwrap_or(false)),
+            fit_shape: Some(
+                resolved_vml_textpath_bool(textpath, inherited, "fitshape").unwrap_or(false),
+            ),
+            fit_path: Some(
+                resolved_vml_textpath_bool(textpath, inherited, "fitpath").unwrap_or(false),
+            ),
+            trim: Some(resolved_vml_textpath_bool(textpath, inherited, "trim").unwrap_or(false)),
+            x_scale: Some(
+                resolved_vml_textpath_bool(textpath, inherited, "xscale").unwrap_or(false),
+            ),
+            font_size_pt: vml_css_length_pt(style, "font-size")
+                .or_else(|| vml_css_length_pt(inherited_style, "font-size")),
+        },
     })
+}
+
+fn resolved_vml_textpath_bool(
+    textpath: roxmltree::Node,
+    inherited: Option<roxmltree::Node>,
+    attribute: &str,
+) -> Option<bool> {
+    textpath
+        .attribute(attribute)
+        .and_then(parse_vml_true_false)
+        .or_else(|| {
+            inherited
+                .and_then(|node| node.attribute(attribute))
+                .and_then(parse_vml_true_false)
+        })
 }
 
 /// Parse a bare legacy VML `<w:pict>` picture — a `<v:shape>` (or
@@ -7079,6 +8170,7 @@ fn parse_vml_pict_image(
         anchor_y_align: None,
         anchor_x_relative_from: None,
         anchor_y_relative_from: None,
+        anchor_acquisition: None,
     })
 }
 
@@ -7170,6 +8262,7 @@ fn parse_object_ole_image(
         anchor_y_align: None,
         anchor_x_relative_from: None,
         anchor_y_relative_from: None,
+        anchor_acquisition: None,
     })
 }
 
@@ -9874,6 +10967,7 @@ mod tests {
             anchor_y_align: None,
             anchor_x_relative_from: None,
             anchor_y_relative_from: None,
+            anchor_acquisition: None,
         };
         let cases: Vec<(DocRun, &str)> = vec![
             (DocRun::Text(Box::default()), "text"),
@@ -9884,17 +10978,18 @@ mod tests {
                     font_family_east_asia: None,
                     bold: false,
                     italic: false,
+                    anchor_occurrence_id: None,
                 }),
                 "anchorHost",
             ),
-            (DocRun::Image(image), "image"),
+            (DocRun::Image(Box::new(image)), "image"),
             (
                 DocRun::Break {
                     break_type: BreakType::Line,
                 },
                 "break",
             ),
-            (DocRun::Field(FieldRun::default()), "field"),
+            (DocRun::Field(Box::default()), "field"),
             (DocRun::Shape(Box::default()), "shape"),
             (
                 DocRun::Math {
@@ -10008,6 +11103,18 @@ mod wgp_image_tests {
             "anchor_y_pt = {}",
             img.anchor_y_pt
         );
+        let child = &img
+            .anchor_acquisition
+            .as_ref()
+            .expect("group acquisition")
+            .group
+            .as_ref()
+            .expect("group metadata")
+            .resolved_child_frame;
+        assert!((child.offset_x_pt - img.anchor_x_pt).abs() < 1e-6);
+        assert!((child.offset_y_pt - img.anchor_y_pt).abs() < 1e-6);
+        assert!((child.width_pt - img.width_pt).abs() < 1e-6);
+        assert!((child.height_pt - img.height_pt).abs() < 1e-6);
     }
 }
 
@@ -10026,10 +11133,11 @@ mod allow_overlap_tests {
         parse_anchor_wrap(&doc.root_element())
     }
 
-    // ECMA-376 §20.4.2.3 — @allowOverlap is optional; when omitted the object
-    // MAY overlap (default true).
+    // Hand-built/legacy public model compatibility: a missing required
+    // @allowOverlap keeps the historical no-constraint value. Private parser
+    // acquisition tests above retain the missing status instead.
     #[test]
-    fn omitted_allow_overlap_defaults_true() {
+    fn legacy_adapter_missing_allow_overlap_falls_back_true() {
         assert!(meta("").allow_overlap);
     }
 
@@ -10047,11 +11155,374 @@ mod allow_overlap_tests {
         assert!(meta(r#"allowOverlap="true""#).allow_overlap);
     }
 
-    // The hand-written Default must preserve the spec default of true so any
-    // AnchorMeta::default() (e.g. group images without an anchor) is correct.
+    // Non-anchor helper paths use the same legacy no-constraint fallback.
     #[test]
     fn default_anchor_meta_allows_overlap() {
         assert!(AnchorMeta::default().allow_overlap);
+    }
+}
+
+#[cfg(test)]
+mod anchor_acquisition_wire_tests {
+    use super::*;
+
+    fn facts(xml: &str) -> AnchorAcquisitionWire {
+        let doc = roxmltree::Document::parse(xml).expect("anchor XML");
+        parse_anchor_acquisition_wire(&doc.root_element())
+    }
+
+    #[test]
+    fn retains_normative_anchor_and_wrap_inputs_without_collapsing_sources() {
+        let wire = facts(
+            r#"<wp:anchor xmlns:wp="urn:wp" xmlns:wp14="urn:wp14"
+                 simplePos="1" behindDoc="1" relativeHeight="42"
+                 locked="0" allowOverlap="0" layoutInCell="1"
+                 distT="12700" distR="25400" distB="38100" distL="50800">
+                 <wp:simplePos x="6350" y="-12700"/>
+                 <wp:positionH relativeFrom="margin"><wp:align>inside</wp:align></wp:positionH>
+                 <wp:positionV relativeFrom="paragraph"><wp:posOffset>127000</wp:posOffset></wp:positionV>
+                 <wp:extent cx="254000" cy="127000"/>
+                 <wp:effectExtent l="1270" t="2540" r="3810" b="5080"/>
+                 <wp:wrapThrough wrapText="largest" distL="6350" distR="7620">
+                   <wp:wrapPolygon edited="1">
+                     <wp:start x="0" y="0"/>
+                     <wp:lineTo x="21600" y="0"/>
+                     <wp:lineTo x="24000" y="21600"/>
+                   </wp:wrapPolygon>
+                 </wp:wrapThrough>
+                 <wp14:sizeRelH relativeFrom="page"><wp14:pctWidth>0</wp14:pctWidth></wp14:sizeRelH>
+                 <wp14:sizeRelV relativeFrom="margin"><wp14:pctHeight>50000</wp14:pctHeight></wp14:sizeRelV>
+               </wp:anchor>"#,
+        );
+
+        assert!(wire.occurrence_id.starts_with("wp-anchor-"));
+        assert_eq!(wire.simple_position.enabled, Some(true));
+        assert_eq!(wire.simple_position.x_pt, Some(0.5));
+        assert_eq!(wire.simple_position.x_status, AnchorValueStatusWire::Valid);
+        assert_eq!(wire.simple_position.y_pt, Some(-1.0));
+        assert_eq!(wire.simple_position.y_status, AnchorValueStatusWire::Valid);
+        assert_eq!(wire.horizontal.relative_from.as_deref(), Some("margin"));
+        assert!(
+            matches!(wire.horizontal.choice, AnchorAxisChoiceWire::Align { ref value } if value == "inside")
+        );
+        assert_eq!(wire.vertical.relative_from.as_deref(), Some("paragraph"));
+        assert!(
+            matches!(wire.vertical.choice, AnchorAxisChoiceWire::Offset { value_pt } if value_pt == 10.0)
+        );
+        assert_eq!(wire.extent.width_pt, Some(20.0));
+        assert_eq!(wire.extent.height_pt, Some(10.0));
+        assert_eq!(wire.parent_effect_extent.left_pt, Some(0.1));
+        assert_eq!(wire.anchor_distances.top_pt, Some(1.0));
+        assert_eq!(wire.anchor_distances.left_pt, Some(4.0));
+        assert_eq!(wire.wrap.kind, AnchorWrapKindWire::Through);
+        assert_eq!(wire.wrap.side.as_deref(), Some("largest"));
+        assert_eq!(wire.wrap.distances.left_pt, Some(0.5));
+        assert_eq!(wire.wrap.distances.right_pt, Some(0.6));
+        assert_eq!(wire.wrap.polygon.as_ref().map(|p| p.edited), Some(true));
+        assert_eq!(wire.wrap.polygon.as_ref().unwrap().points[2].x, Some(24000));
+        assert_eq!(
+            wire.relative_size.horizontal.as_ref().unwrap().fraction,
+            Some(0.0)
+        );
+        assert_eq!(
+            wire.relative_size.vertical.as_ref().unwrap().fraction,
+            Some(0.5)
+        );
+        assert_eq!(wire.behavior.behind_doc, Some(true));
+        assert_eq!(wire.behavior.relative_height, Some(42));
+        assert_eq!(wire.behavior.locked, Some(false));
+        assert_eq!(wire.behavior.locked_status, AnchorValueStatusWire::Valid);
+        assert_eq!(wire.behavior.allow_overlap, Some(false));
+        assert_eq!(
+            wire.behavior.allow_overlap_status,
+            AnchorValueStatusWire::Valid
+        );
+        assert_eq!(wire.behavior.layout_in_cell, Some(true));
+    }
+
+    #[test]
+    fn serializes_axis_choice_payloads_with_the_camel_case_wire_contract() {
+        let wire = facts(
+            r#"<wp:anchor xmlns:wp="urn:wp">
+                 <wp:positionH relativeFrom="page"><wp:posOffset>12700</wp:posOffset></wp:positionH>
+                 <wp:positionV relativeFrom="page"><wp:posOffset>25400</wp:posOffset></wp:positionV>
+                 <wp:extent cx="12700" cy="12700"/><wp:wrapNone/>
+               </wp:anchor>"#,
+        );
+
+        let json = serde_json::to_value(&wire).expect("anchor acquisition wire serializes");
+        assert_eq!(json["horizontal"]["choice"]["valuePt"], 1.0);
+        assert!(json["horizontal"]["choice"].get("value_pt").is_none());
+        assert_eq!(json["vertical"]["choice"]["valuePt"], 2.0);
+        assert!(json["vertical"]["choice"].get("value_pt").is_none());
+    }
+
+    #[test]
+    fn preserves_child_effect_extent_and_missing_required_behavior_presence() {
+        let wire = facts(
+            r#"<wp:anchor xmlns:wp="urn:wp">
+                 <wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH>
+                 <wp:positionV relativeFrom="page"><wp:align>top</wp:align></wp:positionV>
+                 <wp:extent cx="12700" cy="12700"/>
+                 <wp:wrapSquare wrapText="bothSides" distT="12700">
+                   <wp:effectExtent l="2540" t="3810" r="5080" b="6350"/>
+                 </wp:wrapSquare>
+               </wp:anchor>"#,
+        );
+
+        assert_eq!(
+            wire.behavior.allow_overlap_status,
+            AnchorValueStatusWire::Missing
+        );
+        assert_eq!(wire.behavior.allow_overlap, None);
+        assert_eq!(wire.wrap.distances.top_pt, Some(1.0));
+        assert_eq!(wire.wrap.effect_extent.as_ref().unwrap().left_pt, Some(0.2));
+        assert_eq!(wire.parent_effect_extent.left_pt, None);
+    }
+
+    #[test]
+    fn mce_uses_supported_choice_and_falls_back_from_unknown_requirements() {
+        let wire = facts(
+            r#"<wp:anchor xmlns:wp="urn:wp" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"
+                 xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+                 xmlns:x="urn:unsupported">
+                 <mc:AlternateContent>
+                   <mc:Choice Requires="x"><wp:positionH relativeFrom="page"><wp:align>right</wp:align></wp:positionH></mc:Choice>
+                   <mc:Fallback><wp:positionH relativeFrom="margin"><wp:posOffset>12700</wp:posOffset></wp:positionH></mc:Fallback>
+                 </mc:AlternateContent>
+                 <mc:AlternateContent>
+                   <mc:Choice Requires="wp14"><wp:positionV relativeFrom="page"><wp14:pctPosVOffset>0</wp14:pctPosVOffset></wp:positionV></mc:Choice>
+                   <mc:Fallback><wp:positionV relativeFrom="page"><wp:posOffset>25400</wp:posOffset></wp:positionV></mc:Fallback>
+                 </mc:AlternateContent>
+                 <wp:extent cx="12700" cy="12700"/><wp:wrapNone/>
+               </wp:anchor>"#,
+        );
+
+        assert_eq!(wire.horizontal.relative_from.as_deref(), Some("margin"));
+        assert!(
+            matches!(wire.horizontal.choice, AnchorAxisChoiceWire::Offset { value_pt } if value_pt == 1.0)
+        );
+        assert!(
+            matches!(wire.vertical.choice, AnchorAxisChoiceWire::Percent { fraction } if fraction == 0.0)
+        );
+    }
+
+    #[test]
+    fn malformed_choice_values_remain_diagnostic_instead_of_becoming_defaults() {
+        let wire = facts(
+            r#"<wp:anchor xmlns:wp="urn:wp" simplePos="maybe" behindDoc="bad"
+                 relativeHeight="many" locked="perhaps" allowOverlap="sometimes" layoutInCell="perhaps">
+                 <wp:simplePos x="0" y="0"/>
+                 <wp:positionH><wp:align>left</wp:align><wp:posOffset>0</wp:posOffset></wp:positionH>
+                 <wp:positionV relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionV>
+                 <wp:extent cx="wide" cy="12700"/>
+                 <wp:wrapSquare wrapText="bothSides"/><wp:wrapNone/>
+               </wp:anchor>"#,
+        );
+        assert_eq!(wire.simple_position.status, AnchorValueStatusWire::Invalid);
+        assert_eq!(wire.simple_position.enabled, None);
+        assert!(matches!(
+            wire.horizontal.choice,
+            AnchorAxisChoiceWire::Invalid
+        ));
+        assert_eq!(
+            wire.horizontal.relative_from_status,
+            AnchorValueStatusWire::Missing
+        );
+        assert_eq!(wire.extent.width_status, AnchorValueStatusWire::Invalid);
+        assert_eq!(wire.wrap.kind, AnchorWrapKindWire::Invalid);
+        assert_eq!(wire.wrap.authored_kinds, vec!["wrapSquare", "wrapNone"]);
+        assert_eq!(
+            wire.behavior.behind_doc_status,
+            AnchorValueStatusWire::Invalid
+        );
+        assert_eq!(
+            wire.behavior.relative_height_status,
+            AnchorValueStatusWire::Invalid
+        );
+        assert_eq!(wire.behavior.locked_status, AnchorValueStatusWire::Invalid);
+        assert_eq!(
+            wire.behavior.allow_overlap_status,
+            AnchorValueStatusWire::Invalid
+        );
+        assert_eq!(
+            wire.behavior.layout_in_cell_status,
+            AnchorValueStatusWire::Invalid
+        );
+    }
+
+    #[test]
+    fn retains_presence_and_validity_for_every_required_anchor_behavior_attribute() {
+        let missing = facts(
+            r#"<wp:anchor xmlns:wp="urn:wp">
+              <wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH>
+              <wp:positionV relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionV>
+              <wp:extent cx="12700" cy="12700"/><wp:wrapNone/>
+            </wp:anchor>"#,
+        );
+        assert_eq!(
+            missing.behavior.behind_doc_status,
+            AnchorValueStatusWire::Missing
+        );
+        assert_eq!(
+            missing.behavior.relative_height_status,
+            AnchorValueStatusWire::Missing
+        );
+        assert_eq!(
+            missing.behavior.locked_status,
+            AnchorValueStatusWire::Missing
+        );
+        assert_eq!(
+            missing.behavior.layout_in_cell_status,
+            AnchorValueStatusWire::Missing
+        );
+        assert_eq!(
+            missing.behavior.allow_overlap_status,
+            AnchorValueStatusWire::Missing
+        );
+
+        let invalid = facts(
+            r#"<wp:anchor xmlns:wp="urn:wp" behindDoc="off" relativeHeight="-1"
+                 locked="on" layoutInCell="off" allowOverlap="on">
+              <wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH>
+              <wp:positionV relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionV>
+              <wp:extent cx="12700" cy="12700"/><wp:wrapNone/>
+            </wp:anchor>"#,
+        );
+        assert_eq!(
+            invalid.behavior.behind_doc_status,
+            AnchorValueStatusWire::Invalid
+        );
+        assert_eq!(
+            invalid.behavior.relative_height_status,
+            AnchorValueStatusWire::Invalid
+        );
+        assert_eq!(
+            invalid.behavior.locked_status,
+            AnchorValueStatusWire::Invalid
+        );
+        assert_eq!(
+            invalid.behavior.layout_in_cell_status,
+            AnchorValueStatusWire::Invalid
+        );
+        assert_eq!(
+            invalid.behavior.allow_overlap_status,
+            AnchorValueStatusWire::Invalid
+        );
+    }
+
+    #[test]
+    fn simple_position_coordinates_preserve_missing_and_invalid_independently() {
+        let missing_x = facts(
+            r#"<wp:anchor xmlns:wp="urn:wp" simplePos="1">
+              <wp:simplePos y="0"/><wp:extent cx="12700" cy="12700"/><wp:wrapNone/>
+            </wp:anchor>"#,
+        );
+        assert_eq!(
+            missing_x.simple_position.x_status,
+            AnchorValueStatusWire::Missing
+        );
+        assert_eq!(
+            missing_x.simple_position.y_status,
+            AnchorValueStatusWire::Valid
+        );
+
+        let invalid_y = facts(
+            r#"<wp:anchor xmlns:wp="urn:wp" simplePos="1">
+              <wp:simplePos x="0" y="not-a-coordinate"/>
+              <wp:extent cx="12700" cy="12700"/><wp:wrapNone/>
+            </wp:anchor>"#,
+        );
+        assert_eq!(
+            invalid_y.simple_position.x_status,
+            AnchorValueStatusWire::Valid
+        );
+        assert_eq!(
+            invalid_y.simple_position.y_status,
+            AnchorValueStatusWire::Invalid
+        );
+    }
+
+    #[test]
+    fn malformed_polygon_points_are_retained_with_raw_values() {
+        let wire = facts(
+            r#"<wp:anchor xmlns:wp="urn:wp"><wp:extent cx="12700" cy="12700"/>
+              <wp:wrapTight wrapText="bothSides"><wp:wrapPolygon>
+                <wp:start x="oops" y="0"/><wp:lineTo x="21600"/><wp:lineTo x="0" y="21600"/>
+              </wp:wrapPolygon></wp:wrapTight></wp:anchor>"#,
+        );
+        let polygon = wire.wrap.polygon.unwrap();
+        assert_eq!(polygon.points.len(), 3);
+        assert_eq!(polygon.invalid_point_count, 2);
+        assert_eq!(polygon.points[0].raw_x.as_deref(), Some("oops"));
+        assert_eq!(polygon.points[0].x, None);
+        assert_eq!(polygon.points[1].raw_y, None);
+    }
+
+    #[test]
+    fn unknown_axis_alignment_values_are_invalid() {
+        let wire = facts(
+            r#"<wp:anchor xmlns:wp="urn:wp">
+              <wp:positionH relativeFrom="page"><wp:align>diagonal</wp:align></wp:positionH>
+              <wp:positionV relativeFrom="page"><wp:align>sideways</wp:align></wp:positionV>
+              <wp:extent cx="12700" cy="12700"/><wp:wrapNone/>
+            </wp:anchor>"#,
+        );
+        assert!(matches!(
+            wire.horizontal.choice,
+            AnchorAxisChoiceWire::Invalid
+        ));
+        assert!(matches!(
+            wire.vertical.choice,
+            AnchorAxisChoiceWire::Invalid
+        ));
+    }
+
+    #[test]
+    fn group_relation_uses_xml_source_order_and_raw_transform_chain() {
+        let xml = r#"<wpg:wgp xmlns:wpg="urn:wpg" xmlns:wps="urn:wps" xmlns:pic="urn:pic" xmlns:a="urn:a">
+          <wpg:grpSpPr><a:xfrm rot="60000"><a:off x="10" y="20"/><a:ext cx="30" cy="40"/><a:chOff x="1" y="2"/><a:chExt cx="3" cy="4"/></a:xfrm></wpg:grpSpPr>
+          <wps:wsp><wps:spPr><a:xfrm><a:off x="9" y="10"/><a:ext cx="11" cy="12"/></a:xfrm></wps:spPr></wps:wsp>
+          <pic:pic><pic:spPr><a:xfrm flipV="1"><a:off x="90" y="100"/><a:ext cx="110" cy="120"/></a:xfrm></pic:spPr></pic:pic>
+          <wps:wsp><wps:spPr><a:xfrm><a:off x="19" y="20"/><a:ext cx="21" cy="22"/></a:xfrm></wps:spPr></wps:wsp>
+        </wpg:wgp>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let root = doc.root_element();
+        let picture = root
+            .descendants()
+            .find(|node| node.tag_name().name() == "pic")
+            .unwrap();
+        let index = anchor_group_metadata_index(root);
+        let group = parse_anchor_group_wire(
+            index.get(&picture.range().start).unwrap(),
+            DrawingRect {
+                x: 12700.0,
+                y: 25400.0,
+                width: 38100.0,
+                height: 50800.0,
+                rotation_degrees: 12.0,
+                flip_h: true,
+                flip_v: false,
+            },
+        );
+        assert_eq!(
+            group.source_index, 1,
+            "shape/image interleave must follow XML order"
+        );
+        assert_eq!(group.source_count, 3);
+        assert!(group.child_source_id.starts_with("group-child-"));
+        assert_eq!(group.transform_chain[0].offset_x_emu, Some(10.0));
+        assert_eq!(
+            group.child_transform.as_ref().unwrap().extent_width_emu,
+            Some(110.0)
+        );
+        assert_eq!(group.child_transform.as_ref().unwrap().flip_v, Some(true));
+        assert_eq!(group.resolved_child_frame.offset_x_pt, 1.0);
+        assert_eq!(group.resolved_child_frame.offset_y_pt, 2.0);
+        assert_eq!(group.resolved_child_frame.width_pt, 3.0);
+        assert_eq!(group.resolved_child_frame.height_pt, 4.0);
+        assert_eq!(group.resolved_child_frame.rotation_deg, 12.0);
+        assert!(group.resolved_child_frame.flip_h);
     }
 }
 
@@ -12216,6 +13687,7 @@ mod svg_blip_tests {
             anchor_y_align: None,
             anchor_x_relative_from: None,
             anchor_y_relative_from: None,
+            anchor_acquisition: None,
         };
         let json = serde_json::to_string(&run).expect("serialize");
         assert!(
@@ -12478,7 +13950,7 @@ mod svg_blip_tests {
 
     /// ECMA-376 §20.1.8.55 — an inline picture whose `<pic:blipFill>` carries a
     /// non-zero `<a:srcRect>` populates `ImageRun.src_rect` with the four insets
-    /// converted from ST_Percentage (1000ths of a percent) to fractions 0..1.
+    /// converted from ST_Percentage (1000ths of a percent) to signed fractions.
     /// Mirrors sample-13 Fig.2's left-slice crop `l="8827" t="5949" r="64210"
     /// b="65916"` ⇒ 0.08827 / 0.05949 / 0.64210 / 0.65916.
     #[test]
@@ -12957,7 +14429,14 @@ mod anchor_image_relative_from_tests {
 </w:drawing></w:r></w:p>"#;
         let data = build_docx(body);
         let doc = parse_from_bytes(&data).expect("parse must succeed");
-        assert_eq!(first_shape(&doc).z_order, 251651072);
+        let shape = first_shape(&doc);
+        assert_eq!(shape.z_order, 251651072);
+        let private = shape
+            .anchor_acquisition
+            .as_ref()
+            .expect("shape anchor facts");
+        assert_eq!(private.behavior.relative_height, Some(251651072));
+        assert_eq!(private.behavior.behind_doc, Some(false));
     }
 
     #[test]
@@ -13020,6 +14499,14 @@ mod anchor_image_relative_from_tests {
             1
         );
         assert_eq!(
+            first_anchor_host(&doc).anchor_occurrence_id.as_deref(),
+            first_image(&doc)
+                .anchor_acquisition
+                .as_ref()
+                .map(|facts| facts.occurrence_id.as_str()),
+            "host and payload must share one structural anchor identity",
+        );
+        assert_eq!(
             paragraph
                 .runs
                 .iter()
@@ -13037,6 +14524,7 @@ mod anchor_image_relative_from_tests {
             font_family_east_asia: None,
             bold: false,
             italic: false,
+            anchor_occurrence_id: None,
         };
         // A parsed wpg group expands into multiple Shape runs before the host
         // character is attached. The enclosing w:r contributes only once.
@@ -13055,6 +14543,67 @@ mod anchor_image_relative_from_tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn grouped_payloads_share_outer_identity_but_keep_xml_child_order() {
+        let body = r#"<w:p><w:r><w:drawing>
+          <wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+            xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"
+            xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+            xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"
+            simplePos="0" behindDoc="0" relativeHeight="9" allowOverlap="1" layoutInCell="1">
+            <wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH>
+            <wp:positionV relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionV>
+            <wp:extent cx="381000" cy="127000"/><wp:wrapNone/>
+            <a:graphic><a:graphicData><wpg:wgp><wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="381000" cy="127000"/><a:chOff x="0" y="0"/><a:chExt cx="381000" cy="127000"/></a:xfrm></wpg:grpSpPr>
+              <wps:wsp><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="127000" cy="127000"/></a:xfrm><a:prstGeom prst="rect"/></wps:spPr></wps:wsp>
+              <pic:pic><pic:spPr><a:xfrm><a:off x="127000" y="0"/><a:ext cx="127000" cy="127000"/></a:xfrm></pic:spPr><pic:blipFill><a:blip r:embed="rIdPng"/></pic:blipFill></pic:pic>
+              <wps:wsp><wps:spPr><a:xfrm><a:off x="254000" y="0"/><a:ext cx="127000" cy="127000"/></a:xfrm><a:prstGeom prst="rect"/></wps:spPr></wps:wsp>
+            </wpg:wgp></a:graphicData></a:graphic>
+          </wp:anchor>
+        </w:drawing></w:r></w:p>"#;
+        ANCHOR_GROUP_METADATA_INDEX_BUILDS.with(|count| count.set(0));
+        let doc = parse_from_bytes(&build_docx(body)).expect("parse group");
+        ANCHOR_GROUP_METADATA_INDEX_BUILDS.with(|count| {
+            assert_eq!(
+                count.get(),
+                1,
+                "one wgp must build one shared metadata index"
+            )
+        });
+        let paragraph = doc
+            .body
+            .iter()
+            .find_map(|element| match element {
+                BodyElement::Paragraph(paragraph) => Some(paragraph),
+                _ => None,
+            })
+            .unwrap();
+        let mut payloads: Vec<_> = paragraph
+            .runs
+            .iter()
+            .filter_map(|run| match run {
+                DocRun::Image(image) => image.anchor_acquisition.as_ref(),
+                DocRun::Shape(shape) => shape.anchor_acquisition.as_ref(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(payloads.len(), 3);
+        let outer_id = payloads[0].occurrence_id.clone();
+        assert!(payloads.iter().all(|facts| facts.occurrence_id == outer_id));
+        assert_eq!(
+            first_anchor_host(&doc).anchor_occurrence_id.as_deref(),
+            Some(outer_id.as_str())
+        );
+        let mut source_indices: Vec<_> = payloads
+            .drain(..)
+            .map(|facts| facts.group.as_ref().unwrap().source_index)
+            .collect();
+        source_indices.sort_unstable();
+        assert_eq!(source_indices, vec![0, 1, 2]);
     }
 
     /// ECMA-376 §20.4.2.3/§20.4.3.5 — a standalone `wps:wsp` inside
@@ -13511,6 +15060,7 @@ mod anchor_image_relative_from_tests {
                 font_family_east_asia: None,
                 bold: false,
                 italic: false,
+                anchor_occurrence_id: None,
             },
         );
         assert_eq!(runs.len(), 2, "one host plus one anchored chart expected");
@@ -13550,6 +15100,7 @@ mod anchor_image_relative_from_tests {
                 font_family_east_asia: None,
                 bold: false,
                 italic: false,
+                anchor_occurrence_id: None,
             },
         );
         assert!(
@@ -13637,6 +15188,10 @@ mod anchor_image_relative_from_tests {
                 assert_eq!(c.anchor_y_align, None);
                 assert_eq!(c.anchor_x_relative_from.as_deref(), Some("margin"));
                 assert_eq!(c.anchor_y_relative_from.as_deref(), Some("paragraph"));
+                let private = c.anchor_acquisition.as_ref().expect("chart anchor facts");
+                assert_eq!(private.wrap.kind, AnchorWrapKindWire::Square);
+                assert_eq!(private.behavior.allow_overlap, Some(false));
+                assert_eq!(private.behavior.layout_in_cell, Some(true));
             }
             other => panic!("expected DocRun::Chart, got {other:?}"),
         }
@@ -14840,6 +16395,33 @@ mod column_tests {
             }
             other => panic!("expected SectionBreak, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn non_final_section_break_emits_private_flow_placement_wire() {
+        let body = body_from(
+            r#"<w:p>
+                 <w:pPr><w:sectPr>
+                   <w:type w:val="continuous"/>
+                   <w:vAlign w:val="center"/>
+                   <w:lnNumType w:countBy="2" w:start="7" w:distance="240" w:restart="newSection"/>
+                 </w:sectPr></w:pPr>
+                 <w:r><w:t>section one</w:t></w:r>
+               </w:p>"#,
+        );
+        let wire = serde_json::to_value(&body[1]).expect("section break serializes");
+        assert_eq!(wire["__sectionPlacement"]["sectionId"], "section:0");
+        assert_eq!(wire["__sectionPlacement"]["vAlign"], "center");
+        assert_eq!(wire["__sectionPlacement"]["lineNumbering"]["countBy"], 2);
+        assert_eq!(wire["__sectionPlacement"]["lineNumbering"]["start"], 7);
+        assert_eq!(
+            wire["__sectionPlacement"]["lineNumbering"]["distance"],
+            12.0
+        );
+        assert_eq!(
+            wire["__sectionPlacement"]["lineNumbering"]["restart"],
+            "newSection"
+        );
     }
 
     /// ECMA-376 §17.6.13 `<w:pgSz>` / §17.6.11 `<w:pgMar>` — a mid-body section
@@ -16447,6 +18029,7 @@ mod shape_preset_geometry_tests {
             true,
             &AnchorMeta::default(),
             None,
+            None,
             0,
         )
         .expect("shape parses")
@@ -16578,6 +18161,7 @@ mod shape_fontref_color_tests {
             0.0,
             true,
             &AnchorMeta::default(),
+            None,
             None,
             0,
         )
@@ -17973,7 +19557,7 @@ mod ole_object_tests {
             })
             .flat_map(|p| p.runs.into_iter())
             .filter_map(|r| match r {
-                DocRun::Image(img) => Some(img),
+                DocRun::Image(img) => Some(*img),
                 _ => None,
             })
             .collect()
@@ -18243,7 +19827,7 @@ mod vml_pict_tests {
         all_runs(body_xml, media)
             .into_iter()
             .filter_map(|r| match r {
-                DocRun::Image(img) => Some(img),
+                DocRun::Image(img) => Some(*img),
                 _ => None,
             })
             .collect()
@@ -18530,7 +20114,8 @@ mod vml_pict_tests {
     /// `<v:fill opacity>` and a `<v:textpath string="…" style="font-family:…">`.
     /// It must surface as a ShapeRun carrying the text_path (string + font),
     /// rotation (§19.1.2.19), fill colour, and fill_opacity (§19.1.2.5) — the
-    /// renderer draws the stretched rotated semi-transparent text.
+    /// retained acquisition uses the resolved text-path controls to decide
+    /// whether and how the authored text is fitted.
     #[test]
     fn watermark_textpath_shape_carries_text_rotation_and_opacity() {
         let body = format!(
@@ -18582,6 +20167,84 @@ mod vml_pict_tests {
         assert_eq!(s.anchor_y_relative_from.as_deref(), Some("margin"));
         // Negative z-index ⇒ behind the body text.
         assert!(s.behind_doc, "negative z-index ⇒ behindDoc");
+    }
+
+    /// ECMA-376 Part 4's transitional VML schema places `textpathok` on
+    /// `<v:path>` (CT_Path) and the remaining WordArt switches on
+    /// `<v:textpath>` (CT_TextPath). Word's built-in text-path shape types put
+    /// those facts on the referenced `<v:shapetype>` while the shape instance
+    /// supplies the string and font style. Preserve the fully resolved facts;
+    /// an instance attribute wins over its shape-type default.
+    #[test]
+    fn textpath_inherits_wordart_facts_from_real_shapetype() {
+        let body = format!(
+            r##"<w:document{ns}><w:body>
+              <w:p><w:r><w:pict>
+                <v:shapetype id="_x0000_t136" coordsize="21600,21600" o:spt="136"
+                  adj="10800" path="m@7,l@8,m@5,21600l@6,21600e">
+                  <v:path textpathok="t" o:connecttype="custom"/>
+                  <v:textpath on="t" fitshape="t" fitpath="f" trim="t" xscale="f"/>
+                </v:shapetype>
+                <v:shape id="PowerPlusWaterMarkObject1" type="#_x0000_t136"
+                  style="position:absolute;width:415pt;height:207.5pt" stroked="f">
+                  <v:textpath trim="f"
+                    style="font-family:&quot;Calibri&quot;;font-size:1pt"
+                    string="DRAFT"/>
+                </v:shape>
+              </w:pict></w:r></w:p>
+            </w:body></w:document>"##,
+            ns = VML_NS,
+        );
+
+        let shapes = shape_runs(&body, &HashMap::new());
+        assert_eq!(shapes.len(), 1);
+        let wire = serde_json::to_value(
+            shapes[0]
+                .text_path
+                .as_ref()
+                .expect("text path must be parsed"),
+        )
+        .expect("text path serializes");
+
+        assert_eq!(wire["textPathOk"], true);
+        assert_eq!(wire["on"], true);
+        assert_eq!(wire["fitShape"], true);
+        assert_eq!(wire["fitPath"], false);
+        assert_eq!(wire["trim"], false, "shape instance overrides shapetype");
+        assert_eq!(wire["xScale"], false);
+        assert_eq!(wire["fontSizePt"], 1.0);
+    }
+
+    /// CT_Path / CT_TextPath boolean controls default to false. Emit those
+    /// defaults explicitly so parser-originated text paths retain provenance;
+    /// an object constructed only through the stable public model has no such
+    /// private wire keys.
+    #[test]
+    fn textpath_serializes_explicit_false_control_defaults() {
+        let body = format!(
+            r##"<w:document{ns}><w:body>
+              <w:p><w:r><w:pict>
+                <v:shape style="width:120pt;height:40pt" stroked="f">
+                  <v:textpath style="font-family:Arial;font-size:14pt" string="NOTICE"/>
+                </v:shape>
+              </w:pict></w:r></w:p>
+            </w:body></w:document>"##,
+            ns = VML_NS,
+        );
+
+        let shapes = shape_runs(&body, &HashMap::new());
+        let wire = serde_json::to_value(
+            shapes[0]
+                .text_path
+                .as_ref()
+                .expect("text path must be parsed"),
+        )
+        .expect("text path serializes");
+
+        for key in ["textPathOk", "on", "fitShape", "fitPath", "trim", "xScale"] {
+            assert_eq!(wire[key], false, "{key} must materialize its false default");
+        }
+        assert_eq!(wire["fontSizePt"], 14.0, "font size is authored input");
     }
 
     /// §19.1.2.5 opacity — the "52429f" form (1/65536-ths, trailing `f`) decodes
@@ -18688,6 +20351,19 @@ mod wgp_shape_transform_tests {
         );
         assert!(!shape.flip_h);
         assert!(!shape.flip_v);
+        let child = &shape
+            .anchor_acquisition
+            .as_ref()
+            .expect("group acquisition")
+            .group
+            .as_ref()
+            .expect("group metadata")
+            .resolved_child_frame;
+        assert!((child.offset_x_pt - shape.anchor_x_pt).abs() < 1e-6);
+        assert!((child.offset_y_pt - shape.anchor_y_pt).abs() < 1e-6);
+        assert!((child.width_pt - shape.width_pt).abs() < 1e-6);
+        assert!((child.height_pt - shape.height_pt).abs() < 1e-6);
+        assert!((child.rotation_deg - shape.rotation).abs() < 1e-6);
     }
 
     #[test]

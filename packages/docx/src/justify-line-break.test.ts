@@ -21,15 +21,17 @@ const FONT_PX = 20; // glyph advance per CJK char in the stub (scale = 1)
 
 function makeRecordingCanvas(): {
   canvas: HTMLCanvasElement;
-  fillTextCalls: { text: string; x: number; y: number }[];
+  fillTextCalls: { text: string; x: number; y: number; letterSpacing: number }[];
 } {
   let font = `${FONT_PX}px serif`;
+  let letterSpacing = '0px';
   const px = () => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? String(FONT_PX));
-  const fillTextCalls: { text: string; x: number; y: number }[] = [];
+  const fillTextCalls: { text: string; x: number; y: number; letterSpacing: number }[] = [];
   const ctx = {
     get font() { return font; },
     set font(v: string) { font = v; },
-    letterSpacing: '0px',
+    get letterSpacing() { return letterSpacing; },
+    set letterSpacing(v: string) { letterSpacing = v; },
     measureText: (s: string) => {
       const p = px();
       return {
@@ -45,7 +47,9 @@ function makeRecordingCanvas(): {
     strokeRect() {}, clip() {}, rect() {}, scale() {}, translate() {},
     setLineDash() {}, drawImage() {}, clearRect() {}, arc() {}, quadraticCurveTo() {},
     bezierCurveTo() {}, createLinearGradient() { return { addColorStop() {} }; },
-    fillText(text: string, x: number, y: number) { fillTextCalls.push({ text, x, y }); },
+    fillText(text: string, x: number, y: number) {
+      fillTextCalls.push({ text, x, y, letterSpacing: parseFloat(letterSpacing) });
+    },
     strokeText() {},
     fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
     textAlign: 'left' as CanvasTextAlign, direction: 'ltr' as CanvasDirection,
@@ -119,7 +123,7 @@ describe('justified paragraph — a line ended by a manual <w:br/> is left-align
     expect(calls.length).toBeGreaterThan(0);
 
     // Group draws by baseline y; the first (top) line is the break-terminated one.
-    const byY = new Map<number, { text: string; x: number }[]>();
+    const byY = new Map<number, { text: string; x: number; letterSpacing: number }[]>();
     for (const c of calls) {
       const key = Math.round(c.y);
       (byY.get(key) ?? byY.set(key, []).get(key)!).push(c);
@@ -153,7 +157,7 @@ describe('justified paragraph — a line ended by a manual <w:br/> is left-align
     const calls = await render([breakPara('distribute')], section());
     expect(calls.length).toBeGreaterThan(0);
 
-    const byY = new Map<number, { text: string; x: number }[]>();
+    const byY = new Map<number, { text: string; x: number; letterSpacing: number }[]>();
     for (const c of calls) {
       const key = Math.round(c.y);
       (byY.get(key) ?? byY.set(key, []).get(key)!).push(c);
@@ -161,8 +165,10 @@ describe('justified paragraph — a line ended by a manual <w:br/> is left-align
     const firstY = Math.min(...byY.keys());
     const line = byY.get(firstY)!.slice().sort((p, q) => p.x - q.x);
 
-    // Same first line "ああああ" (4 glyphs) ended by the break.
-    expect(line.length).toBe(4);
+    // Same first line "ああああ" (4 glyphs) ended by the break, retained
+    // as one contextual operation with a wide uniform distribute pitch.
+    expect(line).toHaveLength(1);
+    expect(line[0].text).toBe('ああああ');
     expect(line[0].x).toBeLessThan(FONT_PX); // still starts at the left margin
 
     // Stretched: the last glyph is pushed FAR past its natural end (4 × FONT_PX
@@ -171,12 +177,9 @@ describe('justified paragraph — a line ended by a manual <w:br/> is left-align
     // Threshold 120 sits well above the natural 80px and well below the observed
     // 190px, so it robustly distinguishes "stretched" from "natural width".
     const naturalRight = 4 * FONT_PX; // 80px
-    expect(line[3].x).toBeGreaterThan(120);
-    expect(line[3].x).toBeGreaterThan(naturalRight);
-    // Inter-glyph advances are spread WIDE (well beyond the natural pitch),
-    // confirming inter-character distribution on the break-terminated line.
-    for (let i = 1; i < line.length; i++) {
-      expect(line[i].x - line[i - 1].x).toBeGreaterThan(FONT_PX * 1.5);
-    }
+    const finalGlyphOrigin = line[0].x + 3 * (FONT_PX + line[0].letterSpacing);
+    expect(finalGlyphOrigin).toBeGreaterThan(120);
+    expect(finalGlyphOrigin).toBeGreaterThan(naturalRight);
+    expect(FONT_PX + line[0].letterSpacing).toBeGreaterThan(FONT_PX * 1.5);
   });
 });

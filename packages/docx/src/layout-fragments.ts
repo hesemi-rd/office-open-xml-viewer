@@ -5,11 +5,9 @@
  *
  * A fragment belongs to a {@link DocumentLayout} result, NOT to the parsed document
  * model — the parsed {@link DocParagraph} is never mutated with layout state. A
- * {@link ParagraphFragment} references its source paragraph plus the placement-aware
- * {@link MeasuredParagraph} that was produced for its recorded placement, and a
- * `[lineStart, lineEnd)` half-open range selecting the lines this fragment paints
- * (a paragraph split across pages/columns is represented by several fragments over
- * one measured result, each with its own range).
+ * A retained {@link ParagraphLayout} owns the exact line geometry for its recorded
+ * placement. A paragraph split across pages or columns is represented by several
+ * immutable layouts over the acquired paragraph geometry.
  *
  * All coordinates are points at scale 1 — the measurement coordinate system. Paint
  * scales the stored geometry; it never repeats text layout.
@@ -19,33 +17,9 @@
  * {@link FlowFragment}s (paragraph or nested-table fragments), so body and table flow
  * share one immutable fragment result (design §"Measured Fragment Model").
  */
-import type { DocParagraph, DocTable, DocTableRow, DocTableCell, SectionGeom } from './types';
-import type { MeasuredParagraph } from './paragraph-measure.js';
+import type { DocTable, DocTableRow, DocTableCell, SectionGeom } from './types';
 import type { SectionLayoutContext } from './layout-context.js';
-
-export interface ParagraphFragment {
-  readonly kind: 'paragraph';
-  /** The parsed source paragraph. Immutable — never stamped with layout state. */
-  readonly source: DocParagraph;
-  /** The placement-aware measurement whose lines this fragment paints. Valid only
-   *  for `measured.placement`; a fragment on a different page/column/wrap context
-   *  holds a separate measurement. */
-  readonly measured: MeasuredParagraph;
-  /** Half-open range `[lineStart, lineEnd)` into `measured.lines` this fragment
-   *  paints. A markOnly measurement (empty / anchor-only paragraph) uses
-   *  `lineStart === lineEnd === 0` and paints its single paragraph-mark line box. */
-  readonly lineStart: number;
-  readonly lineEnd: number;
-  /** Points of paragraph spacing the paginator added ABOVE this fragment's first
-   *  painted line (effective space-before + any float top-skip on the first
-   *  fragment; 0 on a continuation fragment). Owned by the paginator so paragraph
-   *  spacing is counted exactly once. */
-  readonly leadingSpacePt: number;
-  /** Points of paragraph spacing the paginator reserved BELOW this fragment's last
-   *  painted line (max of space-after and drawn bottom-border extent on the final
-   *  fragment; 0 on a non-final fragment). */
-  readonly trailingSpacePt: number;
-}
+import type { ParagraphLayout } from './layout/types.js';
 
 /**
  * A measured table cell (ECMA-376 §17.4.7 `<w:tc>`). Its content is a recursive list
@@ -63,6 +37,18 @@ export interface ParagraphFragment {
 export interface CellFragment {
   readonly source: DocTableCell;
   readonly blocks: readonly FlowFragment[];
+  /** Final point-space block origins relative to the cell border box. */
+  readonly blockPlacements: readonly Readonly<{
+    offsetPt: number;
+    advancePt: number;
+  }>[];
+  /** Translation from the cell border-box top to the retained block coordinate
+   * space. It is resolved once from the cell content box and `w:vAlign`; paint
+   * never measures or folds the cell again. */
+  readonly contentTranslationPt: number;
+  /** Ink span used to adjudicate center/bottom placement. Edge paragraph
+   * spacing is deliberately outside this span. */
+  readonly inkBlock: Readonly<{ topPt: number; heightPt: number }>;
   readonly verticalMerge: 'none' | 'restart' | 'continue';
   /** Scale-1 point height of this cell's page-local row piece. This is the same
    *  post-repair row height the paginator charged and {@link RowFragment.heightPt}
@@ -112,7 +98,7 @@ export interface TableFragment {
   readonly continuesOnNextPage: boolean;
 }
 
-export type FlowFragment = ParagraphFragment | TableFragment;
+export type FlowFragment = ParagraphLayout | TableFragment;
 
 export interface PlacedFragment {
   readonly fragment: FlowFragment;
@@ -148,22 +134,21 @@ export interface DocumentLayout {
  * height. It excludes the fragment's leading and trailing paragraph spacing (those
  * are `leadingSpacePt` / `trailingSpacePt`), so spacing is never double-counted.
  */
-export function fragmentLineAdvancesPt(fragment: ParagraphFragment): number {
-  const measured = fragment.measured;
-  if (measured.markOnly || measured.lines.length === 0) {
-    return measured.contentEndYPt - measured.contentStartYPt;
+export function fragmentLineAdvancesPt(fragment: ParagraphLayout): number {
+  if (fragment.lines.length === 0) {
+    return fragment.paragraphMark?.bounds.heightPt ?? 0;
   }
   let sum = 0;
-  for (let i = fragment.lineStart; i < fragment.lineEnd; i++) {
-    const line = measured.lines[i];
+  for (let i = 0; i < fragment.lines.length; i++) {
+    const line = fragment.lines[i];
     if (!line) break;
-    if (i === fragment.lineStart) {
+    if (i === 0) {
       sum += line.advancePt;
       continue;
     }
-    const previous = measured.lines[i - 1];
-    const previousBottom = previous.topYPt + previous.advancePt;
-    sum += Math.max(0, line.topYPt - previousBottom) + line.advancePt;
+    const previous = fragment.lines[i - 1];
+    const previousBottom = previous.bounds.yPt + previous.advancePt;
+    sum += Math.max(0, line.bounds.yPt - previousBottom) + line.advancePt;
   }
   return sum;
 }
@@ -174,12 +159,8 @@ export function fragmentLineAdvancesPt(fragment: ParagraphFragment): number {
  * a paginator's per-fragment height must equal — proving paragraph spacing is owned
  * by the fragment and added exactly once (design §"Pagination and paint invariants" 1).
  */
-export function paragraphFragmentAdvancePt(fragment: ParagraphFragment): number {
-  return (
-    fragment.leadingSpacePt +
-    fragmentLineAdvancesPt(fragment) +
-    fragment.trailingSpacePt
-  );
+export function paragraphFragmentAdvancePt(fragment: ParagraphLayout): number {
+  return fragment.advancePt;
 }
 
 /**

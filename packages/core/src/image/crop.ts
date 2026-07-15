@@ -10,9 +10,9 @@ import { isMetafileMime } from './wmf';
 
 type AnyCtx = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
 
-/** A `<a:srcRect>` crop: fractional insets (0..1) measured inward from each edge.
- *  The visible region is `[l, t, 1−r, 1−b]` of the source. (Mirrors the Rust
- *  `SrcRect` the parsers already emit, divided to 0..1 fractions.) */
+/** A `<a:srcRect>` crop: signed fractional insets measured from each edge.
+ *  The visible region is `[l, t, 1−r, 1−b]` of the source. `ST_Percentage` is
+ *  not range-limited, so negative and greater-than-one fractions are retained. */
 export interface SrcRect {
   l: number;
   t: number;

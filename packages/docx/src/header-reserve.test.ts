@@ -20,6 +20,8 @@ interface Call { text: string; x: number; y: number; }
 function makeRecordingCanvas(): { canvas: HTMLCanvasElement; calls: Call[] } {
   let font = '10px serif';
   const calls: Call[] = [];
+  let transform = { scaleX: 1, scaleY: 1, translateX: 0, translateY: 0 };
+  const transformStack: typeof transform[] = [];
   const ctx = {
     get font() { return font; },
     set font(v: string) { font = v; },
@@ -32,17 +34,44 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; calls: Call[] } {
         actualBoundingBoxAscent: p * 0.8, actualBoundingBoxDescent: p * 0.2,
       } as TextMetrics;
     },
-    save() {}, restore() {}, beginPath() {}, closePath() {},
+    save() { transformStack.push({ ...transform }); },
+    restore() { transform = transformStack.pop() ?? transform; },
+    beginPath() {}, closePath() {},
     moveTo() {}, lineTo() {}, stroke() {}, fill() {}, fillRect() {},
-    strokeRect() {}, clip() {}, rect() {}, scale() {}, translate() {}, rotate() {},
+    strokeRect() {}, clip() {}, rect() {},
+    scale(x: number, y: number) {
+      transform.scaleX *= x;
+      transform.scaleY *= y;
+    },
+    translate(x: number, y: number) {
+      transform.translateX += transform.scaleX * x;
+      transform.translateY += transform.scaleY * y;
+    },
+    rotate() {},
     setLineDash() {}, clearRect() {}, arc() {}, quadraticCurveTo() {},
     bezierCurveTo() {}, createLinearGradient() { return { addColorStop() {} }; },
     drawImage() {},
-    fillText(s: string, x: number, y: number) { calls.push({ text: s, x, y }); },
-    strokeText(s: string, x: number, y: number) { calls.push({ text: s, x, y }); },
+    fillText(s: string, x: number, y: number) {
+      calls.push({
+        text: s,
+        x: transform.translateX + transform.scaleX * x,
+        y: transform.translateY + transform.scaleY * y,
+      });
+    },
+    strokeText(s: string, x: number, y: number) {
+      calls.push({
+        text: s,
+        x: transform.translateX + transform.scaleX * x,
+        y: transform.translateY + transform.scaleY * y,
+      });
+    },
     fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
     textAlign: 'left' as CanvasTextAlign, direction: 'ltr' as CanvasDirection,
     globalAlpha: 1, lineCap: 'butt' as CanvasLineCap, lineJoin: 'miter' as CanvasLineJoin,
+  };
+  (ctx as unknown as { canvas: { width: number; height: number } }).canvas = {
+    width: 400,
+    height: 600,
   };
   const canvas = { width: 0, height: 0, style: {} as Record<string, string>, getContext: () => ctx };
   return { canvas: canvas as unknown as HTMLCanvasElement, calls };
@@ -70,13 +99,19 @@ function para(text: string): DocParagraph {
 function docWithHeader(
   body: BodyElement[],
   header: HeaderFooter | null,
-  opts: { marginTop?: number; pageHeight?: number; columns?: SectionProps['columns'] } = {},
+  opts: {
+    marginTop?: number;
+    pageHeight?: number;
+    columns?: SectionProps['columns'];
+    vAlign?: SectionProps['vAlign'];
+  } = {},
 ): DocxDocumentModel {
   const section: SectionProps = {
     pageWidth: 400, pageHeight: opts.pageHeight ?? 600,
     marginTop: opts.marginTop ?? 10, marginRight: 10, marginBottom: 10, marginLeft: 10,
     headerDistance: 4, footerDistance: 4, titlePage: false, evenAndOddHeaders: false,
     sectionStart: 'nextPage', columns: opts.columns ?? null,
+    vAlign: opts.vAlign ?? null,
   } as SectionProps;
   return {
     section,
@@ -88,11 +123,13 @@ function docWithHeader(
   } as unknown as DocxDocumentModel;
 }
 
-async function renderPage0(doc: DocxDocumentModel): Promise<Call[]> {
+async function renderPage(doc: DocxDocumentModel, pageIndex = 0): Promise<Call[]> {
   const { canvas, calls } = makeRecordingCanvas();
-  await renderDocumentToCanvas(doc, canvas, 0, { dpr: 1, width: 400 });
+  await renderDocumentToCanvas(doc, canvas, pageIndex, { dpr: 1, width: 400 });
   return calls;
 }
+
+const renderPage0 = (doc: DocxDocumentModel): Promise<Call[]> => renderPage(doc, 0);
 
 describe('header reserve — content never overlaps a tall header (ECMA-376 §17.6.11)', () => {
   // A few single-line body paragraphs (page 0 holds them comfortably) — enough to read
@@ -152,6 +189,72 @@ describe('header reserve — content never overlaps a tall header (ECMA-376 §17
     // header line. Pre-fix, column 1 reset to the bare top margin and painted into the
     // header band (its first line is the global minimum), so this caught the overlap.
     expect(Math.min(...bodyCalls.map((c) => c.y))).toBeGreaterThan(Math.max(...headerY));
+  });
+
+  it('centres body ink in the effective post-header-reserve text band', async () => {
+    const calls = await renderPage0(docWithHeader(
+      [para('BODY') as unknown as BodyElement],
+      tallHeader,
+      { vAlign: 'center' },
+    ));
+    const bodyBaseline = calls.find((call) => call.text === 'BODY')!.y;
+    const headerBottom = Math.max(...calls.filter((call) => call.text === 'HDR').map((call) => call.y)) + 2;
+    const effectiveBottom = 590;
+    const expectedInkMidpoint = (headerBottom + effectiveBottom) / 2;
+    const bodyInkMidpoint = bodyBaseline - 3;
+    expect(bodyInkMidpoint).toBeCloseTo(expectedInkMidpoint, 0);
+  });
+
+  it('centres table-only body flow in the effective reserved band', async () => {
+    const bodyTable = {
+      type: 'table', colWidths: [380],
+      rows: [{
+        cells: [{
+          content: [{ type: 'paragraph', ...para('TABLE') }], colSpan: 1, vMerge: null,
+          borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
+          background: null, vAlign: 'top', widthPt: 380,
+        }],
+        rowHeight: 20, rowHeightRule: 'exact', isHeader: false,
+      }],
+      borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
+      cellMarginTop: 0, cellMarginBottom: 0, cellMarginLeft: 0, cellMarginRight: 0,
+      jc: 'left', layout: 'fixed',
+    } as unknown as BodyElement;
+    const baseline = (calls: Call[]) => calls.find((call) => call.text === 'TABLE')!.y;
+    const centredWithHeader = baseline(await renderPage0(
+      docWithHeader([bodyTable], tallHeader, { vAlign: 'center' }),
+    ));
+    const centredWithoutHeader = baseline(await renderPage0(
+      docWithHeader([bodyTable], null, { vAlign: 'center' }),
+    ));
+    const topWithHeader = baseline(await renderPage0(
+      docWithHeader([bodyTable], tallHeader, { vAlign: 'top' }),
+    ));
+    const topWithoutHeader = baseline(await renderPage0(
+      docWithHeader([bodyTable], null, { vAlign: 'top' }),
+    ));
+    const effectiveTopReserve = topWithHeader - topWithoutHeader;
+
+    expect(effectiveTopReserve).toBeGreaterThan(0);
+    // Raising the effective band top by R translates a centred retained table by
+    // exactly R/2. Comparing the same fragment removes any glyph-baseline estimate.
+    expect(centredWithHeader - centredWithoutHeader).toBeCloseTo(effectiveTopReserve / 2, 8);
+  });
+
+  it('centres a continuation page in the same effective reserved band', async () => {
+    const calls = await renderPage(
+      docWithHeader(
+        Array.from({ length: 80 }, () => para('BODY') as unknown as BodyElement),
+        tallHeader,
+        { vAlign: 'center', pageHeight: 300 },
+      ),
+      1,
+    );
+    const bodyY = calls.filter((call) => call.text === 'BODY').map((call) => call.y);
+    const headerBottom = Math.max(...calls.filter((call) => call.text === 'HDR').map((call) => call.y)) + 2;
+    expect(bodyY.length).toBeGreaterThan(0);
+    const bodyInkMidpoint = (Math.min(...bodyY) - 8 + Math.max(...bodyY) + 2) / 2;
+    expect(bodyInkMidpoint).toBeCloseTo((headerBottom + 290) / 2, 0);
   });
 
   it('places the body at |top| below the page top for a negative top margin (§17.6.11)', async () => {

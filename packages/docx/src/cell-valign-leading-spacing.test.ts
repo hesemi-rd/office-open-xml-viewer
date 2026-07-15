@@ -12,7 +12,7 @@ import type {
   SectionProps,
 } from './types';
 
-// ECMA-376 §17.3.1.33 + §17.4.84 (vAlign): when a cell's vAlign is `center` or
+// ECMA-376 §17.3.1.33 + §17.4.83 (vAlign): when a cell's vAlign is `center` or
 // `bottom`, Word vertically aligns the cell's INKED block (the line boxes), NOT
 // the inked block + leading paragraph spaceBefore + trailing paragraph
 // spaceAfter. Both of those produce no ink (nothing surrounds them inside the
@@ -40,6 +40,8 @@ function makeRecordingCanvas(): {
   fillTextCalls: FillTextCall[];
 } {
   let font = '10px serif';
+  let transform = { tx: 0, ty: 0, sx: 1, sy: 1 };
+  const stack: typeof transform[] = [];
   const px = () => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
   const fillTextCalls: FillTextCall[] = [];
   const ctx = {
@@ -56,13 +58,24 @@ function makeRecordingCanvas(): {
         actualBoundingBoxDescent: p * 0.2,
       } as TextMetrics;
     },
-    save() {}, restore() {}, beginPath() {}, closePath() {},
+    save() { stack.push({ ...transform }); },
+    restore() { transform = stack.pop() ?? transform; }, beginPath() {}, closePath() {},
     moveTo() {}, lineTo() {}, stroke() {}, fill() {}, fillRect() {},
-    strokeRect() {}, clip() {}, rect() {}, scale() {}, translate() {},
+    strokeRect() {}, clip() {}, rect() {},
+    scale(x: number, y: number) { transform.sx *= x; transform.sy *= y; },
+    translate(x: number, y: number) {
+      transform.tx += x * transform.sx;
+      transform.ty += y * transform.sy;
+    },
     setLineDash() {}, drawImage() {}, clearRect() {}, arc() {}, quadraticCurveTo() {},
     bezierCurveTo() {}, createLinearGradient() { return { addColorStop() {} }; },
     fillText(text: string, x: number, y: number) {
-      fillTextCalls.push({ text, x, y, font });
+      fillTextCalls.push({
+        text,
+        x: transform.tx + x * transform.sx,
+        y: transform.ty + y * transform.sy,
+        font,
+      });
     },
     strokeText() {},
     fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
@@ -80,7 +93,7 @@ function makeRecordingCanvas(): {
 // ---------- model builders ----------
 
 // A deliberately SYNTHETIC, untabled font: the mock canvas reports a clean
-// 1.0 em box (0.8/0.2) for it, so these vAlign tests isolate the §17.4.84 leading
+// 1.0 em box (0.8/0.2) for it, so these vAlign tests isolate the §17.4.83 leading
 // trim without the font-metrics single-line FLOOR. (Real Latin faces like Times
 // New Roman / Arial are tabled with their hhea design height — see font-metrics.ts
 // — which raises the line box and is covered by font-metrics.test.ts instead.)
@@ -173,7 +186,7 @@ const TOL = 0.01; // px — the deliberate symmetric trim is exact arithmetic
 // vAlign = center
 // ============================================================================
 
-describe('cell vAlign=center — leading spaceBefore must NOT shift the inked block (§17.4.84 / §17.3.1.33)', () => {
+describe('cell vAlign=center — leading spaceBefore must NOT shift the inked block (§17.4.83 / §17.3.1.33)', () => {
   it('p1.spaceBefore=6 pt does NOT shift the first paragraph baseline (vs. spaceBefore=0)', async () => {
     // Reference: both paragraphs have ZERO spacing → baselines define the
     // "true centred" positions.
@@ -272,17 +285,34 @@ describe('cell vAlign=center — leading spaceBefore must NOT shift the inked bl
   });
 });
 
+describe('legacy cell vAlign adapter uses the shared paragraph gap fold', () => {
+  it('matches retained center placement with asymmetric adjacent spacing', async () => {
+    const content = [
+      paraOf('p1', { spaceAfter: 12 }) as unknown as CellElement,
+      paraOf('p2', { spaceBefore: 4 }) as unknown as CellElement,
+    ];
+    const retained = tableOf(row(cell(content, 'center'), 100, 'atLeast'));
+    const legacy = { ...tableOf(row(cell(content, 'center'), 100, 'atLeast')), tblInd: -1 };
+    const retainedCalls = await renderAndRead(retained);
+    const legacyCalls = await renderAndRead(legacy);
+    for (const text of ['p1', 'p2']) {
+      expect(legacyCalls.find((call) => call.text === text)?.y)
+        .toBeCloseTo(retainedCalls.find((call) => call.text === text)!.y, 2);
+    }
+  });
+});
+
 // ============================================================================
 // vAlign = bottom
 // ============================================================================
 
-describe('cell vAlign=bottom — symmetric trim of leading spaceBefore (§17.4.84 / §17.3.1.33)', () => {
+describe('cell vAlign=bottom — symmetric trim of leading spaceBefore (§17.4.83 / §17.3.1.33)', () => {
   // For vAlign=bottom the asymmetric-trim bug structurally cancels (renderParagraph
   // re-consumes p1.spaceBefore in the +y direction, while the buggy contentH
   // inflated by the same amount pulled cellState.y in the −y direction). The
   // visible inked bottom therefore stays at y+h-mb in both buggy and fixed code
   // for typical paragraph-first / paragraph-last cells. The symmetric trim is
-  // kept for spec consistency (§17.4.84) and as defence against future changes
+  // kept for spec consistency (§17.4.83) and as defence against future changes
   // to renderParagraph's spaceBefore handling — these tests pin the absolute
   // inked-bottom invariant rather than a buggy-vs-fixed delta.
   it('inked block bottom hugs the cell bottom regardless of leading spaceBefore', async () => {

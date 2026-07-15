@@ -11,10 +11,10 @@ import {
   type TableFragment,
   type RowFragment,
   type CellFragment,
-  type ParagraphFragment,
   type FlowFragment,
   type PlacedFragment,
 } from './layout-fragments.js';
+import type { ParagraphLayout } from './layout/types.js';
 import type {
   BodyElement,
   CellElement,
@@ -160,7 +160,7 @@ function allTables(model: DocxDocumentModel): { placed: PlacedFragment; table: T
   return out;
 }
 
-function firstParagraphBlock(cf: CellFragment): ParagraphFragment {
+function firstParagraphBlock(cf: CellFragment): ParagraphLayout {
   const block = cf.blocks[0];
   if (!block || block.kind !== 'paragraph') throw new Error('expected a paragraph block');
   return block;
@@ -193,11 +193,13 @@ describe('buildTableFragment — pure recursion contract', () => {
       buildCellBlocks: (_c, w) => { calls.push(w); return [stubBlock('x')]; },
     });
     expect(frag.kind).toBe('table');
-    expect(frag.source).toBe(t);
+    expect(frag.source).not.toBe(t);
+    expect(frag.source).toEqual(t);
     expect(frag.columnWidthsPt).toEqual([30, 30]);
     expect(frag.rows).toHaveLength(2);
     expect(frag.rows[0].cells).toHaveLength(2);
-    expect(frag.rows[0].source).toBe(t.rows[0]);
+    expect(frag.rows[0].source).not.toBe(t.rows[0]);
+    expect(frag.rows[0].source).toEqual(t.rows[0]);
     expect(frag.rows[0].sourceRowIndex).toBe(0);
     expect(frag.rows[1].sourceRowIndex).toBe(1);
     // each cell measured at its single-column width
@@ -220,20 +222,10 @@ describe('buildTableFragment — pure recursion contract', () => {
   it('sums only fragment-owned ranged paragraph advances and nested-table heights', () => {
     const rangedParagraph = {
       kind: 'paragraph',
-      source: para('ignored'),
-      measured: {
-        markOnly: false,
-        lines: [
-          { topYPt: 0, advancePt: 10 },
-          { topYPt: 12, advancePt: 10 },
-          { topYPt: 25, advancePt: 10 },
-        ],
-      },
-      lineStart: 1,
-      lineEnd: 3,
-      leadingSpacePt: 2,
-      trailingSpacePt: 4,
-    } as unknown as ParagraphFragment;
+      source: { story: 'body', storyInstance: 'table-cell', path: [0] },
+      advancePt: 29,
+      lines: [],
+    } as unknown as ParagraphLayout;
     const nestedTable = {
       kind: 'table',
       source: table([], []),
@@ -248,6 +240,12 @@ describe('buildTableFragment — pure recursion contract', () => {
     const fragment = {
       source: textCell('ignored'),
       blocks: [rangedParagraph, nestedTable],
+      blockPlacements: [
+        { offsetPt: 0, advancePt: 29 },
+        { offsetPt: 29, advancePt: 15 },
+      ],
+      contentTranslationPt: 0,
+      inkBlock: { topPt: 0, heightPt: 44 },
       verticalMerge: 'none',
       boxHeightPt: 50,
     } as CellFragment;
@@ -348,6 +346,49 @@ describe('buildTableFragment — pure recursion contract', () => {
     expect(Object.isFrozen(frag.rows[0].cells[0])).toBe(true);
     expect(Object.isFrozen(frag.columnWidthsPt)).toBe(true);
   });
+
+  it('snapshots split and nested cell sources for clone-safe mutation-stable layout', () => {
+    const nested = table([row([textCell('nested')])], [20]);
+    const sourceCell = cell([
+      { type: 'paragraph', ...para('split', { spaceBefore: 6, spaceAfter: 8 }) } as CellElement,
+      { type: 'table', ...nested } as CellElement,
+    ], { vAlign: 'center', background: '112233' });
+    const source = table([row([sourceCell])], [40]);
+    const splitParagraph = {
+      kind: 'paragraph', id: 'split',
+      source: { story: 'body', storyInstance: 'body', path: [0, 0, 0] },
+      flowDomainId: 'table-cell', ordinaryFlow: true,
+      flowBounds: { xPt: 0, yPt: 0, widthPt: 40, heightPt: 10 },
+      inkBounds: { xPt: 0, yPt: 0, widthPt: 10, heightPt: 10 },
+      advancePt: 10, spacing: { beforePt: 0, afterPt: 0 }, contextualSpacing: false,
+      lines: [], borders: [], resources: [], drawings: [], textBoxes: [], events: [], exclusions: [],
+      continuation: { lineStart: 1, lineEnd: 2, continuesFromPrevious: true, continuesOnNext: true },
+    } as ParagraphLayout;
+    const nestedFragment = buildTableFragment({
+      table: nested, columnWidthsPt: [20], rowHeightsPt: [10],
+      continuesFromPreviousPage: false, continuesOnNextPage: false,
+      repeatedHeaderRowCount: 0, buildCellBlocks: () => [],
+    });
+    const fragment = buildTableFragment({
+      table: source, columnWidthsPt: [40], rowHeightsPt: [40],
+      continuesFromPreviousPage: true, continuesOnNextPage: true,
+      repeatedHeaderRowCount: 0,
+      buildCellBlocks: () => [splitParagraph, nestedFragment],
+    });
+    const fingerprint = JSON.stringify(fragment);
+
+    expect(() => structuredClone(fragment)).not.toThrow();
+    expect(Object.isFrozen(fragment.source)).toBe(true);
+    expect(Object.isFrozen(fragment.rows[0]?.source)).toBe(true);
+    expect(Object.isFrozen(fragment.rows[0]?.cells[0]?.source)).toBe(true);
+    const nestedRetained = fragment.rows[0]?.cells[0]?.blocks[1];
+    expect(nestedRetained?.kind === 'table' && Object.isFrozen(nestedRetained.source)).toBe(true);
+
+    source.jc = 'right';
+    source.rows[0]!.cells[0]!.background = 'ffffff';
+    nested.rows[0]!.cells[0]!.vAlign = 'bottom';
+    expect(JSON.stringify(fragment)).toBe(fingerprint);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -360,7 +401,8 @@ describe('layoutDocument — table fragments', () => {
     const tables = allTables(doc([t as unknown as BodyElement]));
     expect(tables).toHaveLength(1);
     expect(tables[0].table.source).not.toBe(t);
-    expect(tables[0].table.source.rows).toBe(t.rows);
+    expect(tables[0].table.source.rows).not.toBe(t.rows);
+    expect(tables[0].table.source.rows).toEqual(t.rows);
     expect(tables[0].table.rows).toHaveLength(1);
     expect(tables[0].table.continuesFromPreviousPage).toBe(false);
     expect(tables[0].table.continuesOnNextPage).toBe(false);
@@ -400,16 +442,17 @@ describe('layoutDocument — table fragments', () => {
     expect(wideElement).not.toBe(narrowElement);
   });
 
-  it('builds each cell paragraph as a ParagraphFragment referencing the source cell paragraph', () => {
+  it('builds each cell paragraph as a self-contained ParagraphLayout', () => {
     const cellPara = para('hello');
     const c = cell([{ type: 'paragraph', ...cellPara } as unknown as CellElement]);
     const t = table([row([c])], [120]);
     const { table: tf } = allTables(doc([t as unknown as BodyElement]))[0];
     const block = firstParagraphBlock(tf.rows[0].cells[0]);
-    // the block's source is the cell's paragraph content element (same runs)
     expect(block.kind).toBe('paragraph');
-    expect(block.source.runs[0]).toBeDefined();
-    expect((block.source.runs[0] as { text: string }).text).toBe('hello');
+    expect(block).not.toHaveProperty('measured');
+    expect(block.lines.flatMap((line) => line.placements)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'text', text: 'hello' }),
+    ]));
   });
 
   it('splits a tall table across pages into continuation fragments (auto rows)', () => {
@@ -569,7 +612,8 @@ describe('layoutDocument — table fragments', () => {
 
     // Sanity: splitRowsTallerThanPage expanded the first parsed row into pieces.
     expect(fragmentRows.length).toBeGreaterThan(t.rows.length);
-    expect(fragmentRows.at(-1)?.source).toBe(t.rows[1]);
+    expect(fragmentRows.at(-1)?.source).not.toBe(t.rows[1]);
+    expect(fragmentRows.at(-1)?.source).toEqual(t.rows[1]);
     expect(fragmentRows.slice(0, -1).map((fragment) => fragment.sourceRowIndex))
       .toEqual(Array.from({ length: fragmentRows.length - 1 }, () => 0));
     expect(fragmentRows.at(-1)?.sourceRowIndex).toBe(1);
@@ -640,7 +684,8 @@ describe('layoutDocument — table fragments', () => {
     expect(block.kind).toBe('table');
     if (block.kind === 'table') {
       expect(block.rows).toHaveLength(1);
-      expect(firstParagraphBlock(block.rows[0].cells[0]).source.runs[0]).toBeDefined();
+      expect(firstParagraphBlock(block.rows[0].cells[0]).lines[0]?.placements[0])
+        .toMatchObject({ kind: 'text', text: 'inner' });
     }
   });
 

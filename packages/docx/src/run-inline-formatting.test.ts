@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { crispOffset } from '@silurus/ooxml-core';
 import { renderDocumentToCanvas } from './renderer.js';
 import type {
   BodyElement,
@@ -13,15 +14,61 @@ import type {
 // shading (`<w:shd w:fill>` §17.3.2.32) draw geometry, plus the spec's
 // run-border GROUPING rule: adjacent runs whose border attribute set is
 // identical render within a single frame (§17.3.2.4). These are checked through
-// a recording 2D context that captures every fillRect / strokeRect / fillText
-// in draw order with its geometry and style. (autoContrastColor's unit tests
+// a recording 2D context that captures every fillRect / retained stroke edge /
+// fillText in draw order with its geometry and style. (autoContrastColor's unit tests
 // moved to packages/core/src/shape/paint.test.ts when the function was lifted
 // into core.)
 
 type DrawEvent =
   | { kind: 'fillRect'; x: number; y: number; w: number; h: number; style: string }
-  | { kind: 'strokeRect'; x: number; y: number; w: number; h: number; style: string; lineWidth: number }
+  | { kind: 'strokeLine'; x1: number; y1: number; x2: number; y2: number; style: string; lineWidth: number }
   | { kind: 'fillText'; text: string; x: number };
+
+interface RetainedFrame {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+  style: string;
+  lineWidth: number;
+}
+
+function retainedFrames(events: readonly DrawEvent[]): RetainedFrame[] {
+  const edges = events.filter(
+    (event): event is Extract<DrawEvent, { kind: 'strokeLine' }> => event.kind === 'strokeLine',
+  );
+  expect(edges.length % 4).toBe(0);
+  const frames: RetainedFrame[] = [];
+  for (let index = 0; index < edges.length; index += 4) {
+    const [top, right, bottom, left] = edges.slice(index, index + 4);
+    expect(top.y1).toBeCloseTo(top.y2);
+    expect(right.x1).toBeCloseTo(right.x2);
+    expect(bottom.y1).toBeCloseTo(bottom.y2);
+    expect(left.x1).toBeCloseTo(left.x2);
+    const snapLeft = crispOffset(top.x1, left.lineWidth, 1);
+    const snapRight = crispOffset(top.x2, right.lineWidth, 1);
+    const snapTop = crispOffset(left.y1, top.lineWidth, 1);
+    const snapBottom = crispOffset(left.y2, bottom.lineWidth, 1);
+    expect(left.x1).toBeCloseTo(top.x1 + snapLeft);
+    expect(right.x1).toBeCloseTo(top.x2 + snapRight);
+    expect(left.x2).toBeCloseTo(bottom.x1 + snapLeft);
+    expect(right.x2).toBeCloseTo(bottom.x2 + snapRight);
+    expect(top.y1).toBeCloseTo(left.y1 + snapTop);
+    expect(bottom.y1).toBeCloseTo(left.y2 + snapBottom);
+    expect(top.style).toBe(right.style);
+    expect(top.style).toBe(bottom.style);
+    expect(top.style).toBe(left.style);
+    frames.push({
+      left: top.x1,
+      top: left.y1,
+      right: top.x2,
+      bottom: left.y2,
+      style: top.style,
+      lineWidth: top.lineWidth,
+    });
+  }
+  return frames;
+}
 
 /** Recording 2D context. Glyph advance = charCount × fontPx; font box 0.8/0.2
  *  em — the same synthetic metrics the numbering-marker test uses. */
@@ -32,6 +79,7 @@ function makeRecordingCanvas(): {
   let font = '16px serif';
   const px = () => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '16');
   const events: DrawEvent[] = [];
+  let path: { x: number; y: number }[] = [];
   const ctx = {
     get font() { return font; },
     set font(v: string) { font = v; },
@@ -46,20 +94,26 @@ function makeRecordingCanvas(): {
         actualBoundingBoxDescent: p * 0.2,
       } as TextMetrics;
     },
-    save() {}, restore() {}, beginPath() {}, closePath() {},
-    moveTo() {}, lineTo() {}, stroke() {}, fill() {}, clip() {}, rect() {},
+    save() {}, restore() {}, beginPath() { path = []; }, closePath() {},
+    moveTo(x: number, y: number) { path.push({ x, y }); },
+    lineTo(x: number, y: number) { path.push({ x, y }); },
+    stroke() {
+      for (let index = 1; index < path.length; index += 1) {
+        const from = path[index - 1];
+        const to = path[index];
+        events.push({
+          kind: 'strokeLine', x1: from.x, y1: from.y, x2: to.x, y2: to.y,
+          style: String(this.strokeStyle), lineWidth: this.lineWidth,
+        });
+      }
+    }, fill() {}, clip() {}, rect() {},
     scale() {}, translate() {}, setLineDash() {}, drawImage() {}, clearRect() {},
     arc() {}, quadraticCurveTo() {}, bezierCurveTo() {},
     createLinearGradient() { return { addColorStop() {} }; },
     fillRect(x: number, y: number, w: number, h: number) {
       events.push({ kind: 'fillRect', x, y, w, h, style: String(this.fillStyle) });
     },
-    strokeRect(x: number, y: number, w: number, h: number) {
-      events.push({
-        kind: 'strokeRect', x, y, w, h,
-        style: String(this.strokeStyle), lineWidth: this.lineWidth,
-      });
-    },
+    strokeRect() {},
     fillText(text: string, x: number, _y: number) {
       events.push({ kind: 'fillText', text, x });
     },
@@ -135,23 +189,23 @@ const border = (extra: Partial<DocxRunBorder> = {}): DocxRunBorder => ({
 describe('run box (w:bdr §17.3.2.4) + shading (w:shd §17.3.2.32) geometry', () => {
   it('insets the box outside the glyph box by w:space', async () => {
     // One run carrying BOTH shading (fillRect at the glyph box) and a border
-    // with w:space — the strokeRect must sit `space*scale` OUTSIDE the shading
-    // rect on every side (box bounds = glyph box + space inset). Select the RUN
+    // with w:space — the four retained edges must sit `space*scale` OUTSIDE the
+    // shading rect on every side (box bounds = glyph box + space inset). Select the RUN
     // shading rect by its colour (the first fillRect is the page-white bg).
     const sp = 4;
     const events = await render([
       textRun('AB', { background: '00FF00', border: border({ space: sp }) }),
     ]);
     const fill = events.find((e) => e.kind === 'fillRect' && e.style.toUpperCase() === '#00FF00');
-    const stroke = events.find((e) => e.kind === 'strokeRect');
+    const [stroke] = retainedFrames(events);
     expect(fill).toBeDefined();
     expect(stroke).toBeDefined();
-    if (fill?.kind !== 'fillRect' || stroke?.kind !== 'strokeRect') throw new Error('unreachable');
+    if (fill?.kind !== 'fillRect' || !stroke) throw new Error('unreachable');
     // scale = 1 ⇒ inset = sp px on each side.
-    expect(stroke.x).toBeCloseTo(fill.x - sp);
-    expect(stroke.y).toBeCloseTo(fill.y - sp);
-    expect(stroke.w).toBeCloseTo(fill.w + 2 * sp);
-    expect(stroke.h).toBeCloseTo(fill.h + 2 * sp);
+    expect(stroke.left).toBeCloseTo(fill.x - sp);
+    expect(stroke.top).toBeCloseTo(fill.y - sp);
+    expect(stroke.right - stroke.left).toBeCloseTo(fill.w + 2 * sp);
+    expect(stroke.bottom - stroke.top).toBeCloseTo(fill.h + 2 * sp);
     // The box is the run's border colour.
     expect(stroke.style.toUpperCase()).toBe('#0000FF');
   });
@@ -163,17 +217,16 @@ describe('run box (w:bdr §17.3.2.4) + shading (w:shd §17.3.2.32) geometry', ()
       textRun('AB', { border: border() }),
       textRun('CD', { border: border() }),
     ]);
-    const strokes = events.filter((e) => e.kind === 'strokeRect');
-    expect(strokes).toHaveLength(1); // ONE frame, not one per run
+    const strokes = retainedFrames(events);
+    expect(strokes).toHaveLength(1); // ONE four-edge frame, not one per run
     const stroke = strokes[0];
-    if (stroke.kind !== 'strokeRect') throw new Error('unreachable');
     // The frame spans both runs: width ≈ |AB| + |CD| = 2 chars × 16px × 2 runs.
     // space = 0 ⇒ no inset. Each char advance is 16px (synthetic metrics).
-    expect(stroke.w).toBeCloseTo(4 * 16);
+    expect(stroke.right - stroke.left).toBeCloseTo(4 * 16);
     // First glyph of the first run starts at the frame's left edge.
     const firstText = events.find((e) => e.kind === 'fillText');
     if (firstText?.kind !== 'fillText') throw new Error('unreachable');
-    expect(stroke.x).toBeCloseTo(firstText.x);
+    expect(stroke.left).toBeCloseTo(firstText.x);
   });
 
   it('does NOT merge two adjacent runs whose borders differ (separate frames)', async () => {
@@ -181,7 +234,7 @@ describe('run box (w:bdr §17.3.2.4) + shading (w:shd §17.3.2.32) geometry', ()
       textRun('AB', { border: border({ color: '0000FF' }) }),
       textRun('CD', { border: border({ color: 'FF0000' }) }),
     ]);
-    const strokes = events.filter((e) => e.kind === 'strokeRect');
+    const strokes = retainedFrames(events);
     expect(strokes).toHaveLength(2); // different colour ⇒ two groups
   });
 
@@ -263,12 +316,12 @@ describe('run border spans justification slack (§17.3.2.4 + §17.18.44 both)', 
     const text = 'aaaaa bbbbb ccccc ddddd eeeee fffff ggggg';
     const firstLineFrameWidth = async (alignment: 'both' | 'left') => {
       const events = await render([textRun(text, { border: border() })], { alignment }, 410);
-      const strokes = events.filter(
-        (e): e is Extract<DrawEvent, { kind: 'strokeRect' }> => e.kind === 'strokeRect',
-      );
+      const strokes = retainedFrames(events);
       expect(strokes.length).toBeGreaterThanOrEqual(2); // wrapped to ≥2 lines ⇒ ≥2 frames
-      const top = Math.min(...strokes.map((s) => s.y));
-      return Math.max(...strokes.filter((s) => Math.round(s.y) === Math.round(top)).map((s) => s.w));
+      const top = Math.min(...strokes.map((s) => s.top));
+      return Math.max(...strokes
+        .filter((s) => Math.round(s.top) === Math.round(top))
+        .map((s) => s.right - s.left));
     };
     const justified = await firstLineFrameWidth('both');
     const leftAligned = await firstLineFrameWidth('left');

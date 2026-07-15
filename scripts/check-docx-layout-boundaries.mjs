@@ -43,7 +43,20 @@ const PLANNED_NON_LAYOUT_MODULES = new Set([
 ]);
 
 const SHARED_PAINT_IMPORTS = new Map([
-  ['@silurus/ooxml-core', new Set(['renderChart', 'canvasFontString'])],
+  ['@silurus/ooxml-core', new Map([
+    ['autoContrastColor', 'value'],
+    ['canvasFontString', 'value'],
+    ['crispOffset', 'value'],
+    ['drawImageCropped', 'value'],
+    ['doubleRailGeometry', 'value'],
+    ['fillDoubleBorder', 'value'],
+    ['HyperlinkTarget', 'type'],
+    ['paintDrawingMLShape', 'value'],
+    // Shared fill resolution keeps gradient/no-fill semantics identical across
+    // DOCX, PPTX, and XLSX painters; paint may consume it but not layout APIs.
+    ['resolveFill', 'value'],
+    ['renderChart', 'value'],
+  ])],
 ]);
 
 const LEGACY_SYMBOLS = [
@@ -77,7 +90,6 @@ const LEGACY_SYMBOLS = [
 ];
 
 const LEGACY_RENDERER_IMPORTS = new Set([
-  'fragment-paint.ts',
   'layout-context.ts',
   'layout-fragments.ts',
   'line-layout.ts',
@@ -97,8 +109,24 @@ function posixPath(path) {
 function isProductionTypeScript(path) {
   return /\.tsx?$/.test(path)
     && !path.endsWith('.d.ts')
-    && !/\.(test|spec|stories)\.tsx?$/.test(path)
+    && !/\.(test|spec|stories|test-support)\.tsx?$/.test(path)
     && !path.includes('/wasm/');
+}
+
+function assertNoProductionTestSupportImports(root) {
+  const sourceRoot = resolve(root, DOCX_SOURCE);
+  for (const path of listFiles(sourceRoot).filter(isProductionTypeScript)) {
+    for (const edge of moduleEdges(path)) {
+      if (!edge.literal || !edge.specifier.startsWith('.')) continue;
+      const dependency = resolveLocalImport(path, edge.specifier);
+      if (dependency && /\.test-support\.tsx?$/.test(dependency)) {
+        fail(
+          'PRODUCTION_TEST_SUPPORT_IMPORT',
+          `${posixPath(relative(root, path))} -> ${posixPath(relative(root, dependency))}`,
+        );
+      }
+    }
+  }
 }
 
 function listFiles(root) {
@@ -246,11 +274,13 @@ function paintBoundaryViolations(root) {
         }
         if (!edge.specifier.startsWith('.')) {
           const allowedNames = SHARED_PAINT_IMPORTS.get(edge.specifier);
-          const allowed = !edge.typeOnly
+          const allowed = edge.kind === 'import'
             && !edge.aliased
             && allowedNames
             && edge.importedNames?.length > 0
-            && edge.importedNames?.every((name) => allowedNames.has(name));
+            && edge.importedNames?.every((name) => (
+              allowedNames.get(name) === (edge.typeOnly ? 'type' : 'value')
+            ));
           if (!allowed) {
             violations.push([...current.chain.map((path) => posixPath(relative(root, path))), edge.specifier]);
           }
@@ -306,6 +336,414 @@ function assertCapabilityBoundaries(root) {
       ts.forEachChild(node, visit);
     };
     visit(source);
+  }
+}
+
+/**
+ * Body paint consumes retained placements. Letting this adapter call a layout
+ * entry point would silently reintroduce a second layout pass whose result can
+ * diverge from pagination (especially for grouped frames). Keep the rule tied
+ * to the adapter's AST instead of relying on naming conventions in paint files:
+ * renderer.ts intentionally still owns legacy header/footer story layout.
+ */
+function assertBodyPaintConsumesRetainedLayout(root) {
+  const path = resolve(root, DOCX_SOURCE, 'renderer.ts');
+  if (!existsSync(path)) return;
+  const program = ts.createProgram({
+    rootNames: [path],
+    options: {
+      target: ts.ScriptTarget.Latest,
+      module: ts.ModuleKind.ESNext,
+      noResolve: true,
+      skipLibCheck: true,
+    },
+  });
+  const source = program.getSourceFile(path);
+  if (!source) return;
+  const checker = program.getTypeChecker();
+  const declaration = source.statements.find((statement) => (
+    ts.isFunctionDeclaration(statement)
+      && statement.name?.text === 'renderBodyElements'
+  ));
+  if (!declaration?.body) return;
+
+  const forbidden = new Set([
+    'acquireParagraphLayout',
+    'acquireRetainedFrameGroup',
+    'buildSegments',
+    'contextualSpacingAdjust',
+    'estimateParagraphHeight',
+    'layoutLines',
+    'measureParagraph',
+    'measureText',
+    'paragraphGapAdjustment',
+    'paragraphLayoutFromMeasurement',
+    'parasShareBorderBox',
+    'renderFrameParagraph',
+    'renderParagraph',
+    'resolveParagraphBorderEdges',
+    'resolveFrameBox',
+  ]);
+  const retainedCanvasMethods = new Set([
+    'restore',
+    'save',
+    'scale',
+    'translate',
+  ]);
+  const isRetainedPropertyBoundary = (target) => (
+    (target.name === 'onTextRun' && target.receiver === 'state')
+    || (retainedCanvasMethods.has(target.name) && target.receiver === 'state.ctx')
+  );
+  const retainedImportBoundaries = new Map([
+    ['./paint/canvas-drawing.js', new Set(['paintDrawingLayout'])],
+    ['./paint/canvas-text.js', new Set([
+      'paintParagraphLayout',
+      'paintPlacedParagraphLayout',
+      'paintPlacedTextBoxLayout',
+      'paintTextBoxLayout',
+    ])],
+    ['./paint/deferred-front-session.js', new Set(['enqueueDeferredFrontPaint'])],
+    ['./vertical-text.js', new Set(['verticalTextLayerPlacement'])],
+  ]);
+
+  const unwrapExpression = (expression) => {
+    let current = expression;
+    while (ts.isParenthesizedExpression(current)
+      || ts.isAsExpression(current)
+      || ts.isTypeAssertionExpression(current)
+      || ts.isNonNullExpression(current)
+      || ts.isSatisfiesExpression(current)) {
+      current = current.expression;
+    }
+    return current;
+  };
+
+  const isUnshadowedGlobalIdentifier = (node, name) => {
+    if (!ts.isIdentifier(node) || node.text !== name) return false;
+    const symbol = checker.getSymbolAtLocation(node);
+    const declarations = symbol?.declarations ?? [];
+    return declarations.length > 0
+      && declarations.every((item) => item.getSourceFile().isDeclarationFile);
+  };
+
+  const isCanonicalWeakMapConstruction = (expression) => {
+    const value = unwrapExpression(expression);
+    return ts.isNewExpression(value)
+      && isUnshadowedGlobalIdentifier(value.expression, 'WeakMap')
+      && (value.arguments?.length ?? 0) === 0;
+  };
+
+  const isGlobalObjectCall = (expression, method) => (
+    ts.isCallExpression(expression)
+    && ts.isPropertyAccessExpression(expression.expression)
+    && expression.expression.name.text === method
+    && isUnshadowedGlobalIdentifier(expression.expression.expression, 'Object')
+  );
+
+  const isCanonicalBodyFragmentMapInitializer = (expression) => {
+    const frozen = unwrapExpression(expression);
+    if (!isGlobalObjectCall(frozen, 'freeze') || frozen.arguments.length !== 1) return false;
+    const assigned = unwrapExpression(frozen.arguments[0]);
+    if (!isGlobalObjectCall(assigned, 'assign')
+      || assigned.arguments.length !== 2
+      || !isCanonicalWeakMapConstruction(assigned.arguments[0])) return false;
+    const sidecars = unwrapExpression(assigned.arguments[1]);
+    if (!ts.isObjectLiteralExpression(sidecars) || sidecars.properties.length !== 2) return false;
+    const expectedSidecars = new Set(['framePlacement', 'sourceIndices']);
+    const seen = new Set();
+    for (const property of sidecars.properties) {
+      if (!ts.isPropertyAssignment(property) || !ts.isIdentifier(property.name)) return false;
+      const name = property.name.text;
+      if (!expectedSidecars.has(name)
+        || seen.has(name)
+        || !isCanonicalWeakMapConstruction(property.initializer)) return false;
+      seen.add(name);
+    }
+    return seen.size === expectedSidecars.size;
+  };
+
+  const isCanonicalBodyFragmentReceiver = (identifier) => {
+    const symbol = checker.getSymbolAtLocation(identifier);
+    const declarations = symbol?.declarations ?? [];
+    const declaration = declarations.length === 1 ? declarations[0] : undefined;
+    return declaration !== undefined
+      && ts.isVariableDeclaration(declaration)
+      && ts.isVariableDeclarationList(declaration.parent)
+      && (declaration.parent.flags & ts.NodeFlags.Const) !== 0
+      && ts.isVariableStatement(declaration.parent.parent)
+      && declaration.parent.parent.parent === source
+      && declaration.initializer !== undefined
+      && isCanonicalBodyFragmentMapInitializer(declaration.initializer);
+  };
+
+  const isExactBodyFragmentLookup = (item) => {
+    if (item.name?.text !== 'bodyFragmentFor'
+      || item.parameters.length !== 1
+      || !ts.isIdentifier(item.parameters[0].name)
+      || item.body?.statements.length !== 1) return false;
+    const statement = item.body.statements[0];
+    if (!ts.isReturnStatement(statement) || !statement.expression) return false;
+    const call = unwrapExpression(statement.expression);
+    if (!ts.isCallExpression(call)
+      || !ts.isPropertyAccessExpression(call.expression)
+      || !ts.isIdentifier(call.expression.expression)
+      || call.expression.expression.text !== 'bodyFlowFragments'
+      || !isCanonicalBodyFragmentReceiver(call.expression.expression)
+      || call.expression.name.text !== 'get'
+      || call.arguments.length !== 1) return false;
+    const argument = unwrapExpression(call.arguments[0]);
+    return ts.isIdentifier(argument)
+      && checker.getSymbolAtLocation(argument)
+        === checker.getSymbolAtLocation(item.parameters[0].name);
+  };
+
+  const staticString = (expression, resolving = new Set()) => {
+    const value = unwrapExpression(expression);
+    if (ts.isStringLiteralLike(value)) return value.text;
+    if (ts.isBinaryExpression(value)
+      && value.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+      const left = staticString(value.left, resolving);
+      const right = staticString(value.right, resolving);
+      return left === null || right === null ? null : left + right;
+    }
+    if (!ts.isIdentifier(value)) return null;
+    const symbol = checker.getSymbolAtLocation(value);
+    if (!symbol || resolving.has(symbol)) return null;
+    resolving.add(symbol);
+    const declarations = symbol.declarations ?? [];
+    const values = declarations.flatMap((item) => (
+      ts.isVariableDeclaration(item) && item.initializer
+        ? [staticString(item.initializer, resolving)]
+        : []
+    ));
+    resolving.delete(symbol);
+    return values.length > 0 && values.every((item) => item === values[0])
+      ? values[0]
+      : null;
+  };
+
+  const propertyNameText = (name) => {
+    if (ts.isIdentifier(name) || ts.isStringLiteralLike(name)) return name.text;
+    if (ts.isComputedPropertyName(name)) return staticString(name.expression);
+    return null;
+  };
+
+  let resolveCallTarget;
+  const resolveObjectProperty = (expression, propertyName, resolving) => {
+    const value = unwrapExpression(expression);
+    if (ts.isObjectLiteralExpression(value)) {
+      const property = value.properties.find((item) => (
+        'name' in item && item.name && propertyNameText(item.name) === propertyName
+      ));
+      if (property && ts.isPropertyAssignment(property)) {
+        return resolveCallTarget(property.initializer, resolving);
+      }
+      if (property && ts.isShorthandPropertyAssignment(property)) {
+        return resolveCallTarget(property.name, resolving);
+      }
+      if (property && ts.isMethodDeclaration(property) && property.body) {
+        return [{ kind: 'body', body: property.body, detail: propertyName }];
+      }
+      return null;
+    }
+    if (ts.isConditionalExpression(value)) {
+      const whenTrue = resolveObjectProperty(value.whenTrue, propertyName, resolving);
+      const whenFalse = resolveObjectProperty(value.whenFalse, propertyName, resolving);
+      return whenTrue && whenFalse ? [...whenTrue, ...whenFalse] : null;
+    }
+    if (!ts.isIdentifier(value)) return null;
+    const symbol = checker.getSymbolAtLocation(value);
+    if (!symbol || resolving.has(symbol)) return null;
+    resolving.add(symbol);
+    const targets = (symbol.declarations ?? []).flatMap((item) => (
+      ts.isVariableDeclaration(item) && item.initializer
+        ? resolveObjectProperty(item.initializer, propertyName, resolving) ?? []
+        : []
+    ));
+    resolving.delete(symbol);
+    return targets.length > 0 ? targets : null;
+  };
+
+  resolveCallTarget = (expression, resolving = new Set()) => {
+    const value = unwrapExpression(expression);
+    if (ts.isPropertyAccessExpression(value)) {
+      return resolveObjectProperty(value.expression, value.name.text, resolving)
+        ?? [{ kind: 'property', name: value.name.text, receiver: value.expression.getText(source) }];
+    }
+    if (ts.isElementAccessExpression(value)) {
+      const name = value.argumentExpression && staticString(value.argumentExpression);
+      return name === null || name === undefined
+        ? [{ kind: 'unresolved', detail: value.getText(source) }]
+        : resolveObjectProperty(value.expression, name, resolving)
+          ?? [{ kind: 'property', name, receiver: value.expression.getText(source) }];
+    }
+    if (ts.isConditionalExpression(value)) {
+      return [
+        ...resolveCallTarget(value.whenTrue, resolving),
+        ...resolveCallTarget(value.whenFalse, resolving),
+      ];
+    }
+    if (!ts.isIdentifier(value)) {
+      return [{ kind: 'unresolved', detail: value.getText(source) }];
+    }
+    const symbol = checker.getSymbolAtLocation(value);
+    if (!symbol) return [{ kind: 'name', name: value.text }];
+    if (resolving.has(symbol)) {
+      return [{ kind: 'unresolved', detail: value.text }];
+    }
+    resolving.add(symbol);
+    const targets = [];
+    for (const item of symbol.declarations ?? []) {
+      if (ts.isFunctionDeclaration(item) && item.body) {
+        const name = item.name?.text;
+        targets.push(isExactBodyFragmentLookup(item)
+          ? { kind: 'local-boundary', name: 'bodyFragmentFor' }
+          : { kind: 'body', body: item.body, detail: name ?? value.text });
+      } else if (ts.isVariableDeclaration(item) && item.initializer) {
+        const initializer = unwrapExpression(item.initializer);
+        if (ts.isArrowFunction(initializer) || ts.isFunctionExpression(initializer)) {
+          targets.push({ kind: 'body', body: initializer.body, detail: value.text });
+        } else {
+          targets.push(...resolveCallTarget(initializer, resolving));
+        }
+      } else if (ts.isImportSpecifier(item)) {
+        let parent = item.parent;
+        while (parent && !ts.isImportDeclaration(parent)) parent = parent.parent;
+        targets.push({
+          kind: 'import',
+          name: item.propertyName?.text ?? item.name.text,
+          specifier: parent && ts.isStringLiteral(parent.moduleSpecifier)
+            ? parent.moduleSpecifier.text
+            : null,
+        });
+      } else if (ts.isBindingElement(item)) {
+        const name = !item.propertyName
+          ? ts.isIdentifier(item.name) ? item.name.text : null
+          : propertyNameText(item.propertyName);
+        const variable = ts.isObjectBindingPattern(item.parent)
+          && ts.isVariableDeclaration(item.parent.parent)
+          ? item.parent.parent
+          : null;
+        const propertyTargets = name !== null && variable?.initializer
+          ? resolveObjectProperty(variable.initializer, name, resolving)
+          : null;
+        targets.push(...(propertyTargets ?? [name === null
+          ? { kind: 'unresolved', detail: item.getText(source) }
+          : {
+              kind: 'property',
+              name,
+              receiver: variable?.initializer?.getText(source) ?? '<destructured>',
+            }]));
+      } else if (ts.isParameter(item)) {
+        targets.push({ kind: 'unresolved', detail: value.text });
+      }
+    }
+    resolving.delete(symbol);
+    return targets.length > 0
+      ? targets
+      : [{ kind: 'unresolved', detail: value.text }];
+  };
+
+  const directCallTargets = (node) => {
+    const targets = [];
+    const visit = (current) => {
+      const isNamedLocalCallable = current !== node && (
+        ts.isFunctionDeclaration(current)
+        || ((ts.isFunctionExpression(current) || ts.isArrowFunction(current))
+          && ts.isVariableDeclaration(current.parent)
+          && ts.isIdentifier(current.parent.name))
+      );
+      if (isNamedLocalCallable) return;
+      if (ts.isCallExpression(current)) {
+        targets.push(...resolveCallTarget(current.expression));
+      }
+      ts.forEachChild(current, visit);
+    };
+    visit(node);
+    return targets;
+  };
+  const paragraphBranchOf = (statement) => {
+    if (!ts.isBinaryExpression(statement.expression)) return null;
+    const { left, operatorToken, right } = statement.expression;
+    const isTypeAccess = (node) => ts.isPropertyAccessExpression(node)
+      && node.name.text === 'type';
+    const isParagraph = (node) => ts.isStringLiteralLike(node)
+      && node.text === 'paragraph';
+    if (!((isTypeAccess(left) && isParagraph(right))
+      || (isParagraph(left) && isTypeAccess(right)))) return null;
+    if (operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken
+      || operatorToken.kind === ts.SyntaxKind.EqualsEqualsToken) {
+      return statement.thenStatement;
+    }
+    if (operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken
+      || operatorToken.kind === ts.SyntaxKind.ExclamationEqualsToken) {
+      return statement.elseStatement ?? null;
+    }
+    return null;
+  };
+
+  const entryCalls = new Set();
+  let foundParagraphBranch = false;
+  const findParagraphBranches = (node) => {
+    if (ts.isIfStatement(node)) {
+      const branch = paragraphBranchOf(node);
+      if (branch) {
+        foundParagraphBranch = true;
+        for (const target of directCallTargets(branch)) entryCalls.add(target);
+        return;
+      }
+    }
+    ts.forEachChild(node, findParagraphBranches);
+  };
+  findParagraphBranches(declaration.body);
+  if (!foundParagraphBranch) {
+    fail(
+      'BODY_PAINT_LAYOUT_CAPABILITY',
+      `${DOCX_SOURCE}/renderer.ts#renderBodyElements has no statically auditable paragraph branch`,
+    );
+  }
+
+  const violations = new Set();
+  const visitedBodies = new Set();
+  const pending = [...entryCalls];
+  while (pending.length > 0) {
+    const target = pending.pop();
+    if (!target) continue;
+    if (target.kind === 'unresolved') {
+      violations.add(`unresolved call ${target.detail}`);
+      continue;
+    }
+    if (target.kind === 'local-boundary') continue;
+    if (target.kind === 'import') {
+      if (retainedImportBoundaries.get(target.specifier)?.has(target.name)) continue;
+      violations.add(forbidden.has(target.name)
+        ? target.name
+        : `unresolved call ${target.name} from ${target.specifier ?? '<unknown import>'}`);
+      continue;
+    }
+    if (target.kind === 'property') {
+      if (isRetainedPropertyBoundary(target)) continue;
+      violations.add(forbidden.has(target.name)
+        ? target.name
+        : `unresolved call ${target.name}`);
+      continue;
+    }
+    if (target.kind === 'name') {
+      violations.add(forbidden.has(target.name)
+        ? target.name
+        : `unresolved call ${target.name}`);
+      continue;
+    }
+    if (visitedBodies.has(target.body)) continue;
+    visitedBodies.add(target.body);
+    for (const called of directCallTargets(target.body)) pending.push(called);
+  }
+
+  if (violations.size > 0) {
+    fail(
+      'BODY_PAINT_LAYOUT_CAPABILITY',
+      `${DOCX_SOURCE}/renderer.ts#renderBodyElements reaches ${[...violations].sort().join(', ')}`,
+    );
   }
 }
 
@@ -550,6 +988,41 @@ function normalizedComputePagesHash(node, source) {
   return createHash('sha256').update(JSON.stringify(shape(node))).digest('hex');
 }
 
+/** A3 deletes the production-wide fragment flag after retained table paint is
+ * mandatory. Normalize only its exact first `if` conjunct; all table eligibility
+ * predicates remain hash-frozen through A5. */
+function normalizedIsFragmentPaintableTableHash(node, source) {
+  const firstIf = node.body?.statements.find(ts.isIfStatement);
+  const targetCondition = firstIf?.expression;
+  const flattenOr = (current, operands = []) => {
+    if (ts.isBinaryExpression(current)
+      && current.operatorToken.kind === ts.SyntaxKind.BarBarToken) {
+      flattenOr(current.left, operands);
+      flattenOr(current.right, operands);
+    } else {
+      operands.push(current);
+    }
+    return operands;
+  };
+  const exactDeletedGate = (current) => ts.isPrefixUnaryExpression(current)
+    && current.operator === ts.SyntaxKind.ExclamationToken
+    && ts.isIdentifier(current.operand)
+    && current.operand.text === 'fragmentPaintEnabled';
+  let normalized = node.getText(source);
+  if (targetCondition) {
+    const operands = flattenOr(targetCondition);
+    if (operands.length >= 2 && exactDeletedGate(operands[0])) {
+      const start = operands[0].getStart(source) - node.getStart(source);
+      const end = operands[1].getStart(source) - node.getStart(source);
+      const exactPrefix = normalized.slice(start, end).replace(/\s+/g, '');
+      if (exactPrefix === '!fragmentPaintEnabled||') {
+        normalized = normalized.slice(0, start) + normalized.slice(end);
+      }
+    }
+  }
+  return createHash('sha256').update(normalized.replace(/\s+/g, ' ').trim()).digest('hex');
+}
+
 /** A2 routes service-produced shape text through the same immutable Canvas
  * route used by measurement. The text-box implementation remains hash frozen
  * except for exact Canvas-route threading and the spec-required numbering
@@ -714,6 +1187,8 @@ function declarationInventory(root) {
         if (LEGACY_SYMBOLS.includes(name)) {
           legacyDeclarationHashes[key] = name === 'computePages'
             ? normalizedComputePagesHash(statement, source)
+            : name === 'isFragmentPaintableTable'
+              ? normalizedIsFragmentPaintableTableHash(statement, source)
             : name === 'renderShapeText'
               ? normalizedRenderShapeTextHash(statement, source)
             : normalizedNodeHash(statement, source);
@@ -796,6 +1271,11 @@ function mergeBaseBaseline(root, baseRef) {
       value.legacyDeclarationHashes[`${DOCX_SOURCE}/renderer.ts#FunctionDeclaration#renderShapeText`]
         = normalizedRenderShapeTextHash(renderShapeText, source);
     }
+    const isFragmentPaintableTable = declaration('isFragmentPaintableTable');
+    if (isFragmentPaintableTable) {
+      value.legacyDeclarationHashes[`${DOCX_SOURCE}/renderer.ts#FunctionDeclaration#isFragmentPaintableTable`]
+        = normalizedIsFragmentPaintableTableHash(isFragmentPaintableTable, source);
+    }
   }
   return value;
 }
@@ -829,8 +1309,16 @@ function stableJson(value) {
 }
 
 function assertExactBaseline(baseline, actual) {
-  if (stableJson(baseline) !== stableJson(actual)) {
-    fail('BASELINE_MISMATCH', 'baseline must exactly describe current legacy symbols and renderer import edges');
+  const expected = stableJson(baseline);
+  const received = stableJson(actual);
+  if (expected !== received) {
+    const expectedLines = expected.split('\n');
+    const receivedLines = received.split('\n');
+    const index = expectedLines.findIndex((line, lineIndex) => line !== receivedLines[lineIndex]);
+    fail(
+      'BASELINE_MISMATCH',
+      `baseline must exactly describe current legacy symbols and renderer import edges; first difference at line ${index + 1}: expected ${JSON.stringify(expectedLines[index])}, received ${JSON.stringify(receivedLines[index])}`,
+    );
   }
 }
 
@@ -1007,8 +1495,10 @@ export function checkDocxLayoutBoundaries(options) {
   const root = resolve(options.root);
   const baselinePath = resolve(root, BASELINE_PATH);
   const baselineExists = existsSync(baselinePath);
+  assertNoProductionTestSupportImports(root);
   assertPaintBoundaries(root);
   assertCapabilityBoundaries(root);
+  assertBodyPaintConsumesRetainedLayout(root);
   assertLayoutParserModelBoundaries(root);
 
   if (options.write) {
@@ -1037,10 +1527,12 @@ export function checkDocxLayoutBoundaries(options) {
   const headBaseline = readBaseline(baselinePath);
   const normalizedDeclarationKeys = [
     `${DOCX_SOURCE}/renderer.ts#FunctionDeclaration#computePages`,
+    `${DOCX_SOURCE}/renderer.ts#FunctionDeclaration#isFragmentPaintableTable`,
     `${DOCX_SOURCE}/renderer.ts#FunctionDeclaration#renderShapeText`,
   ];
   for (const key of normalizedDeclarationKeys) {
-    if (baseBaseline?.legacyDeclarationHashes[key]) {
+    if (headBaseline.legacyDeclarationHashes[key]
+      && baseBaseline?.legacyDeclarationHashes[key]) {
       // Treat the immutable merge-base declaration as the virtual baseline so
       // A2 can constrain exact dependency/route threading without rewriting the
       // committed A1 baseline.

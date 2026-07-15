@@ -17,5 +17,5 @@ export type {
   LayoutPage,
   PlacedFragment,
   FlowFragment,
-  ParagraphFragment,
 } from './layout-fragments.js';
+export type { ParagraphLayout } from './layout/types.js';

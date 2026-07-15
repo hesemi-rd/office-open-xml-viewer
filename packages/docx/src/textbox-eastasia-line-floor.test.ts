@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { renderShapeText } from './renderer.js';
+import { acquireAndPaintShapeTextBox } from './retained-shape-textbox.test-support.js';
 import type { ShapeRun, ShapeText, ShapeTextRun } from './types';
 
 // ECMA-376 §17.3.1.33 / §17.3.2.26 — a text-box (txbxContent) run's single-line
@@ -125,7 +125,7 @@ describe('textbox line-box floors on the eastAsia face (ECMA-376 §17.3.2.26)', 
   it('grows the line box to Meiryo when Meiryo is only on the eastAsia axis (untabled ascii)', () => {
     const { ctx, fillTexts } = makeRecordingCanvas();
     // Untabled ascii ('Calibri' is NOT in WIN_METRICS) + Meiryo on eastAsia.
-    renderShapeText(textboxWith('Calibri', 'Meiryo'), 0, 0, 120, 400, ctx, scale);
+    acquireAndPaintShapeTextBox(textboxWith('Calibri', 'Meiryo'), 0, 0, 120, 400, ctx, scale);
     const lineH = firstLineHeight(fillTexts);
     // Floored to Meiryo's design line, NOT the flat 1.0×em natural box.
     expect(lineH).toBeCloseTo(MEIRYO_RATIO * emPx, 3);
@@ -137,7 +137,7 @@ describe('textbox line-box floors on the eastAsia face (ECMA-376 §17.3.2.26)', 
     // Untabled ascii, no eastAsia axis: intendedSingleLinePx returns 0 for both,
     // so the line box keeps the substituted-font natural box (1.0×em) — proving
     // the change is a FLOOR, not a replace.
-    renderShapeText(textboxWith('Calibri', undefined), 0, 0, 120, 400, ctx, scale);
+    acquireAndPaintShapeTextBox(textboxWith('Calibri', undefined), 0, 0, 120, 400, ctx, scale);
     const lineH = firstLineHeight(fillTexts);
     expect(lineH).toBeCloseTo(NATURAL_RATIO * emPx, 3);
     // Baseline is ALSO byte-for-byte unchanged: with no floor the glyph box fills
@@ -154,7 +154,7 @@ describe('textbox line-box floors on the eastAsia face (ECMA-376 §17.3.2.26)', 
   // glyphNatural)/2 + ascent, glyphNatural = ascent+descent NOT floor-inflated.
   it('centers the CJK glyph box in the inflated line box (half-leading, not top-pinned)', () => {
     const { ctx, fillTexts } = makeRecordingCanvas();
-    renderShapeText(textboxWith('Calibri', 'Meiryo'), 0, 0, 120, 400, ctx, scale);
+    acquireAndPaintShapeTextBox(textboxWith('Calibri', 'Meiryo'), 0, 0, 120, 400, ctx, scale);
     const baselineY = firstBaselineY(fillTexts); // = first line's baselineOffset
     const ascentPx = 0.8 * emPx;                 // mock glyph ascent (0.8×em)
     const glyphNaturalPx = 1.0 * emPx;           // mock glyph box (0.8 + 0.2)
@@ -182,7 +182,7 @@ describe('textbox line-box floors on the eastAsia face (ECMA-376 §17.3.2.26)', 
       { text: 'ab ', fontSizePt: 20, fontFamily: 'Calibri' }, // untabled, tallest (tie → first)
       { text: 'あいうえお', fontSizePt: 20, fontFamily: null, fontFamilyEastAsia: 'Meiryo' },
     ];
-    renderShapeText(textboxWithRuns(runs), 0, 0, 120, 400, ctx, scale);
+    acquireAndPaintShapeTextBox(textboxWithRuns(runs), 0, 0, 120, 400, ctx, scale);
     const lineH = firstLineHeight(fillTexts);
     // The Meiryo run on line 1 raises the box despite not being the tallest run.
     expect(lineH).toBeCloseTo(MEIRYO_RATIO * emPx, 3);

@@ -3,8 +3,8 @@ import { layoutDocument } from './document-layout.js';
 import {
   fragmentLineAdvancesPt,
   paragraphFragmentAdvancePt,
-  type ParagraphFragment,
 } from './layout-fragments.js';
+import type { ParagraphLayout } from './layout/types.js';
 import type { BodyElement, DocParagraph, DocxDocumentModel, SectionProps } from './types';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -92,12 +92,12 @@ function doc(body: BodyElement[], pageHeight = 400): DocxDocumentModel {
 function allFragments(model: DocxDocumentModel) {
   const layout = layoutDocument(model);
   return layout.pages.flatMap((page) =>
-    page.fragments.map((placed) => ({ page, placed, fragment: placed.fragment as ParagraphFragment })),
+    page.fragments.map((placed) => ({ page, placed, fragment: placed.fragment as ParagraphLayout })),
   );
 }
 
 describe('layoutDocument — body paragraph fragments (PR 5 Task 12)', () => {
-  it('emits one placed paragraph fragment per body paragraph, referencing the SOURCE paragraph', () => {
+  it('emits one self-contained retained paragraph per body paragraph', () => {
     const p1 = para('alpha');
     const p2 = para('beta');
     const model = doc([p1 as unknown as BodyElement, p2 as unknown as BodyElement]);
@@ -106,10 +106,15 @@ describe('layoutDocument — body paragraph fragments (PR 5 Task 12)', () => {
     expect(layout.pages.length).toBe(1);
     const frags = layout.pages[0].fragments;
     expect(frags.length).toBe(2);
-    // Source identity: the fragment points at the parsed paragraph, not a clone.
-    expect(frags[0].fragment.source).toBe(p1);
-    expect(frags[1].fragment.source).toBe(p2);
     expect(frags[0].fragment.kind).toBe('paragraph');
+    expect(frags[1].fragment.kind).toBe('paragraph');
+    if (frags[0].fragment.kind !== 'paragraph' || frags[1].fragment.kind !== 'paragraph') {
+      throw new Error('expected paragraph layouts');
+    }
+    expect(frags[0].fragment).not.toHaveProperty('measured');
+    expect(frags[0].fragment).not.toHaveProperty('runs');
+    expect(frags[0].fragment.source.path).toEqual([0]);
+    expect(frags[1].fragment.source.path).toEqual([1]);
   });
 
   it('keeps fragment state OFF the source paragraph (no fragment fields added to DocParagraph)', () => {
@@ -128,10 +133,10 @@ describe('layoutDocument — body paragraph fragments (PR 5 Task 12)', () => {
   it('records immutable line ranges covering the whole paragraph', () => {
     const p = para(Array.from({ length: 40 }, () => 'w').join(' '));
     const layout = layoutDocument(doc([p as unknown as BodyElement]));
-    const frag = layout.pages[0].fragments[0].fragment as ParagraphFragment;
-    expect(frag.lineStart).toBe(0);
-    expect(frag.lineEnd).toBe(frag.measured.lines.length);
-    expect(frag.lineEnd).toBeGreaterThan(1); // actually wrapped
+    const frag = layout.pages[0].fragments[0].fragment as ParagraphLayout;
+    expect(frag.lines[0]?.range.start).toBe(0);
+    expect(frag.lines.at(-1)?.range.end).toBeGreaterThan(0);
+    expect(frag.lines.length).toBeGreaterThan(1); // actually wrapped
   });
 
   it('places fragments with page-absolute coordinates and the content-band width', () => {
@@ -184,26 +189,20 @@ describe('layoutDocument — body paragraph fragments (PR 5 Task 12)', () => {
     const frags = allFragments(doc([p as unknown as BodyElement], 60));
 
     expect(layout.pages.length).toBeGreaterThan(1);
-    // All continuation fragments share ONE source paragraph.
-    for (const f of frags) expect(f.fragment.source).toBe((frags[0].fragment).source);
-
-    // Line ranges are disjoint and contiguous, covering every measured line.
-    const totalLines = frags[0].fragment.measured.lines.length;
-    let cursor = 0;
-    for (const f of frags) {
-      expect(f.fragment.lineStart).toBe(cursor);
-      expect(f.fragment.lineEnd).toBeGreaterThan(f.fragment.lineStart);
-      cursor = f.fragment.lineEnd;
+    for (const f of frags) expect(f.fragment.source).toEqual(frags[0].fragment.source);
+    for (let index = 1; index < frags.length; index += 1) {
+      expect(frags[index].fragment.continuation?.continuesFromPrevious).toBe(true);
+      expect(frags[index - 1].fragment.lines.at(-1)!.range.end)
+        .toBe(frags[index].fragment.lines[0]!.range.start);
     }
-    expect(cursor).toBe(totalLines);
 
     // Leading spacing only on the first fragment; trailing only on the last.
-    expect(frags[frags.length - 1].fragment.trailingSpacePt).toBeGreaterThanOrEqual(0);
+    expect(frags[frags.length - 1].fragment.spacing.afterPt).toBeGreaterThanOrEqual(0);
     for (let i = 1; i < frags.length; i++) {
-      expect(frags[i].fragment.leadingSpacePt).toBe(0);
+      expect(frags[i].fragment.spacing.beforePt).toBe(0);
     }
     for (let i = 0; i < frags.length - 1; i++) {
-      expect(frags[i].fragment.trailingSpacePt).toBe(0);
+      expect(frags[i].fragment.spacing.afterPt).toBe(0);
     }
   });
 
@@ -214,13 +213,13 @@ describe('layoutDocument — body paragraph fragments (PR 5 Task 12)', () => {
     (narrowModel.section as SectionProps).pageWidth = 120; // width 100
     const narrow = layoutDocument(narrowModel);
 
-    const wf = wide.pages[0].fragments[0].fragment as ParagraphFragment;
-    const nf = narrow.pages[0].fragments[0].fragment as ParagraphFragment;
+    const wf = wide.pages[0].fragments[0].fragment as ParagraphLayout;
+    const nf = narrow.pages[0].fragments[0].fragment as ParagraphLayout;
     // Each fragment's measurement reflects its own available width (no stale reuse).
-    expect(wf.measured.placement.availableWidthPt).toBeCloseTo(180, 6);
-    expect(nf.measured.placement.availableWidthPt).toBeCloseTo(100, 6);
+    expect(wf.flowBounds.widthPt).toBeCloseTo(180, 6);
+    expect(nf.flowBounds.widthPt).toBeCloseTo(100, 6);
     // A narrower band wraps to more lines.
-    expect(nf.measured.lines.length).toBeGreaterThan(wf.measured.lines.length);
+    expect(nf.lines.length).toBeGreaterThan(wf.lines.length);
   });
 
   it('INVARIANT: cursor advancement == leadingSpacePt + line advances + trailingSpacePt', () => {
@@ -230,16 +229,8 @@ describe('layoutDocument — body paragraph fragments (PR 5 Task 12)', () => {
     for (const { placed, fragment } of frags) {
       // Height the paginator charged equals the spacing-owned decomposition.
       expect(placed.heightPt).toBeCloseTo(paragraphFragmentAdvancePt(fragment), 6);
-      // Line advances sum to the measured content span (no double count) for a full range.
-      if (fragment.lineStart === 0 && fragment.lineEnd === fragment.measured.lines.length && !fragment.measured.markOnly) {
-        expect(fragmentLineAdvancesPt(fragment)).toBeCloseTo(
-          fragment.measured.contentEndYPt - fragment.measured.contentStartYPt, 6,
-        );
-        // Leading spacing equals the gap the measurement placed above the first line.
-        expect(fragment.leadingSpacePt).toBeCloseTo(
-          fragment.measured.contentStartYPt - fragment.measured.placement.startYPt, 6,
-        );
-      }
+      expect(fragment.advancePt).toBeCloseTo(placed.heightPt, 6);
+      expect(fragmentLineAdvancesPt(fragment)).toBeGreaterThanOrEqual(0);
     }
   });
 

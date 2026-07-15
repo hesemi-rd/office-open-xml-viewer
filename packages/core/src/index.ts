@@ -114,6 +114,12 @@ export {
 } from './shape/custgeom-endpoints';
 export { hexToRgba, relativeLuma, autoContrastColor, resolveFill, applyStroke } from './shape/paint';
 export { buildShapePath, drawStar, drawPolygon, ooxmlArcTo } from './shape/preset';
+export {
+  paintDrawingMLShape,
+  type DrawingMLShapeFill,
+  type DrawingMLShapeGeometry,
+  type DrawingMLShapePaintPlan,
+} from './shape/drawingml-shape';
 export { drawArrowHead, lineEndRetract, retractLineEndpoint } from './shape/arrow';
 // Shared embedded-SVG decoder (Microsoft asvg:svgBlip extension) — used by all
 // three renderers to prefer the vector original over the raster fallback.

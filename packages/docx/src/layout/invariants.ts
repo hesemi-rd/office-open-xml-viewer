@@ -3,6 +3,7 @@ import { orderedPagePaintNodes, pageLayerNodes, PageGraphError } from './page-gr
 import type {
   DeepReadonly,
   DocumentLayout,
+  DrawingPaintCommand,
   DrawingLayout,
   FlowDomain,
   LayoutRect,
@@ -91,6 +92,49 @@ function requireRect(rect: LayoutRect, path: string): void {
   }
 }
 
+function requireDrawingMLShapePlan(
+  command: Extract<DrawingPaintCommand, { kind: 'drawingml-shape' }>,
+  path: string,
+): void {
+  const { plan } = command;
+  assertPlainData(plan, `${path}.plan`);
+  requireFinite(plan.rect.x, `${path}.plan.rect.x`);
+  requireFinite(plan.rect.y, `${path}.plan.rect.y`);
+  requireFinite(plan.rect.w, `${path}.plan.rect.w`);
+  requireFinite(plan.rect.h, `${path}.plan.rect.h`);
+  if (plan.rect.w < 0 || plan.rect.h < 0) {
+    throw new LayoutInvariantError('INVALID_GEOMETRY', `${path}.plan.rect has a negative extent`);
+  }
+  requireFinite(plan.transform.rotationDeg, `${path}.plan.transform.rotationDeg`);
+  if (plan.geometry.kind === 'preset') {
+    if (plan.geometry.name.length === 0) {
+      throw new LayoutInvariantError('INVALID_GEOMETRY', `${path}.plan.geometry.name is empty`);
+    }
+    plan.geometry.adjustments.forEach((adjustment, index) => {
+      if (adjustment !== null) {
+        requireFinite(adjustment, `${path}.plan.geometry.adjustments[${index}]`);
+      }
+    });
+  } else {
+    plan.geometry.subpaths.forEach((subpath, subpathIndex) => {
+      subpath.forEach((pathCommand, commandIndex) => {
+        if (pathCommand.cmd.length === 0) {
+          throw new LayoutInvariantError(
+            'INVALID_GEOMETRY',
+            `${path}.plan.geometry.subpaths[${subpathIndex}][${commandIndex}].cmd is empty`,
+          );
+        }
+      });
+    });
+  }
+  if (plan.stroke) {
+    requireFinite(plan.stroke.width, `${path}.plan.stroke.width`);
+    if (plan.stroke.width < 0) {
+      throw new LayoutInvariantError('INVALID_GEOMETRY', `${path}.plan.stroke.width is negative`);
+    }
+  }
+}
+
 function overlaps(a: LayoutRect, b: LayoutRect): boolean {
   return a.xPt < b.xPt + b.widthPt
     && b.xPt < a.xPt + a.widthPt
@@ -116,15 +160,40 @@ function requireDrawingGeometry(node: DrawingLayout, path: string): void {
     node.clip.points.forEach((point, index) => requirePoint(point, `${path}.clip.points[${index}]`));
   }
   node.commands.forEach((command, index) => {
-    requireRect(command.rect, `${path}.commands[${index}].rect`);
+    const commandPath = `${path}.commands[${index}]`;
+    if (command.kind === 'noop') return;
+    if (command.kind === 'drawingml-shape') {
+      requireDrawingMLShapePlan(command, commandPath);
+      return;
+    }
+    requireRect(command.rect, `${commandPath}.rect`);
     if (command.kind === 'stroke-rect') {
-      requireFinite(command.lineWidthPt, `${path}.commands[${index}].lineWidthPt`);
+      requireFinite(command.lineWidthPt, `${commandPath}.lineWidthPt`);
       command.dashPt.forEach((dash, dashIndex) =>
-        requireFinite(dash, `${path}.commands[${index}].dashPt[${dashIndex}]`));
+        requireFinite(dash, `${commandPath}.dashPt[${dashIndex}]`));
     }
     if (command.kind === 'text') {
-      requireFinite(command.fontSizePt, `${path}.commands[${index}].fontSizePt`);
-      requireFinite(command.fontWeight, `${path}.commands[${index}].fontWeight`);
+      requireFinite(command.fontSizePt, `${commandPath}.fontSizePt`);
+      requireFinite(command.fontWeight, `${commandPath}.fontWeight`);
+    }
+    if (command.kind === 'watermark-text') {
+      requireRect(command.sourceBounds, `${commandPath}.sourceBounds`);
+      if (command.sourceBounds.widthPt <= 0 || command.sourceBounds.heightPt <= 0) {
+        throw new LayoutInvariantError(
+          'INVALID_GEOMETRY',
+          `${commandPath}.sourceBounds must have positive extents`,
+        );
+      }
+      requireFinite(command.opacity, `${commandPath}.opacity`);
+      requireFinite(command.rotationDeg, `${commandPath}.rotationDeg`);
+      requireFinite(command.fontSizePt, `${commandPath}.fontSizePt`);
+      if (command.opacity < 0 || command.opacity > 1 || command.fontSizePt <= 0) {
+        throw new LayoutInvariantError('INVALID_GEOMETRY', `${commandPath} has invalid textPath paint metrics`);
+      }
+      command.spans.forEach((span, spanIndex) => {
+        requireFinite(span.advancePt, `${commandPath}.spans[${spanIndex}].advancePt`);
+        requireFinite(span.fontWeight, `${commandPath}.spans[${spanIndex}].fontWeight`);
+      });
     }
   });
 }

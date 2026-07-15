@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { renderShapeText } from './renderer.js';
+import { acquireAndPaintShapeTextBox } from './retained-shape-textbox.test-support.js';
 import type { ShapeRun, ShapeText, ShapeTextRun, TabStop } from './types';
 
 // B2/B5 — text-box (shape) text is now laid out by the MAIN line-layout engine
@@ -69,7 +69,7 @@ function shapeWith(blocks: ShapeText[], w: number, h: number): ShapeRun {
 
 function render(blocks: ShapeText[], w: number, h: number): FillTextEvent[] {
   const { ctx, fillTexts } = makeRecordingCanvas();
-  renderShapeText(shapeWith(blocks, w, h), SHAPE_X, SHAPE_Y, w, h, ctx, SCALE);
+  acquireAndPaintShapeTextBox(shapeWith(blocks, w, h), SHAPE_X, SHAPE_Y, w, h, ctx, SCALE);
   return fillTexts;
 }
 

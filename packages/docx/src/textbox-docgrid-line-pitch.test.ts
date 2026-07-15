@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { measureShapeTextAutoFitHeight, renderShapeText } from './renderer.js';
+import { measureShapeTextAutoFitHeight } from './renderer.js';
+import { acquireAndPaintShapeTextBox } from './retained-shape-textbox.test-support.js';
 import { shapeRenderState } from './line-layout.js';
 import type { RenderState } from './renderer.js';
 import type { ShapeRun, ShapeText } from './types';
@@ -129,9 +130,9 @@ describe('text-box lines snap to the section docGrid line pitch (ECMA-376 §17.6
   const PITCH = 18;      // 360 twips
   const NATURAL = 10;    // mock 1.0×em at 10 pt
 
-  it('renderShapeText snaps each EA line to the grid pitch (was natural, too tight)', () => {
+  it('snaps each EA line to the grid pitch (was natural, too tight)', () => {
     const { ctx, fillTexts } = makeRecordingCanvas();
-    renderShapeText(eaTextbox(), 0, 0, 60, 400, ctx, 1, {}, new Map(),
+    acquireAndPaintShapeTextBox(eaTextbox(), 0, 0, 60, 400, ctx, 1, {}, new Map(),
       stateWithGrid(ctx, { type: 'lines', linePitchPt: PITCH }));
     // Each line occupies exactly one grid cell (18 pt), NOT the 10 pt natural box.
     expect(firstLineHeight(fillTexts)).toBeCloseTo(PITCH, 3);
@@ -139,7 +140,7 @@ describe('text-box lines snap to the section docGrid line pitch (ECMA-376 §17.6
 
   it('is inert when the section declares no line grid (natural spacing preserved)', () => {
     const { ctx, fillTexts } = makeRecordingCanvas();
-    renderShapeText(eaTextbox(), 0, 0, 60, 400, ctx, 1, {}, new Map(),
+    acquireAndPaintShapeTextBox(eaTextbox(), 0, 0, 60, 400, ctx, 1, {}, new Map(),
       stateWithGrid(ctx, { type: 'default', linePitchPt: null }));
     expect(firstLineHeight(fillTexts)).toBeCloseTo(NATURAL, 3);
   });
@@ -167,14 +168,14 @@ describe('text-box lines snap to the section docGrid line pitch (ECMA-376 §17.6
   // the ruby branch keeps the measured 1.0×em glyph box, exactly one 18 pt
   // cell. `line.hasRuby` (built by layoutLines from the run's ruby annotation)
   // must reach lineBoxHeight in BOTH text-box paths.
-  it('renderShapeText keeps a ruby line on its measured glyph box (1 cell), not the design cell count', () => {
+  it('keeps a ruby line on its measured glyph box (1 cell), not the design cell count', () => {
     const { ctx, fillTexts } = makeRecordingCanvas();
-    renderShapeText(rubyTextbox(), 0, 0, 60, 400, ctx, 1, {}, new Map(),
+    acquireAndPaintShapeTextBox(rubyTextbox(), 0, 0, 60, 400, ctx, 1, {}, new Map(),
       stateWithGrid(ctx, { type: 'lines', linePitchPt: PITCH }));
     // Ruby annotations draw at their own y; measure the BASE lines only (18 px
     // mock font). Base baselines are 18 pt apart (1 cell), not 36 (2 cells).
     const baseYs = [...new Set(
-      fillTexts.filter((f) => f.text !== 'るび').map((f) => f.y),
+      fillTexts.filter((f) => !/[るび]/.test(f.text)).map((f) => f.y),
     )].sort((a, b) => a - b);
     expect(baseYs.length).toBeGreaterThanOrEqual(2);
     expect(baseYs[1] - baseYs[0]).toBeCloseTo(PITCH, 3);

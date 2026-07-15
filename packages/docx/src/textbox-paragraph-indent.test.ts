@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { renderShapeText } from './renderer.js';
+import { acquireAndPaintShapeTextBox } from './retained-shape-textbox.test-support.js';
 import type { ShapeRun, ShapeText } from './types';
 
 // ECMA-376 §17.3.1.12 — a text-box paragraph honors its `<w:ind>` left/right/
@@ -58,7 +58,7 @@ const FONTS = { 'Times New Roman': 'roman' };
 
 function render(blocks: ShapeText[]): Call[] {
   const { ctx, calls } = makeRecordingCanvas();
-  renderShapeText(shapeWith(blocks), SHAPE_X, SHAPE_Y, SHAPE_W, SHAPE_H, ctx, SCALE, FONTS);
+  acquireAndPaintShapeTextBox(shapeWith(blocks), SHAPE_X, SHAPE_Y, SHAPE_W, SHAPE_H, ctx, SCALE, FONTS);
   return calls;
 }
 

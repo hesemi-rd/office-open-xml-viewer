@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { renderShapeText } from './renderer.js';
+import { acquireAndPaintShapeTextBox } from './retained-shape-textbox.test-support.js';
 import type { ShapeRun, ShapeText, ShapeTextRun } from './types';
 
 // ECMA-376 §20.1.4.1.17 `<wps:style><a:fontRef>` gives a text box a DEFAULT text
@@ -77,7 +77,7 @@ function shape(blocks: ShapeText[], defaultTextColor?: string): ShapeRun {
 
 function render(s: ShapeRun): FillTextEvent[] {
   const { ctx, fillTexts } = makeRecordingCanvas();
-  renderShapeText(s, SHAPE_X, SHAPE_Y, W, H, ctx, SCALE);
+  acquireAndPaintShapeTextBox(s, SHAPE_X, SHAPE_Y, W, H, ctx, SCALE);
   return fillTexts;
 }
 

@@ -12,10 +12,14 @@ vi.mock('@silurus/ooxml-core', async (importOriginal) => {
   return {
     ...actual,
     getCachedBitmapByPath: vi.fn(async () => null),
+    getCachedSvgImageByPath: vi.fn(async () => {
+      throw new Error('corrupt SVG payload');
+    }),
   };
 });
 
 import { preloadImages, renderDocumentToCanvas } from './renderer';
+import { getCachedBitmapByPath } from '@silurus/ooxml-core';
 import type {
   BodyElement,
   DocParagraph,
@@ -53,6 +57,7 @@ function imageRun(imagePath: string, extra: Partial<ImageRun> = {}): ImageRun {
     heightPt: 30,
     // inline (wp:inline): flows with text and reaches renderInlineImage's draw
     anchor: false,
+    ...extra,
   } as unknown as ImageRun;
 }
 
@@ -162,5 +167,55 @@ describe('docx undrawable blip (null base bitmap) is skipped, never crashes', ()
     ).resolves.toBeUndefined();
     // The missing bitmap must not reach the draw path.
     expect(drawImageCount()).toBe(0);
+  });
+
+  it('renderDocumentToCanvas rejects a corrupt image instead of treating it as unsupported', async () => {
+    vi.mocked(getCachedBitmapByPath).mockRejectedValueOnce(new Error('corrupt image payload'));
+    const { canvas } = makeRecordingCanvas();
+    const doc = imageDoc([imageRun('word/media/corrupt.emf')]);
+
+    await expect(
+      renderDocumentToCanvas(doc, canvas, 0, { dpr: 1, width: 400, fetchImage }),
+    ).rejects.toThrow('corrupt image payload');
+  });
+
+  it('preserves a corrupt SVG error when its raster fallback is legitimately undrawable', async () => {
+    const doc = imageDoc([imageRun('word/media/fallback.emf', {
+      svgImagePath: 'word/media/corrupt.svg',
+    })]);
+
+    await expect(preloadImages(doc, fetchImage)).rejects.toThrow('corrupt SVG payload');
+  });
+
+  it('accepts a drawable raster fallback after the preferred SVG decode fails', async () => {
+    const raster = { width: 2, height: 2 } as unknown as ImageBitmap;
+    vi.mocked(getCachedBitmapByPath).mockResolvedValueOnce(raster);
+    const path = 'word/media/fallback.png';
+    const doc = imageDoc([imageRun(path, {
+      mimeType: 'image/png',
+      svgImagePath: 'word/media/corrupt.svg',
+    })]);
+
+    await expect(preloadImages(doc, fetchImage)).resolves.toEqual(new Map([[path, raster]]));
+  });
+
+  it('suppresses a late corrupt-image rejection after a newer render owns the canvas', async () => {
+    let rejectDecode: ((reason?: unknown) => void) | undefined;
+    vi.mocked(getCachedBitmapByPath).mockImplementationOnce(() => new Promise((_, reject) => {
+      rejectDecode = reject;
+    }));
+    const { canvas } = makeRecordingCanvas();
+    const stale = renderDocumentToCanvas(
+      imageDoc([imageRun('word/media/late-corrupt.emf')]),
+      canvas,
+      0,
+      { dpr: 1, width: 400, fetchImage },
+    );
+    await vi.waitFor(() => expect(getCachedBitmapByPath).toHaveBeenCalled());
+
+    await renderDocumentToCanvas(imageDoc([]), canvas, 0, { dpr: 1, width: 400, fetchImage });
+    rejectDecode?.(new Error('late corrupt image payload'));
+
+    await expect(stale).resolves.toBeUndefined();
   });
 });

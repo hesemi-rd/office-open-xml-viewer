@@ -1,0 +1,122 @@
+import { describe, expect, it } from 'vitest';
+import type { ParagraphLayoutContext } from '../layout-context.js';
+import type { ShapeRun } from '../types.js';
+import type { DocxDocumentModel } from '../types.js';
+import { createLayoutServices } from '../renderer.js';
+import { paintPlacedTextBoxLayout } from '../paint/canvas-text.js';
+import type { CanvasPaintResourcePainter } from '../paint/types.js';
+import { acquireShapeTextBoxLayout } from './paragraph.js';
+
+const context: ParagraphLayoutContext = {
+  lineGrid: { active: false, pitchPt: null },
+  characterGrid: { active: false, deltaPt: 0 },
+  physicalIndentLeftPt: 0, physicalIndentRightPt: 0, firstIndentPt: 0,
+  lineSpacing: null, spaceBeforePt: 0, spaceAfterPt: 0,
+  baseRtl: false, isJustified: false, stretchLastLine: false,
+  tabStops: [], hasRuby: false, hasEastAsianText: false,
+  kinsoku: { enabled: true, lineStartForbidden: new Set(), lineEndForbidden: new Set() },
+  defaultTabPt: 36,
+};
+
+function canvas(): CanvasRenderingContext2D {
+  let font = '10px sans-serif';
+  const ctx = {
+    get font() { return font; }, set font(value: string) { font = value; },
+    fillStyle: '', strokeStyle: '', lineWidth: 1, textAlign: 'left',
+    textBaseline: 'alphabetic', direction: 'ltr', letterSpacing: '0px', fontKerning: 'auto',
+    measureText(text: string) {
+      const size = Number.parseFloat(/([\d.]+)px/u.exec(font)?.[1] ?? '10');
+      return {
+        width: [...text].length * size,
+        fontBoundingBoxAscent: size * .8, fontBoundingBoxDescent: size * .2,
+        actualBoundingBoxAscent: size * .8, actualBoundingBoxDescent: size * .2,
+      } as TextMetrics;
+    },
+    save() {}, restore() {}, translate() {}, rotate() {}, scale() {},
+    setLineDash() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {},
+    fillRect() {}, strokeRect() {}, fillText() {}, drawImage() {}, rect() {}, clip() {},
+  } as unknown as CanvasRenderingContext2D;
+  return ctx;
+}
+
+describe('retained shape text-box acquisition', () => {
+  it('partitions once and paint at scale 1/2 never measures', () => {
+    const measureContext = canvas();
+    const services = createLayoutServices({
+      section: {
+        pageWidth: 612, pageHeight: 792,
+        marginTop: 72, marginRight: 72, marginBottom: 72, marginLeft: 72,
+        headerDistance: 36, footerDistance: 36,
+        titlePage: false, evenAndOddHeaders: false,
+      },
+      body: [], headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+    } as DocxDocumentModel, { measureContext });
+    const shape = {
+      textInsetL: 0, textInsetT: 0, textInsetR: 0, textInsetB: 0,
+      textAnchor: 't', textBlocks: [{
+        text: 'abcdefghij', fontSizePt: 10, color: '112233', alignment: 'left',
+        runs: [{ text: 'abcdefghij', fontSizePt: 10, color: '112233' }],
+      }],
+    } as unknown as ShapeRun;
+    const layout = acquireShapeTextBoxLayout(shape, { xPt: 10, yPt: 20, widthPt: 40, heightPt: 100 }, {
+      id: 'shape', source: { story: 'body', storyInstance: 'body', path: [0, 0] },
+      flowDomainId: 'body', context,
+      measurer: { context: measureContext, fontFamilyClasses: {} },
+      environment: {
+        pageIndex: 0, totalPages: 1, documentHasEastAsianText: false,
+        layoutServices: services,
+      },
+    });
+
+    expect(layout?.paragraphs[0]?.lines.map((line) => line.range)).toEqual([
+      { start: 0, end: 4 }, { start: 4, end: 8 }, { start: 8, end: 10 },
+    ]);
+    const resources: CanvasPaintResourcePainter = { paint() { throw new Error('unexpected resource'); } };
+    for (const scale of [1, 2]) {
+      const paintContext = canvas();
+      paintContext.measureText = () => { throw new Error('paint must not measure'); };
+      expect(() => paintPlacedTextBoxLayout(layout!, {
+        ctx: paintContext, scale, dpr: 1, resources,
+      })).not.toThrow();
+    }
+  });
+
+  it('resolves spAutoFit from the retained line stack during acquisition', () => {
+    const measureContext = canvas();
+    const services = createLayoutServices({
+      section: {
+        pageWidth: 612, pageHeight: 792,
+        marginTop: 72, marginRight: 72, marginBottom: 72, marginLeft: 72,
+        headerDistance: 36, footerDistance: 36,
+        titlePage: false, evenAndOddHeaders: false,
+      },
+      body: [], headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+    } as DocxDocumentModel, { measureContext });
+    const shape = {
+      textAutofit: 'sp',
+      textInsetL: 0, textInsetT: 0, textInsetR: 0, textInsetB: 0,
+      textAnchor: 't', textBlocks: [{
+        text: 'abcdefghij', fontSizePt: 10, color: '112233', alignment: 'left',
+        runs: [{ text: 'abcdefghij', fontSizePt: 10, color: '112233' }],
+      }],
+    } as unknown as ShapeRun;
+    const layout = acquireShapeTextBoxLayout(
+      shape,
+      { xPt: 10, yPt: 20, widthPt: 40, heightPt: 100 },
+      {
+        id: 'autofit-shape', source: { story: 'body', storyInstance: 'body', path: [0, 0] },
+        flowDomainId: 'body', context,
+        measurer: { context: measureContext, fontFamilyClasses: {} },
+        environment: {
+          pageIndex: 0, totalPages: 1, documentHasEastAsianText: false,
+          layoutServices: services,
+        },
+      },
+    );
+
+    expect(layout?.flowBounds).toEqual({ xPt: 10, yPt: 20, widthPt: 40, heightPt: 30 });
+    expect(layout?.contentBounds).toEqual(layout?.flowBounds);
+  });
+});

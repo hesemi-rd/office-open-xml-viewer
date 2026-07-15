@@ -276,14 +276,20 @@ describe('§17.18.44 justify around a fit region (finding 7)', () => {
     // justify pollution on top.
     expect(parseFloat((fit as FillCall).letterSpacing)).toBeCloseTo(40, 6);
 
-    const line1Tail = fills.find((f) => f.text.startsWith('い') && f.y === (fit as FillCall).y);
-    expect(line1Tail, 'line-1 tail of the following run painted').toBeDefined();
-    const tail = line1Tail as FillCall;
-    const cps = [...tail.text].length;
-    const pitch = parseFloat(tail.letterSpacing);
-    // Right edge of the justified line: tail natural + internal pitch must end
-    // at the right margin (590).
-    expect(tail.x + cps * FONT_PX + (cps - 1) * pitch).toBeCloseTo(590, 4);
+    const line1Tail = fills.filter(
+      (operation) => operation.text.includes('い') && operation.y === (fit as FillCall).y,
+    );
+    expect(line1Tail.length, 'line-1 tail of the following run painted').toBeGreaterThan(0);
+    // The retained representation may be one contextual operation or several
+    // positioned slices. Union their transformed ink extents instead of
+    // requiring either representation; the final painted edge is invariant.
+    const rightEdge = Math.max(...line1Tail.map((operation) => {
+      const codePoints = [...operation.text].length;
+      const internalSpacing = Math.max(0, codePoints - 1) * parseFloat(operation.letterSpacing);
+      return operation.translateX
+        + operation.scaleX * (operation.x + codePoints * FONT_PX + internalSpacing);
+    }));
+    expect(rightEdge).toBeCloseTo(590, 4);
   });
 });
 

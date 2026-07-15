@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { renderShapeText, renderDocumentToCanvas } from './renderer.js';
+import { renderDocumentToCanvas } from './renderer.js';
+import { acquireAndPaintShapeTextBox } from './retained-shape-textbox.test-support.js';
 import { SPACE_SHRINK_RATIO } from './line-layout.js';
 import type {
   ShapeRun, ShapeText, ShapeTextRun,
@@ -85,7 +86,7 @@ function block(text: string, extra: Partial<ShapeText> = {}): ShapeText {
 
 function renderShape(blocks: ShapeText[], w: number, h: number, scale = 1): FillTextEvent[] {
   const { ctx, fillTexts } = makeRecordingCanvas();
-  renderShapeText(shapeWith(blocks), SHAPE_X * scale, SHAPE_Y * scale, w * scale, h * scale, ctx, scale);
+  acquireAndPaintShapeTextBox(shapeWith(blocks), SHAPE_X * scale, SHAPE_Y * scale, w * scale, h * scale, ctx, scale);
   return fillTexts;
 }
 

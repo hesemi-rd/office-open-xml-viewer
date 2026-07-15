@@ -44,6 +44,154 @@ function initializeRepository() {
   return root;
 }
 
+const computePagesAcquisitionBaseline = `
+const EMPTY_HEADERS_FOOTERS = {};
+function buildMeasureState(ctx: unknown, section: unknown, fontFamilyClasses: unknown, documentSettings: unknown, resolvedLocalFonts: unknown) { return { ctx, section, fontFamilyClasses, documentSettings, resolvedLocalFonts }; }
+function createLayoutServices(input: unknown, options: unknown) { return { input, options }; }
+function splitParagraphAcrossPages(...args: unknown[]) { return args; }
+function attachBodyParagraphFragment(...args: unknown[]) { return args; }
+function attachTableFragment(...args: unknown[]) { return args; }
+export function computePages(body: unknown[], section: unknown, ctx: unknown, fontFamilyClasses: unknown = {}, footnotes: unknown[] = [], settings?: unknown, resolvedLocalFonts: unknown = {}) {
+  const documentSettings = settings;
+  const measureState = buildMeasureState(ctx, section, fontFamilyClasses, documentSettings, resolvedLocalFonts);
+  const pages: unknown[][] = [[]];
+  const footnoteReservePt: number[] = [];
+  let pageNoteIds = new Set<string>();
+  const stampPageMeta = () => {};
+  const startPageBookkeeping = () => {
+    footnoteReservePt[pages.length - 1] = 0;
+    pageNoteIds = new Set<string>();
+    stampPageMeta();
+  };
+  const para = {};
+  const el = {};
+  const i = 0;
+  splitParagraphAcrossPages(measureState, para, 'tail');
+  attachBodyParagraphFragment(el as PaginatedElementWithLines, para, measureState, {});
+  attachTableFragment(el, el, [], [], 0, measureState, { columnIndex: 0 });
+  attachTableFragment(el, el, [], [], 0, measureState, { columnIndex: 1 });
+  startPageBookkeeping();
+  return pages;
+}
+export function computeTableLayout() { return []; }
+`;
+
+const computePagesAcquisitionMigration = `
+const EMPTY_HEADERS_FOOTERS = {};
+function buildMeasureState(ctx: unknown, section: unknown, fontFamilyClasses: unknown, documentSettings: unknown, resolvedLocalFonts: unknown, services?: LayoutServices, options?: LayoutOptions) { return { ctx, section, fontFamilyClasses, documentSettings, resolvedLocalFonts, services, options }; }
+function createLayoutServices(input: unknown, options: unknown) { return { input, options }; }
+function splitParagraphAcrossPages(...args: unknown[]) { return args; }
+function attachBodyParagraphFragment(...args: unknown[]) { return args; }
+function attachTableFragment(...args: unknown[]) { return args; }
+export function computePages(body: unknown[], section: unknown, ctx: unknown, fontFamilyClasses: unknown = {}, footnotes: unknown[] = [], settings?: unknown, resolvedLocalFonts: unknown = {}, layoutServices?: LayoutServices, layoutOptions?: LayoutOptions) {
+  const documentSettings = settings;
+  const effectiveLayoutServices = layoutServices ?? createLayoutServices({
+    section,
+    body,
+    headers: EMPTY_HEADERS_FOOTERS,
+    footers: EMPTY_HEADERS_FOOTERS,
+    ...(settings === undefined ? {} : { settings }),
+    ...(footnotes.length === 0 ? {} : { footnotes }),
+    fontFamilyClasses,
+  }, {
+    measureContext: ctx,
+    localMetrics: resolvedLocalFonts,
+  });
+  const measureState = buildMeasureState(ctx, section, fontFamilyClasses, documentSettings, resolvedLocalFonts, effectiveLayoutServices, layoutOptions);
+  const pages: unknown[][] = [[]];
+  const footnoteReservePt: number[] = [];
+  let pageNoteIds = new Set<string>();
+  const stampPageMeta = () => {};
+  const startPageBookkeeping = () => {
+    footnoteReservePt[pages.length - 1] = 0;
+    pageNoteIds = new Set<string>();
+    measureState.pageIndex = pages.length - 1;
+    measureState.displayPageNumber = undefined;
+    stampPageMeta();
+  };
+  const para = {};
+  const el = {};
+  const i = 0;
+  splitParagraphAcrossPages(measureState, para, i, 'tail');
+  attachBodyParagraphFragment(el, para, i, measureState, {});
+  attachTableFragment(el, el, [], [], 0, measureState, { columnIndex: 0, sourcePath: [i] });
+  attachTableFragment(el, el, [], [], 0, measureState, { columnIndex: 1, sourcePath: [i] });
+  startPageBookkeeping();
+  return pages;
+}
+export function computeTableLayout() { return []; }
+`;
+
+function initializeComputePagesAcquisitionRepository() {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-compute-pages-'));
+  write(root, 'packages/docx/src/renderer.ts', computePagesAcquisitionBaseline);
+  write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
+  write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
+  git(root, 'init', '-b', 'main');
+  git(root, 'config', 'user.email', 'boundary-test@example.invalid');
+  git(root, 'config', 'user.name', 'Boundary Test');
+  git(root, 'add', '.');
+  git(root, 'commit', '-m', 'base');
+  git(root, 'switch', '-c', 'a1');
+  establishA1Baseline(root);
+  return root;
+}
+
+const tablePaintGateBaseline = `
+const fragmentPaintEnabled = true;
+function tableRequiresLegacyPaint(table: any) { return table.legacy; }
+export function isFragmentPaintableTable(table: any, placed: any, state: any): boolean {
+  if (
+    !fragmentPaintEnabled ||
+    placed === undefined ||
+    placed.fragment.kind !== 'table' ||
+    table.tblpPr != null ||
+    state.verticalCJK ||
+    tableRequiresLegacyPaint(table)
+  ) return false;
+  const bandPt = table.fragmentBand;
+  if (bandPt === undefined) return false;
+  const paintBandPt = state.contentW / state.scale;
+  return Math.abs(bandPt - paintBandPt) <= 1e-6 * Math.max(1, Math.abs(paintBandPt));
+}
+`;
+
+const tablePaintGateMigration = tablePaintGateBaseline
+  .replace('const fragmentPaintEnabled = true;\n', '')
+  .replace('    !fragmentPaintEnabled ||\n', '');
+
+function initializeTablePaintGateRepository(pruneDeletedFlag = true) {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-table-gate-'));
+  write(root, 'packages/docx/src/renderer.ts', tablePaintGateBaseline);
+  write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
+  write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
+  git(root, 'init', '-b', 'main');
+  git(root, 'config', 'user.email', 'boundary-test@example.invalid');
+  git(root, 'config', 'user.name', 'Boundary Test');
+  git(root, 'add', '.');
+  git(root, 'commit', '-m', 'base');
+  git(root, 'switch', '-c', 'a1');
+  establishA1Baseline(root);
+  if (pruneDeletedFlag) {
+    const baselinePath = join(root, 'scripts/docx-layout-boundary-baseline.json');
+    const baseline = JSON.parse(readFileSync(baselinePath, 'utf8'));
+    for (const group of [
+      'legacySymbolCounts',
+      'migrationIdentifierCounts',
+      'legacyDeclarationHashes',
+    ]) {
+      for (const key of Object.keys(baseline[group])) {
+        if (key.includes('fragmentPaintEnabled')) delete baseline[group][key];
+      }
+    }
+    baseline.nonLayoutDeclarationKeys = baseline.nonLayoutDeclarationKeys.filter(
+      (key) => !key.includes('fragmentPaintEnabled'),
+    );
+    writeFileSync(baselinePath, `${JSON.stringify(baseline, null, 2)}\n`);
+  }
+  return root;
+}
+
 function initializeLayoutParserBoundaryRepository() {
   const root = mkdtempSync(join(tmpdir(), 'docx-layout-parser-boundary-'));
   write(root, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
@@ -117,6 +265,26 @@ function establishA1Baseline(root) {
   git(root, 'switch', '-c', 'a2');
 }
 
+test('allows a migrated legacy declaration to be deleted from source and baseline', () => {
+  const root = initializeShapeRepository();
+  write(root, 'packages/docx/src/renderer.ts', 'function buildFont(bold: boolean, italic: boolean, size: number, family: string | null, classes: Record<string, string>) { return String([bold, italic, size, family, classes]); }\n');
+  const baselinePath = join(root, 'scripts/docx-layout-boundary-baseline.json');
+  const baseline = JSON.parse(readFileSync(baselinePath, 'utf8'));
+  for (const group of ['legacySymbolCounts', 'migrationIdentifierCounts', 'legacyDeclarationHashes']) {
+    for (const key of Object.keys(baseline[group])) {
+      if (key.includes('renderShapeText')) delete baseline[group][key];
+    }
+  }
+  baseline.nonLayoutDeclarationKeys = baseline.nonLayoutDeclarationKeys.filter(
+    (key) => !key.includes('renderShapeText'),
+  );
+  writeFileSync(baselinePath, `${JSON.stringify(baseline, null, 2)}\n`);
+
+  const result = runChecker(root, '--base-ref', 'main');
+
+  assert.equal(result.status, 0, result.output);
+});
+
 test('rejects a transitive paint edge to a measurement module', () => {
   const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-edge-'));
   write(root, 'packages/docx/src/renderer.ts', 'export const adapter = true;\n');
@@ -169,6 +337,31 @@ test('rejects transitive layout-to-parser-model bridge modules', () => {
     result.output,
     /layout\/numbering-marker\.ts.*parser-bridge\.ts.*parser-model\.ts/s,
   );
+});
+
+test('allows retained and legacy layout to share parser-independent primitives', () => {
+  const root = initializeLayoutParserBoundaryRepository();
+  write(
+    root,
+    'packages/docx/src/line-layout-primitives.ts',
+    'export const nextTabStop = () => 36;\n',
+  );
+  write(
+    root,
+    'packages/docx/src/line-layout.ts',
+    "import { nextTabStop } from './line-layout-primitives.js';\n"
+      + 'export const measuredLine = nextTabStop();\n',
+  );
+  write(
+    root,
+    'packages/docx/src/layout/numbering-marker.ts',
+    "import { nextTabStop } from '../line-layout-primitives.js';\n"
+      + 'export const markerStop = nextTabStop();\n',
+  );
+
+  const result = runChecker(root, '--final');
+
+  assert.equal(result.status, 0, result.output);
 });
 
 test('rejects literal dynamic and CommonJS layout-to-parser-model bridges', () => {
@@ -355,10 +548,41 @@ test('allows only named shared atomic painters from core', () => {
   write(root, 'packages/docx/src/paint/canvas-page.ts', "import { canvasFontString } from '@silurus/ooxml-core';\nexport { canvasFontString };\n");
   assert.equal(runChecker(root, '--final').status, 0);
 
+  write(root, 'packages/docx/src/paint/canvas-page.ts', "import { drawImageCropped } from '@silurus/ooxml-core';\nexport { drawImageCropped };\n");
+  assert.equal(runChecker(root, '--final').status, 0);
+
+  write(root, 'packages/docx/src/paint/canvas-page.ts', "import { paintDrawingMLShape } from '@silurus/ooxml-core';\nexport { paintDrawingMLShape };\n");
+  assert.equal(runChecker(root, '--final').status, 0);
+
+  write(root, 'packages/docx/src/paint/canvas-page.ts', "import { autoContrastColor } from '@silurus/ooxml-core';\nexport { autoContrastColor };\n");
+  assert.equal(runChecker(root, '--final').status, 0);
+
+  write(root, 'packages/docx/src/paint/canvas-page.ts', "import { resolveFill } from '@silurus/ooxml-core';\nexport { resolveFill };\n");
+  assert.equal(runChecker(root, '--final').status, 0);
+
+  for (const name of ['crispOffset', 'doubleRailGeometry', 'fillDoubleBorder']) {
+    write(
+      root,
+      'packages/docx/src/paint/canvas-page.ts',
+      `import { ${name} } from '@silurus/ooxml-core';\nvoid ${name};\n`,
+    );
+    assert.equal(runChecker(root, '--final').status, 0, name);
+  }
+
+  write(root, 'packages/docx/src/paint/canvas-page.ts', "import type { HyperlinkTarget } from '@silurus/ooxml-core';\nexport type Target = HyperlinkTarget;\n");
+  assert.equal(runChecker(root, '--final').status, 0);
+
   for (const source of [
     "import { createCanvasFontRoute } from '@silurus/ooxml-core';\nexport { createCanvasFontRoute };\n",
+    "import { resolveFill as localFill } from '@silurus/ooxml-core';\nexport { localFill };\n",
+    "import type { CanvasFontRoute } from '@silurus/ooxml-core';\nexport type Route = CanvasFontRoute;\n",
+    "import { HyperlinkTarget } from '@silurus/ooxml-core';\nexport { HyperlinkTarget };\n",
+    "import type { renderChart } from '@silurus/ooxml-core';\nexport type Renderer = typeof renderChart;\n",
     "import { canvasFontString as fontString } from '@silurus/ooxml-core';\nexport { fontString };\n",
+    "import { crispOffset as snap } from '@silurus/ooxml-core';\nvoid snap;\n",
     "import * as core from '@silurus/ooxml-core';\nexport { core };\n",
+    "import { measureTextWidth } from '@silurus/ooxml-core';\nvoid measureTextWidth;\n",
+    "export { fillDoubleBorder } from '@silurus/ooxml-core';\n",
     "export const load = () => import('@silurus/ooxml-core');\n",
   ]) {
     write(root, 'packages/docx/src/paint/canvas-page.ts', source);
@@ -371,6 +595,49 @@ test('allows only named shared atomic painters from core', () => {
   const result = runChecker(root, '--final');
   assert.notEqual(result.status, 0);
   assert.match(result.output, /FORBIDDEN_PAINT_EDGE/);
+});
+
+test('rejects forbidden core APIs reached through a paint helper', () => {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-shared-paint-transitive-'));
+  write(root, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
+  write(root, 'packages/docx/src/paint/canvas-page.ts', "import { paint } from './helper.js';\nvoid paint;\n");
+  write(root, 'packages/docx/src/paint/helper.ts', "import { measureTextWidth } from '@silurus/ooxml-core';\nexport const paint = measureTextWidth;\n");
+
+  const result = runChecker(root, '--final');
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.output, /FORBIDDEN_PAINT_EDGE/);
+  assert.match(result.output, /canvas-page\.ts.*helper\.ts.*@silurus\/ooxml-core/s);
+});
+
+test('keeps layout-only border treatment outside the paint dependency graph', () => {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-border-treatment-'));
+  write(root, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
+  write(root, 'packages/docx/src/layout/types.ts', 'export interface Layout { pages: number; }\n');
+  write(root, 'packages/docx/src/layout/border-treatment.ts', "import { docxBorderDashArray } from '@silurus/ooxml-core';\nexport const treatment = docxBorderDashArray('dotDash', 1);\n");
+  write(root, 'packages/docx/src/layout/paragraph.ts', "import { treatment } from './border-treatment.js';\nexport const paragraph = treatment;\n");
+  write(root, 'packages/docx/src/paint/canvas-page.ts', "import type { Layout } from '../layout/types.js';\nexport type Page = Layout;\n");
+
+  const result = runChecker(root, '--final');
+
+  assert.equal(result.status, 0, result.output);
+});
+
+test('rejects paint dependencies on layout resource implementations even when type-only', () => {
+  for (const source of [
+    "import { createPaintResourceRegistry } from '../layout/paint-resources.js';\nexport const registry = createPaintResourceRegistry([]);\n",
+    "import type { PaintResourceRegistry } from '../layout/paint-resources.js';\nexport type Registry = PaintResourceRegistry;\n",
+  ]) {
+    const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-resource-owner-'));
+    write(root, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
+    write(root, 'packages/docx/src/layout/paint-resources.ts', 'export interface PaintResourceRegistry {}\nexport function createPaintResourceRegistry() {}\n');
+    write(root, 'packages/docx/src/paint/canvas-page.ts', source);
+
+    const result = runChecker(root, '--final');
+
+    assert.notEqual(result.status, 0, source);
+    assert.match(result.output, /FORBIDDEN_PAINT_EDGE/, source);
+  }
 });
 
 test('audits dependencies of the retained page graph allowed in paint', () => {
@@ -412,6 +679,336 @@ test('rejects computed measurement access in paint and display inputs in layout 
   const layoutResult = runChecker(layoutRoot, '--final');
   assert.notEqual(layoutResult.status, 0);
   assert.match(layoutResult.output, /LAYOUT_DISPLAY_CAPABILITY/);
+});
+
+test('rejects layout acquisition from the retained body paint adapter', () => {
+  for (const call of [
+    'layoutLines()',
+    'measureParagraph()',
+    'ctx.measureText()',
+    "ctx['measureText']()",
+    'buildSegments()',
+    'contextualSpacingAdjust()',
+    'estimateParagraphHeight()',
+    'paragraphLayoutFromMeasurement()',
+    'paragraphGapAdjustment()',
+    'parasShareBorderBox()',
+    'resolveParagraphBorderEdges()',
+    'acquireParagraphLayout()',
+    'acquireRetainedFrameGroup()',
+    'renderFrameParagraph()',
+    'renderParagraph()',
+    'services.resolveFrameBox()',
+  ]) {
+    const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-body-paint-'));
+    write(
+      root,
+      'packages/docx/src/renderer.ts',
+      `function renderBodyElements(elements: any[]) { for (const el of elements) { if (el.type === 'paragraph') { ${call}; } } }\n`,
+    );
+    write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
+
+    const result = runChecker(root, '--final');
+
+    assert.notEqual(result.status, 0, call);
+    assert.match(result.output, /BODY_PAINT_LAYOUT_CAPABILITY/, call);
+  }
+});
+
+test('rejects aliased, computed, and unresolved calls from retained body paint', () => {
+  const renderers = [
+    `import { measureParagraph as paintRetainedParagraph } from './paragraph-measure.js';
+     function renderBodyElements(elements: any[]) {
+       for (const el of elements) if (el.type === 'paragraph') paintRetainedParagraph();
+     }`,
+    `const paintRetainedParagraph = measureParagraph;
+     function renderBodyElements(elements: any[]) {
+       for (const el of elements) if (el.type === 'paragraph') paintRetainedParagraph();
+     }`,
+    `const paintRetainedParagraph = layout.measureParagraph;
+     function renderBodyElements(elements: any[]) {
+       for (const el of elements) if (el.type === 'paragraph') paintRetainedParagraph();
+     }`,
+    `const { measureParagraph: paintRetainedParagraph } = layout;
+     function renderBodyElements(elements: any[]) {
+       for (const el of elements) if (el.type === 'paragraph') paintRetainedParagraph();
+     }`,
+    `const operations = { paintPlacedParagraphLayout: measureParagraph };
+     function renderBodyElements(elements: any[]) {
+       for (const el of elements) if (el.type === 'paragraph') operations.paintPlacedParagraphLayout();
+     }`,
+    `const operations = { paintPlacedParagraphLayout: measureParagraph };
+     const { paintPlacedParagraphLayout: paintRetainedParagraph } = operations;
+     function renderBodyElements(elements: any[]) {
+       for (const el of elements) if (el.type === 'paragraph') paintRetainedParagraph();
+     }`,
+    `function renderBodyElements(elements: any[]) {
+       for (const el of elements) if (el.type === 'paragraph') layout['measure' + 'Paragraph']();
+     }`,
+    `const operation = 'measureParagraph';
+     function renderBodyElements(elements: any[]) {
+       for (const el of elements) if (el.type === 'paragraph') layout[operation]();
+     }`,
+    `function paintPlacedParagraphLayout() { measureParagraph(); }
+     function renderBodyElements(elements: any[]) {
+       for (const el of elements) if (el.type === 'paragraph') paintPlacedParagraphLayout();
+     }`,
+    `function bodyFragmentFor() { measureParagraph(); }
+     function renderBodyElements(elements: any[]) {
+       for (const el of elements) if (el.type === 'paragraph') bodyFragmentFor();
+     }`,
+    `import { paintPlacedParagraphLayout } from './paragraph-measure.js';
+     function renderBodyElements(elements: any[]) {
+       for (const el of elements) if (el.type === 'paragraph') paintPlacedParagraphLayout();
+     }`,
+    `function renderBodyElements(elements: any[]) {
+       for (const el of elements) if (el.type === 'paragraph') layout.save();
+     }`,
+    `function renderBodyElements(elements: any[]) {
+       for (const el of elements) if (el.type === 'paragraph') opaquePaint();
+     }`,
+  ];
+
+  for (const renderer of renderers) {
+    const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-body-paint-alias-'));
+    write(root, 'packages/docx/src/renderer.ts', renderer);
+    write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
+
+    const result = runChecker(root, '--final');
+
+    assert.notEqual(result.status, 0, renderer);
+    assert.match(result.output, /BODY_PAINT_LAYOUT_CAPABILITY/, renderer);
+  }
+});
+
+test('rejects body fragment lookup receivers that can override the canonical WeakMap get', () => {
+  const spoofedReceivers = [
+    `const bodyFlowFragments = {
+      get(_element: object) { measureParagraph(); }
+    };`,
+    `const bodyFlowFragments = Object.assign(new WeakMap<object, unknown>(), {
+      ...{ get(_element: object) { measureParagraph(); } }
+    });`,
+    `const bodyFlowFragments = Object.assign(new WeakMap<object, unknown>(), {
+      [['g'][0] + 'et'](_element: object) { measureParagraph(); }
+    });`,
+    `const bodyFlowFragments = Object.assign(new WeakMap<object, unknown>(), {
+      get sourceIndices() { measureParagraph(); return new WeakMap<object, number>(); }
+    });`,
+    `const bodyFlowFragments = Object.assign(new WeakMap<object, unknown>(), {
+      sourceIndices: { get(_element: object) { measureParagraph(); } }
+    });`,
+    `const bodyFlowFragments = Object.freeze(Object.assign(new WeakMap<object, unknown>(), {
+      sourceIndices: (() => new WeakMap<object, number>())(),
+      framePlacement: new WeakMap<object, unknown>(),
+    }));`,
+    `const bodyFlowFragments = Object.freeze(Object.assign(new WeakMap<object, unknown>(), {
+      sourceIndices: new WeakMap<object, number>(),
+      framePlacement: new WeakMap<object, unknown>(),
+      extraSidecar: new WeakMap<object, unknown>(),
+    }));`,
+    `const bodyFlowFragments = Object.freeze(Object.assign(new WeakMap<object, unknown>(), {
+      sourceIndices: new WeakMap<object, number>(),
+    }));`,
+    `const bodyFlowFragments = Object.freeze(Object.assign(new WeakMap<object, unknown>(), {
+      sourceIndices: new WeakMap<object, number>(),
+      sourceIndices: new WeakMap<object, number>(),
+    }));`,
+  ];
+  for (const receiver of spoofedReceivers) {
+    const root = initializeRepository();
+    const retainedBody = (mapDeclaration) => `${mapDeclaration}
+      function bodyFragmentFor(element: object) { return bodyFlowFragments.get(element); }
+      function renderBodyElements(elements: any[]) {
+        for (const el of elements) {
+          if (el.type === 'paragraph') bodyFragmentFor(el);
+        }
+      }
+    `;
+    write(
+      root,
+      'packages/docx/src/renderer.ts',
+      retainedBody(`const bodyFlowFragments = Object.freeze(Object.assign(
+        new WeakMap<object, unknown>(),
+        {
+          sourceIndices: new WeakMap<object, number>(),
+          framePlacement: new WeakMap<object, unknown>(),
+        },
+      ));`),
+    );
+    establishA1Baseline(root);
+    write(root, 'packages/docx/src/renderer.ts', retainedBody(receiver));
+
+    const result = runChecker(root, '--base-ref', 'main');
+
+    assert.notEqual(result.status, 0, receiver);
+    assert.match(result.output, /BODY_PAINT_LAYOUT_CAPABILITY/, receiver);
+  }
+});
+
+test('rejects mutable body fragment receivers whose authority changes after initialization', () => {
+  const mutations = [
+    { frozen: false, declaration: 'const', source: `bodyFlowFragments.get = (_element: object) => {
+      measureParagraph();
+      return undefined;
+    };` },
+    { frozen: false, declaration: 'const', source: `Object.defineProperty(bodyFlowFragments, 'get', {
+      value: (_element: object) => {
+        measureParagraph();
+        return undefined;
+      },
+    });` },
+    { frozen: true, declaration: 'let', source: `bodyFlowFragments = {
+      get(_element: object) { measureParagraph(); }
+    } as unknown as typeof bodyFlowFragments;` },
+  ];
+  for (const mutation of mutations) {
+    const root = initializeRepository();
+    const retainedBody = (declaration, frozen, extra = '') => `
+      ${declaration} bodyFlowFragments = ${frozen ? 'Object.freeze(' : ''}Object.assign(new WeakMap<object, unknown>(), {
+        sourceIndices: new WeakMap<object, number>(),
+        framePlacement: new WeakMap<object, unknown>(),
+      })${frozen ? ')' : ''};
+      ${extra}
+      function bodyFragmentFor(element: object) { return bodyFlowFragments.get(element); }
+      function renderBodyElements(elements: any[]) {
+        for (const el of elements) {
+          if (el.type === 'paragraph') bodyFragmentFor(el);
+        }
+      }
+    `;
+    write(root, 'packages/docx/src/renderer.ts', retainedBody('const', true));
+    establishA1Baseline(root);
+    write(
+      root,
+      'packages/docx/src/renderer.ts',
+      retainedBody(mutation.declaration, mutation.frozen, mutation.source),
+    );
+
+    const result = runChecker(root, '--base-ref', 'main');
+
+    assert.notEqual(result.status, 0, mutation.source);
+    assert.match(result.output, /BODY_PAINT_LAYOUT_CAPABILITY/, mutation.source);
+  }
+});
+
+test('rejects transitive layout acquisition from a local body paragraph paint helper', () => {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-body-paint-transitive-'));
+  write(
+    root,
+    'packages/docx/src/renderer.ts',
+    `function renderBodyElements(elements: any[]) {
+      const paintRetainedParagraph = () => paintBodyParagraph();
+      for (const el of elements) {
+        if (el.type === 'paragraph') paintRetainedParagraph();
+        else if (el.type === 'table') renderTable();
+      }
+    }
+    function paintBodyParagraph() { acquireParagraphLayout(); }
+    function renderTable() { measureParagraph(); }
+    `,
+  );
+  write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
+
+  const result = runChecker(root, '--final');
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.output, /BODY_PAINT_LAYOUT_CAPABILITY/);
+  assert.match(result.output, /acquireParagraphLayout/);
+});
+
+test('rejects layout acquisition hidden inside an inline retained-paint callback', () => {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-body-paint-callback-'));
+  write(
+    root,
+    'packages/docx/src/renderer.ts',
+    `function renderBodyElements(elements: any[]) {
+      const paintRetainedParagraph = () => paintPlacedParagraphLayout({
+        deferFrontDrawing: () => measureParagraph(),
+      });
+      for (const el of elements) {
+        if (el.type === 'paragraph') paintRetainedParagraph();
+      }
+    }
+    `,
+  );
+  write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
+
+  const result = runChecker(root, '--final');
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.output, /BODY_PAINT_LAYOUT_CAPABILITY/);
+  assert.match(result.output, /measureParagraph/);
+});
+
+test('follows the else branch of a negated paragraph dispatch', () => {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-body-paint-negated-'));
+  write(
+    root,
+    'packages/docx/src/renderer.ts',
+    `function renderBodyElements(elements: any[]) {
+      for (const el of elements) {
+        if (el.type !== 'paragraph') renderTable();
+        else measureParagraph();
+      }
+    }
+    function renderTable() {}
+    `,
+  );
+  write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
+
+  const result = runChecker(root, '--final');
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.output, /BODY_PAINT_LAYOUT_CAPABILITY/);
+  assert.match(result.output, /measureParagraph/);
+});
+
+test('fails closed when the body paragraph dispatch cannot be audited', () => {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-body-paint-opaque-'));
+  write(root, 'packages/docx/src/renderer.ts', 'function renderBodyElements() { dispatchBody(); }\n');
+  write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
+
+  const result = runChecker(root, '--final');
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.output, /BODY_PAINT_LAYOUT_CAPABILITY/);
+  assert.match(result.output, /no statically auditable paragraph branch/);
+});
+
+test('allows the exact frozen production fragment map and retained paragraph paint boundary', () => {
+  const root = initializeRepository();
+  write(
+    root,
+    'packages/docx/src/renderer.ts',
+    `import { paintPlacedParagraphLayout as retainedPaint } from './paint/canvas-text.js';
+    const paintOperations = { paintPlacedParagraphLayout: retainedPaint };
+    const { paintPlacedParagraphLayout } = paintOperations;
+    const bodyFlowFragments = Object.freeze(Object.assign(new WeakMap(), {
+      sourceIndices: new WeakMap(),
+      framePlacement: new WeakMap(),
+    }));
+    function bodyFragmentFor(element: object) { return bodyFlowFragments.get(element); }
+    function paintRetainedParagraph(element: object) {
+      bodyFragmentFor(element);
+      paintPlacedParagraphLayout();
+    }
+    function renderBodyElements(elements: any[]) {
+      for (const el of elements) {
+        if (el.type === 'paragraph') paintRetainedParagraph(el);
+        else if (el.type === 'table') renderTable();
+      }
+    }
+    function renderTable() { measureParagraph(); }
+    function renderFrameParagraph() { resolveFrameBox(); renderParagraph(); }
+    const headerFooterOperations = { paintFrameParagraph: renderFrameParagraph };
+    `,
+  );
+
+  establishA1Baseline(root);
+  const result = runChecker(root, '--base-ref', 'main');
+
+  assert.equal(result.status, 0, result.output);
 });
 
 test('rejects a CommonJS require edge that bypasses static ESM imports', () => {
@@ -488,6 +1085,103 @@ test('allows only exact A2 service and option dependency threading through compu
   const result = runChecker(root, '--base-ref', 'main');
 
   assert.equal(result.status, 0, result.output);
+});
+
+test('rejects retained-acquisition edits inside computePages', () => {
+  const root = initializeComputePagesAcquisitionRepository();
+  write(root, 'packages/docx/src/renderer.ts', computePagesAcquisitionMigration);
+
+  const result = runChecker(root, '--base-ref', 'main');
+
+  assert.notEqual(result.status, 0, result.output);
+  assert.match(result.output, /LEGACY_DECLARATION_CHANGED|BASELINE_EXPANSION/);
+});
+
+test('rejects partial, duplicated, moved, or altered computePages acquisition seams', () => {
+  const variants = [
+    computePagesAcquisitionMigration.replace(
+      'settings === undefined ? {} : { settings }',
+      'settings == null ? {} : { settings }',
+    ),
+    computePagesAcquisitionMigration.replace(
+      'measureState.displayPageNumber = undefined;',
+      'measureState.pageIndex = pages.length - 1;\n    measureState.displayPageNumber = undefined;',
+    ),
+    computePagesAcquisitionMigration.replace(
+      'measureState.displayPageNumber = undefined;\n    stampPageMeta();',
+      'stampPageMeta();\n    measureState.displayPageNumber = undefined;',
+    ),
+    computePagesAcquisitionMigration.replace(
+      'splitParagraphAcrossPages(measureState, para, i,',
+      'splitParagraphAcrossPages(measureState, para, i + 0,',
+    ),
+    computePagesAcquisitionMigration.replace(
+      'attachBodyParagraphFragment(el, para, i, measureState,',
+      'attachBodyParagraphFragment(el, para, measureState,',
+    ),
+    computePagesAcquisitionMigration.replace(
+      'attachBodyParagraphFragment(el, para, i, measureState,',
+      'attachBodyParagraphFragment(other, para, i, measureState,',
+    ),
+    computePagesAcquisitionMigration.replace(', sourcePath: [i] });', ' });'),
+    computePagesAcquisitionMigration.replace('sourcePath: [i]', 'sourcePath: [i, 0]'),
+    computePagesAcquisitionMigration.replace(
+      'return pages;',
+      'sideEffect();\n  return pages;',
+    ),
+  ];
+  for (const [index, source] of variants.entries()) {
+    const root = initializeComputePagesAcquisitionRepository();
+    write(root, 'packages/docx/src/renderer.ts', source);
+    const result = runChecker(root, '--base-ref', 'main');
+    assert.notEqual(result.status, 0, `variant ${index}: ${source}`);
+    assert.match(result.output, /LEGACY_DECLARATION_CHANGED|BASELINE_EXPANSION/);
+  }
+});
+
+test('allows only deleting the exact leading fragmentPaintEnabled table conjunct', () => {
+  const root = initializeTablePaintGateRepository();
+  write(root, 'packages/docx/src/renderer.ts', tablePaintGateMigration);
+
+  const result = runChecker(root, '--base-ref', 'main');
+
+  assert.equal(result.status, 0, result.output);
+});
+
+test('requires targeted baseline removal for a completely deleted migration symbol', () => {
+  const root = initializeTablePaintGateRepository(false);
+  write(root, 'packages/docx/src/renderer.ts', tablePaintGateMigration);
+
+  const result = runChecker(root, '--base-ref', 'main');
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.output, /BASELINE_MISMATCH/);
+});
+
+test('rejects other table paint gate predicate changes and non-exact flag removal', () => {
+  const variants = [
+    tablePaintGateMigration.replace('placed === undefined', 'placed == null'),
+    tablePaintGateMigration.replace("placed.fragment.kind !== 'table' ||\n", ''),
+    tablePaintGateMigration.replace(
+      'table.tblpPr != null ||',
+      'state.extraGate ||\n    table.tblpPr != null ||',
+    ),
+    tablePaintGateBaseline.replace(
+      '!fragmentPaintEnabled ||',
+      'fragmentPaintEnabled === false ||',
+    ),
+    tablePaintGateBaseline.replace(
+      '!fragmentPaintEnabled ||',
+      '!fragmentPaintEnabled ||\n    !fragmentPaintEnabled ||',
+    ),
+  ];
+  for (const [index, source] of variants.entries()) {
+    const root = initializeTablePaintGateRepository();
+    write(root, 'packages/docx/src/renderer.ts', source);
+    const result = runChecker(root, '--base-ref', 'main');
+    assert.notEqual(result.status, 0, `variant ${index}: ${source}`);
+    assert.match(result.output, /LEGACY_DECLARATION_CHANGED|BASELINE_EXPANSION/);
+  }
 });
 
 test('allows only an exact A2 Canvas route argument on renderShapeText font calls', () => {
@@ -673,6 +1367,20 @@ test('final mode rejects star exports from renderer', () => {
 
   assert.notEqual(result.status, 0);
   assert.match(result.output, /FINAL_ADAPTER_EXPORT/);
+});
+
+test('excludes test-support modules from production inventory but rejects production imports', () => {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-test-support-'));
+  write(root, 'packages/docx/src/retained.test-support.ts', 'export function acquireForTest() { return 1; }\n');
+  write(root, 'packages/docx/src/retained.test.ts', "import { acquireForTest } from './retained.test-support.js';\nvoid acquireForTest();\n");
+  write(root, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
+
+  assert.equal(runChecker(root, '--final').status, 0);
+
+  write(root, 'packages/docx/src/renderer.ts', "import { acquireForTest } from './retained.test-support.js';\nexport function paginateDocument() { return acquireForTest(); }\nexport function renderDocumentToCanvas() {}\n");
+  const result = runChecker(root, '--final');
+  assert.notEqual(result.status, 0);
+  assert.match(result.output, /PRODUCTION_TEST_SUPPORT_IMPORT/);
 });
 
 test('rejects rewriting a transitional baseline after A1', () => {

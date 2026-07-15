@@ -1,4 +1,6 @@
 import type { DeepReadonly, DocumentLayout, LayoutServices } from './types.js';
+import type { PaintResourceRegistry } from './types.js';
+import type { NumberFormat } from '@silurus/ooxml-core';
 
 export interface DocumentLayoutRuntimeState {
   services: LayoutServices | null;
@@ -73,4 +75,58 @@ export function attachPrivateResourceLookup<T>(
 
 export function privateResourceLookupOf<T>(owner: object): ImmutableResourceLookup<T> | undefined {
   return privateResourceLookups.get(owner) as ImmutableResourceLookup<T> | undefined;
+}
+
+const paintResourceRegistries = new WeakMap<object, PaintResourceRegistry>();
+
+export interface FieldAcquisitionContext {
+  readonly totalPages: number;
+  /** Resolve one PAGE field occurrence from the preceding pagination iteration. */
+  readonly resolvePageField?: (
+    paragraph: object,
+    sourceRunIndex: number,
+  ) => PageFieldAcquisitionContext | undefined;
+}
+
+export interface PageFieldAcquisitionContext {
+  readonly pageIndex: number;
+  readonly displayPageNumber: number;
+  readonly pageNumberFormat: NumberFormat;
+}
+
+const fieldAcquisitionContexts = new WeakMap<object, FieldAcquisitionContext>();
+
+/** Create one immutable service identity for a pagination-field iteration. */
+export function createFieldAcquisitionServicesView(
+  services: LayoutServices,
+  context: FieldAcquisitionContext,
+): LayoutServices {
+  if (!Number.isInteger(context.totalPages) || context.totalPages < 1) {
+    throw new RangeError('Field acquisition totalPages must be a positive integer');
+  }
+  const view = Object.freeze({ ...services });
+  fieldAcquisitionContexts.set(view, Object.freeze({ ...context }));
+  return view;
+}
+
+export function fieldAcquisitionContextOf(owner: object): FieldAcquisitionContext {
+  return fieldAcquisitionContexts.get(owner) ?? Object.freeze({ totalPages: 1 });
+}
+
+/** Associate cloneable resource descriptors with their document-scoped owner
+ * without widening the stable LayoutServices or public document contracts. */
+export function attachPaintResourceRegistry(
+  owner: object,
+  registry: PaintResourceRegistry,
+): void {
+  if (paintResourceRegistries.has(owner)) {
+    throw new Error('Paint resource registry is already attached');
+  }
+  paintResourceRegistries.set(owner, registry);
+}
+
+export function paintResourceRegistryOf(owner: object): PaintResourceRegistry {
+  const registry = paintResourceRegistries.get(owner);
+  if (!registry) throw new Error('Paint resource registry is not attached');
+  return registry;
 }

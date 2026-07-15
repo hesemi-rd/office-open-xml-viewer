@@ -2,9 +2,10 @@ import { describe, it, expect } from 'vitest';
 import {
   renderDocumentToCanvas,
   paginateDocument,
-  __test_setLineReuseEnabled,
+  bodyFragmentFor,
 } from './renderer.js';
 import { layoutLines, type LayoutSeg } from './line-layout.js';
+import { stableFingerprint } from './layout/fingerprint.js';
 import type {
   BodyElement,
   CellElement,
@@ -81,9 +82,10 @@ interface Draw { text: string; x: number; y: number; right: number; font: string
 /** A recording canvas backed by the SAME sub-linear metric. Records every text
  *  draw with its baseline y so the caller can reconstruct the per-line partition
  *  (glyphs sharing a baseline belong to one line). */
-function makeRecordingCanvas(): { canvas: HTMLCanvasElement; draws: Draw[] } {
+function makeRecordingCanvas(): { canvas: HTMLCanvasElement; draws: Draw[]; measures: () => number } {
   let font = '10px serif';
   let letterSpacing = '0px';
+  let measures = 0;
   let transform = { scaleX: 1, scaleY: 1, translateX: 0, translateY: 0 };
   const stack: typeof transform[] = [];
   const draws: Draw[] = [];
@@ -93,6 +95,7 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; draws: Draw[] } {
     get letterSpacing() { return letterSpacing; },
     set letterSpacing(v: string) { letterSpacing = v; },
     measureText: (s: string) => {
+      measures++;
       const p = parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
       return {
         width: subLinearWidth(s, p),
@@ -140,7 +143,7 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; draws: Draw[] } {
     globalAlpha: 1, lineCap: 'butt' as CanvasLineCap, lineJoin: 'miter' as CanvasLineJoin,
   };
   const canvas = { width: 0, height: 0, style: {} as Record<string, string>, getContext: () => ctx };
-  return { canvas: canvas as unknown as HTMLCanvasElement, draws };
+  return { canvas: canvas as unknown as HTMLCanvasElement, draws, measures: () => measures };
 }
 
 function para(text: string, over: Partial<DocParagraph> = {}): DocParagraph {
@@ -359,20 +362,37 @@ describe('zoom-invariant line breaking (Phase 4-1 B2 Stage 2)', () => {
       } as DocParagraph['runs'][number]);
       return paragraph;
     }],
-  ])('keeps %s on the established paint-scale path', async (_name, makeParagraph) => {
+  ])('paints retained %s geometry only through the device transform', async (_name, makeParagraph) => {
     const model = doc([makeParagraph() as unknown as BodyElement], 600);
     const pages = paginateDocument(model);
-    const rec = makeRecordingCanvas();
-    await renderDocumentToCanvas(model, rec.canvas, 0, {
+    const fingerprint = stableFingerprint('retained-zoom', bodyFragmentFor(pages[0][0]));
+
+    const point = makeRecordingCanvas();
+    await renderDocumentToCanvas(model, point.canvas, 0, {
+      dpr: 1,
+      width: model.section.pageWidth,
+      prebuiltPages: pages,
+    });
+    const device = makeRecordingCanvas();
+    await renderDocumentToCanvas(model, device.canvas, 0, {
       dpr: 1,
       width: model.section.pageWidth * 0.5,
       prebuiltPages: pages,
     });
 
-    const body = rec.draws.find((draw) => draw.text === 'body');
-    expect(body).toBeDefined();
-    expect(body!.font).toContain('5px');
-    expect(body!.scaleX).toBe(1);
+    expect(point.measures()).toBe(0);
+    expect(device.measures()).toBe(0);
+    expect(stableFingerprint('retained-zoom', bodyFragmentFor(pages[0][0]))).toBe(fingerprint);
+    const pointBody = point.draws.find((draw) => draw.text === 'body');
+    const deviceBody = device.draws.find((draw) => draw.text === 'body');
+    expect(pointBody).toBeDefined();
+    expect(deviceBody).toBeDefined();
+    expect(pointBody!.font).toContain('10px');
+    expect(deviceBody!.font).toBe(pointBody!.font);
+    expect(pointBody!.scaleX).toBe(1);
+    expect(deviceBody!.scaleX).toBe(0.5);
+    expect(deviceBody!.x).toBe(pointBody!.x * 0.5);
+    expect(deviceBody!.y).toBe(pointBody!.y * 0.5);
   });
 
   it('CONTROL: the mock font is genuinely NON-linear — a paint-scale re-layout WOULD wrap differently', () => {
@@ -398,22 +418,6 @@ describe('zoom-invariant line breaking (Phase 4-1 B2 Stage 2)', () => {
     expect(a.length).toBeGreaterThan(1);
     // The partitions differ — different line count under the non-linear advance.
     expect(b.length).not.toBe(a.length);
-  });
-
-  it('reuse ON matches the scale-1 recompute partition (the stamp IS the scale-1 layout)', async () => {
-    // Ties the two: the zoom-invariant partition equals what a fresh scale-1
-    // layout produces (reuse OFF at scale 1), so Stage 2 did not silently change
-    // the scale-1 answer — only made every other scale agree with it.
-    const text = Array.from({ length: 160 }, (_, i) => `w${i % 10}`).join(' ');
-    const model = doc([para(text) as unknown as BodyElement]);
-    const pages = paginateDocument(model);
-
-    const prev = __test_setLineReuseEnabled(false);
-    let recomputeAt1: string[];
-    try { recomputeAt1 = await partitionAtWidth(model, pages, 200); } finally { __test_setLineReuseEnabled(prev); }
-
-    const reuseAt075 = await partitionAtWidth(model, pages, 150);
-    expect(reuseAt075).toEqual(recomputeAt1);
   });
 
   it('an ANCHORED image in the paragraph adds no inline advance at any scale', async () => {

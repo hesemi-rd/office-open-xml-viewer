@@ -4,12 +4,11 @@ import {
   paginateDocument,
   createLayoutServices,
   bodyFragmentFor,
-  __test_setBodyFragment,
-  __test_setLineReuseEnabled,
-  __test_setFragmentPaintEnabled,
   __test_tableRequiresLegacyPaint,
 } from './renderer.js';
 import { testFontSnapshot } from './layout/test-font-snapshot.js';
+import { stableFingerprint } from './layout/fingerprint.js';
+import type { FlowFragment } from './layout-fragments.js';
 import type {
   BodyElement,
   CellElement,
@@ -21,25 +20,12 @@ import type {
 } from './types';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Body paint byte-identity — the compute-once line reuse (Phase 4-1 B2 Stage 1)
-// AND the PR 5 body fragment paint.
+// A3 retained paragraph acquisition and paint invariants.
 //
-// A migrated body paragraph now paints from its stored measured fragment
-// (fragment-paint.ts → renderBodyParagraphLines): the fragment's scale-1 line
-// partition is rescaled to the paint scale and drawn, with NO re-run of layoutLines.
-// Marker / float / state-sensitive paragraphs stay on the legacy renderParagraph
-// acquisition (its own scale-1 reuse gate). This suite pins that both mechanisms are
-// behaviour-PRESERVING: rendering the exact same page three ways —
-//   (1) production      : fragment paint ON,  reuse ON
-//   (2) legacy reuse    : fragment paint OFF, reuse ON
-//   (3) legacy recompute: fragment paint OFF, reuse OFF
-// must emit a byte-identical paint call stream (every fillText / strokeText /
-// drawImage with identical text, x, y and font). It also pins NON-VACUITY: fragment
-// paint (or, for non-migrated paragraphs, the legacy reuse gate) actually avoided
-// re-laying-out the paragraph, so production makes FEWER measureText calls than the
-// legacy recompute — except where the paragraph is legitimately excluded from both
-// fast paths (a numbered list's firstLineIndent, a NUMPAGES field), where the counts
-// are equal.
+// Every body/cell paragraph is acquired once as immutable point-space geometry.
+// Production paint consumes that node without measuring or mutating it. Tests below
+// assert semantic retained geometry and deterministic device mapping; the removed
+// paragraph fallback/toggle paths are deliberately not test oracles.
 //
 // The pages are built with `paginateDocument` (a fresh OffscreenCanvas(1,1)) and
 // handed to `renderDocumentToCanvas` via `prebuiltPages` — the SAME cross-context
@@ -103,6 +89,12 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; calls: Call[]; meas
   let measures = 0;
   let transform = { scaleX: 1, scaleY: 1, translateX: 0, translateY: 0 };
   const transformStack: typeof transform[] = [];
+  const canvas: {
+    width: number;
+    height: number;
+    style: Record<string, string>;
+    getContext?: () => unknown;
+  } = { width: 0, height: 0, style: {} };
   const record = (op: Call['op'], text: string, x: number, y: number): void => {
     calls.push({
       op,
@@ -115,6 +107,7 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; calls: Call[]; meas
     });
   };
   const ctx = {
+    canvas,
     get font() { return font; },
     set font(v: string) { font = v; },
     letterSpacing: '0px',
@@ -155,7 +148,7 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; calls: Call[]; meas
     textAlign: 'left' as CanvasTextAlign, direction: 'ltr' as CanvasDirection,
     globalAlpha: 1, lineCap: 'butt' as CanvasLineCap, lineJoin: 'miter' as CanvasLineJoin,
   };
-  const canvas = { width: 0, height: 0, style: {} as Record<string, string>, getContext: () => ctx };
+  canvas.getContext = () => ctx;
   return { canvas: canvas as unknown as HTMLCanvasElement, calls, measures: () => measures };
 }
 
@@ -209,138 +202,170 @@ async function renderAllPages(model: DocxDocumentModel, pages: PaginatedBodyElem
   return { perPage, measures };
 }
 
-/** Render every page under an explicit (fragmentPaint, reuse) configuration, then
- *  restore the previous flags. */
-async function renderVariant(
-  model: DocxDocumentModel,
-  pages: PaginatedBodyElement[][],
-  cfg: { fragmentPaint: boolean; reuse: boolean },
-): Promise<{ perPage: Call[][]; measures: number }> {
-  const prevFragment = __test_setFragmentPaintEnabled(cfg.fragmentPaint);
-  const prevReuse = __test_setLineReuseEnabled(cfg.reuse);
-  try {
-    return await renderAllPages(model, pages);
-  } finally {
-    __test_setLineReuseEnabled(prevReuse);
-    __test_setFragmentPaintEnabled(prevFragment);
-  }
+function retainedFlowGeometry(fragment: FlowFragment): unknown {
+  if (fragment.kind === 'paragraph') return fragment;
+  return {
+    kind: fragment.kind,
+    columnWidthsPt: fragment.columnWidthsPt,
+    continuesFromPreviousPage: fragment.continuesFromPreviousPage,
+    continuesOnNextPage: fragment.continuesOnNextPage,
+    rows: fragment.rows.map((row) => ({
+      sourceRowIndex: row.sourceRowIndex,
+      heightPt: row.heightPt,
+      repeatedHeader: row.repeatedHeader,
+      cells: row.cells.map((cell) => ({
+        verticalMerge: cell.verticalMerge,
+        boxHeightPt: cell.boxHeightPt ?? null,
+        blocks: cell.blocks.map(retainedFlowGeometry),
+      })),
+    })),
+  };
 }
 
-/** Render every page at the DEFAULT CSS scale (PT_TO_PX = 4/3, `width` OMITTED so
- *  scale = 4/3 ≠ 1) under an explicit (fragmentPaint, reuse) configuration; restore
- *  the flags after. At this scale the fragment path and the legacy reuse path both
- *  map their stored scale-1 partition through the canonical viewport transform,
- *  so their streams must be byte-identical. */
-async function renderVariantScaled(
+function retainedFingerprints(pages: PaginatedBodyElement[][]): string[] {
+  return pages.flatMap((page) => page.flatMap((element) => {
+    const placed = bodyFragmentFor(element);
+    return placed === undefined
+      ? []
+      : [stableFingerprint('retained-flow', {
+        columnIndex: placed.columnIndex,
+        xPt: placed.xPt,
+        yPt: placed.yPt,
+        widthPt: placed.widthPt,
+        heightPt: placed.heightPt,
+        fragment: retainedFlowGeometry(placed.fragment),
+      })];
+  }));
+}
+
+async function renderRetainedAtScale(
   model: DocxDocumentModel,
   pages: PaginatedBodyElement[][],
-  cfg: { fragmentPaint: boolean; reuse: boolean },
-): Promise<Call[][]> {
-  const prevFragment = __test_setFragmentPaintEnabled(cfg.fragmentPaint);
-  const prevReuse = __test_setLineReuseEnabled(cfg.reuse);
-  try {
-    const perPage: Call[][] = [];
-    for (let p = 0; p < pages.length; p++) {
-      const rec = makeRecordingCanvas();
-      // No `width` → cssWidth = pageWidth · PT_TO_PX (4/3), so the paint scale is 4/3.
-      await renderDocumentToCanvas(model, rec.canvas, p, { dpr: 1, prebuiltPages: pages });
-      perPage.push(rec.calls);
+  scale: 1 | 2,
+): Promise<{ calls: Call[][]; measures: number }> {
+  const calls: Call[][] = [];
+  let measures = 0;
+  for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
+    const rec = makeRecordingCanvas();
+    const services = createLayoutServices(model, {
+      localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+      measureContext: rec.canvas.getContext('2d'),
+    });
+    await renderDocumentToCanvas(model, rec.canvas, pageIndex, {
+      dpr: 1,
+      width: model.section.pageWidth * scale,
+      prebuiltPages: pages,
+      layoutServices: services,
+    });
+    calls.push(rec.calls);
+    measures += rec.measures();
+  }
+  return { calls, measures };
+}
+
+/** Final A3 invariant: paint consumes immutable point-space geometry. It may only
+ *  apply the page's device transform; it may neither reshape nor mutate the node. */
+async function assertRetainedScaleInvariant(
+  model: DocxDocumentModel,
+): Promise<{ pages: PaginatedBodyElement[][]; fingerprints: string[] }> {
+  const pages = paginateDocument(model, createLayoutServices(model, {
+    localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+  }));
+  const before = retainedFingerprints(pages);
+  expect(before.length).toBeGreaterThan(0);
+
+  const at1 = await renderRetainedAtScale(model, pages, 1);
+  expect(at1.measures).toBe(0);
+  expect(retainedFingerprints(pages)).toEqual(before);
+
+  const at2 = await renderRetainedAtScale(model, pages, 2);
+  expect(at2.measures).toBe(0);
+  expect(retainedFingerprints(pages)).toEqual(before);
+  expect(at2.calls).toHaveLength(at1.calls.length);
+
+  for (let pageIndex = 0; pageIndex < at1.calls.length; pageIndex++) {
+    expect(at2.calls[pageIndex]).toHaveLength(at1.calls[pageIndex].length);
+    for (let callIndex = 0; callIndex < at1.calls[pageIndex].length; callIndex++) {
+      const point = at1.calls[pageIndex][callIndex];
+      const device = at2.calls[pageIndex][callIndex];
+      expect({ op: device.op, text: device.text, font: device.font }).toEqual({
+        op: point.op, text: point.text, font: point.font,
+      });
+      expect(device.x).toBe(point.x * 2);
+      expect(device.y).toBe(point.y * 2);
+      expect(device.scaleX).toBe(point.scaleX * 2);
+      expect(device.scaleY).toBe(point.scaleY * 2);
     }
-    return perPage;
-  } finally {
-    __test_setLineReuseEnabled(prevReuse);
-    __test_setFragmentPaintEnabled(prevFragment);
   }
+  return { pages, fingerprints: before };
 }
 
-/** Assert the production paint (fragment ON, reuse ON) is byte-identical to the
- *  legacy paint (fragment OFF) both with reuse ON and with reuse OFF, on every page.
- *  Reports measureText counts so the caller can pin non-vacuity (a fast path really
- *  fired, or was legitimately rejected). */
-async function assertPaintIdentical(model: DocxDocumentModel): Promise<{ pages: number; drawn: number; split: boolean; measuresProduction: number; measuresRecompute: number; streams: Call[][] }> {
+/** Assert production consumes the retained result deterministically. */
+async function assertRetainedPaint(model: DocxDocumentModel): Promise<{
+  pages: number;
+  drawn: number;
+  split: boolean;
+  measures: number;
+  streams: Call[][];
+}> {
   const pages = paginateDocument(model, createLayoutServices(model, { localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]) }));
-  // Sanity: this document actually split a paragraph, so continuation slices exist.
   const split = pages.some((pg) => pg.some((el) => (el as PaginatedBodyElement).lineSlice));
-
-  const production = await renderVariant(model, pages, { fragmentPaint: true, reuse: true });
-  const legacyReuse = await renderVariant(model, pages, { fragmentPaint: false, reuse: true });
-  const legacyRecompute = await renderVariant(model, pages, { fragmentPaint: false, reuse: false });
-
-  expect(production.perPage.length).toBe(legacyReuse.perPage.length);
-  expect(production.perPage.length).toBe(legacyRecompute.perPage.length);
-  let drawn = 0;
-  for (let p = 0; p < production.perPage.length; p++) {
-    // Exact stream identity — same ops, text, positions, fonts, in the same order —
-    // across fragment paint AND both legacy variants.
-    expect(production.perPage[p]).toEqual(legacyReuse.perPage[p]);
-    expect(production.perPage[p]).toEqual(legacyRecompute.perPage[p]);
-    drawn += production.perPage[p].filter((c) => c.op !== 'img').length;
-  }
+  const before = retainedFingerprints(pages);
+  const first = await renderAllPages(model, pages);
+  expect(retainedFingerprints(pages)).toEqual(before);
+  const second = await renderAllPages(model, pages);
+  expect(second.perPage).toEqual(first.perPage);
+  expect(retainedFingerprints(pages)).toEqual(before);
+  const drawn = first.perPage.flat().filter((call) => call.op !== 'img').length;
   return {
     pages: pages.length,
     drawn,
     split,
-    measuresProduction: production.measures,
-    measuresRecompute: legacyRecompute.measures,
-    streams: production.perPage,
+    measures: first.measures + second.measures,
+    streams: first.perPage,
   };
 }
 
-describe('body paint byte-identity — fragment paint and compute-once line reuse', () => {
-  it('long single-column paragraph that splits across pages: fragment paint === legacy', async () => {
+describe('body retained paragraph acquisition and paint', () => {
+  it('paints a split single-column paragraph without measuring or mutation', async () => {
     const text = Array.from({ length: 120 }, () => 'w').join(' ');
-    const r = await assertPaintIdentical(doc([para(text) as unknown as BodyElement]));
+    const r = await assertRetainedPaint(doc([para(text) as unknown as BodyElement]));
     expect(r.pages).toBeGreaterThan(1); // really split
     expect(r.split).toBe(true);         // continuation slices present
     expect(r.drawn).toBeGreaterThan(0); // really painted
-    // Non-vacuity: fragment paint skipped the paragraph re-layout, so production
-    // made strictly fewer measureText calls than the legacy recompute.
-    expect(r.measuresProduction).toBeLessThan(r.measuresRecompute);
+    expect(r.measures).toBe(0);
   });
 
   it('justified paragraph (both): slack distribution over fragment segments is identical', async () => {
     const text = Array.from({ length: 120 }, (_, i) => (i % 3 === 0 ? 'lorem' : 'ipsum')).join(' ');
-    const r = await assertPaintIdentical(doc([para(text, { alignment: 'both' }) as unknown as BodyElement]));
+    const r = await assertRetainedPaint(doc([para(text, { alignment: 'both' }) as unknown as BodyElement]));
     expect(r.pages).toBeGreaterThan(1);
     expect(r.drawn).toBeGreaterThan(0);
-    expect(r.measuresProduction).toBeLessThan(r.measuresRecompute); // fragment paint fired
+    expect(r.measures).toBe(0);
   });
 
-  it('CJK paragraph (per-glyph wrap) that splits: fragment paint === legacy', async () => {
+  it('paints a retained CJK per-glyph partition without measuring', async () => {
     const text = 'あ'.repeat(200);
-    const r = await assertPaintIdentical(doc([para(text) as unknown as BodyElement]));
+    const r = await assertRetainedPaint(doc([para(text) as unknown as BodyElement]));
     expect(r.pages).toBeGreaterThan(1);
     expect(r.drawn).toBeGreaterThan(0);
-    expect(r.measuresProduction).toBeLessThan(r.measuresRecompute); // fragment paint fired
+    expect(r.measures).toBe(0);
   });
 
-  it('numbered list that splits: excluded from fragment paint (firstLineIndent) yet paint is identical', async () => {
-    // A numbered paragraph: the placement-aware measurement lays out with
-    // para.indentFirst, but paint positions the body at numBodyOffset — so the
-    // fragment's scale-1 lines would NOT reproduce the paint. isFragmentPaintable
-    // excludes it (numbering != null) and the legacy reuse gate also rejects it, so
-    // production falls back to the recompute path — which must still be identical to
-    // itself. This is the control proving the exclusion is safe.
+  it('numbered list that splits acquires the marker-aware body partition once', async () => {
     const numbering = { numId: 1, level: 0, format: 'decimal', text: '1.',
       indentLeft: 36, tab: 36, suff: 'tab', jc: 'left' } as unknown as DocParagraph['numbering'];
     const text = Array.from({ length: 120 }, () => 'w').join(' ');
     const p = para(text, {
       numbering, indentLeft: 36, indentFirst: -18,
     });
-    const r = await assertPaintIdentical(doc([p as unknown as BodyElement]));
+    const r = await assertRetainedPaint(doc([p as unknown as BodyElement]));
     expect(r.pages).toBeGreaterThan(1);
     expect(r.drawn).toBeGreaterThan(0);
-    // Neither fast path fired (fragment paint excluded, reuse rejected), so
-    // production and the recompute path made the same number of measures.
-    expect(r.measuresProduction).toBe(r.measuresRecompute);
+    expect(r.measures).toBe(0);
   });
 
-  it('NUMPAGES field in a splitting paragraph: excluded from fragment paint — field text resolves against the real page context', async () => {
-    // resolveFieldText is paint-state-dependent: numPages → state.totalPages,
-    // which is 1 in the paginator's measure state but the real count at paint.
-    // The fragment's line segments freeze the stale "1", so paragraphSegsStateSensitive
-    // excludes such paragraphs from BOTH the fragment path and the reuse stamp —
-    // they recompute their segments against the real page context.
+  it('NUMPAGES converges before retained acquisition and paints without measuring', async () => {
     const text = Array.from({ length: 120 }, () => 'w').join(' ');
     const p = para(text);
     (p.runs as unknown[]).push({
@@ -348,77 +373,156 @@ describe('body paint byte-identity — fragment paint and compute-once line reus
       bold: false, italic: false, underline: false, strikethrough: false,
       fontSize: 10, color: null, fontFamily: 'Times New Roman', background: null,
     });
-    const r = await assertPaintIdentical(doc([p as unknown as BodyElement]));
+    const r = await assertRetainedPaint(doc([p as unknown as BodyElement]));
     expect(r.pages).toBeGreaterThan(1);
     expect(r.split).toBe(true);
-    // No fast path: production and recompute made the same number of measures.
-    expect(r.measuresProduction).toBe(r.measuresRecompute);
-    // And the CURRENT total page count was drawn (not the measure-time "1" —
-    // with pages > 1 the real count is distinguishable from the stale value).
+    expect(r.measures).toBe(0);
     const drewTotal = r.streams.some((page) => page.some((c) => c.text === String(r.pages)));
     expect(drewTotal).toBe(true);
   });
 
-  it('custom kinsoku settings: fragment paint stays identical across fresh-but-value-equal rule objects', async () => {
+  it('PAGE is acquired from the destination page context', async () => {
+    const pageField = para('');
+    (pageField.runs as unknown[]).push({
+      type: 'field', fieldType: 'page', instruction: 'PAGE', fallbackText: '?',
+      bold: false, italic: false, underline: false, strikethrough: false,
+      fontSize: 10, color: null, fontFamily: 'Times New Roman', background: null,
+    });
+    const model = doc([
+      para('first') as unknown as BodyElement,
+      { type: 'pageBreak' } as BodyElement,
+      pageField as unknown as BodyElement,
+    ]);
+    const pages = paginateDocument(model, createLayoutServices(model, {
+      localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+    }));
+    expect(pages).toHaveLength(2);
+    const production = await renderAllPages(model, pages);
+
+    expect(production.measures).toBe(0);
+    expect(production.perPage[1].some((call) => call.text === '2')).toBe(true);
+  });
+
+  it('acquires a PAGE field from the continuation slice that contains its occurrence', async () => {
+    const split = para(Array.from({ length: 120 }, () => 'w').join(' '));
+    (split.runs as unknown[]).push({
+      type: 'field', fieldType: 'page', instruction: 'PAGE', fallbackText: '?',
+      bold: false, italic: false, underline: false, strikethrough: false,
+      fontSize: 10, color: null, fontFamily: 'Times New Roman', background: null,
+    });
+    const model = doc([split as unknown as BodyElement]);
+    const pages = paginateDocument(model, createLayoutServices(model, {
+      localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+    }));
+    const fieldPageIndex = pages.findIndex((elements) => elements.some((element) => {
+      const placed = bodyFragmentFor(element);
+      return placed?.fragment.kind === 'paragraph'
+        && placed.fragment.lines.some((line) => line.placements.some((placement) =>
+          placement.kind === 'text' && placement.dependency === 'page'));
+    }));
+    expect(fieldPageIndex).toBeGreaterThan(0);
+
+    const production = await renderAllPages(model, pages);
+    expect(production.measures).toBe(0);
+    expect(production.perPage[fieldPageIndex].some((call) =>
+      call.text === String(fieldPageIndex + 1))).toBe(true);
+  });
+
+  it('retains the two-digit PAGE result and its measured advance on page ten', async () => {
+    const pageTen = para('');
+    (pageTen.runs as unknown[]).push({
+      type: 'field', fieldType: 'page', instruction: 'PAGE', fallbackText: '?',
+      bold: false, italic: false, underline: false, strikethrough: false,
+      fontSize: 10, color: null, fontFamily: 'Times New Roman', background: null,
+    });
+    const body: BodyElement[] = [];
+    for (let pageIndex = 0; pageIndex < 10; pageIndex += 1) {
+      if (pageIndex > 0) body.push({ type: 'pageBreak' } as BodyElement);
+      body.push((pageIndex === 9 ? pageTen : para(`page ${pageIndex + 1}`)) as unknown as BodyElement);
+    }
+    const model = doc(body);
+    const pages = paginateDocument(model, createLayoutServices(model, {
+      localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+    }));
+    expect(pages).toHaveLength(10);
+    const pageTenFragment = pages[9].flatMap((element) => {
+      const placed = bodyFragmentFor(element);
+      return placed?.fragment.kind === 'paragraph' ? [placed.fragment] : [];
+    }).find((fragment) => fragment.lines.some((line) => line.placements.some((placement) =>
+      placement.kind === 'text' && placement.dependency === 'page')));
+    const pagePlacement = pageTenFragment?.lines.flatMap((line) => line.placements)
+      .find((placement) => placement.kind === 'text' && placement.dependency === 'page');
+    expect(pagePlacement).toMatchObject({ text: '10', advancePt: 10 });
+
+    const production = await renderAllPages(model, pages);
+    expect(production.measures).toBe(0);
+    expect(production.perPage[9].some((call) => call.text === '10')).toBe(true);
+  });
+
+  it('acquires PAGE with the destination section restart and number format', async () => {
+    const pageField = para('');
+    (pageField.runs as unknown[]).push({
+      type: 'field', fieldType: 'page', instruction: 'PAGE', fallbackText: '?',
+      bold: false, italic: false, underline: false, strikethrough: false,
+      fontSize: 10, color: null, fontFamily: 'Times New Roman', background: null,
+    });
+    const model = doc([
+      para('first') as unknown as BodyElement,
+      { type: 'pageBreak' } as BodyElement,
+      pageField as unknown as BodyElement,
+    ]);
+    model.section = {
+      ...model.section,
+      pageNumType: { start: 50, fmt: 'upperRoman' },
+    };
+    const pages = paginateDocument(model, createLayoutServices(model, {
+      localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+    }));
+    const production = await renderAllPages(model, pages);
+
+    expect(production.measures).toBe(0);
+    expect(production.perPage[1].some((call) => call.text === 'LI')).toBe(true);
+  });
+
+  it('custom kinsoku settings retain the acquired partition across value-equal rules', async () => {
     // The prebuiltPages production path resolves resolveKinsokuRules(doc.settings)
     // TWICE — once in paginateDocument, once in renderDocumentToCanvas — building
     // fresh Set objects per call. The fragment's lines were laid out under the
-    // paginate-time rules; the paint stays byte-identical.
+    // paginate-time rules; paint consumes the acquired partition directly.
     const text = Array.from({ length: 120 }, () => 'w').join(' ');
     const model = doc([para(text) as unknown as BodyElement], 60,
       { kinsoku: true, noLineBreaksBefore: '、。！' , noLineBreaksAfter: '（「' });
-    const r = await assertPaintIdentical(model);
+    const r = await assertRetainedPaint(model);
     expect(r.pages).toBeGreaterThan(1);
-    expect(r.measuresProduction).toBeLessThan(r.measuresRecompute); // fragment paint fired
+    expect(r.measures).toBe(0);
   });
 
-  it('zoom (default 4/3 scale): fragment paint === legacy stamp-reuse over the same scale-1 partition', async () => {
-    // A long paragraph that SPLITS: pagination stamps its scale-1 line partition
-    // (stampParagraphLines) AND builds the fragment from the SAME measured result, so
-    // the legacy reuse path genuinely rescales the STAMP. At a paint scale ≠ 1 the
-    // production fragment path and the legacy reuse path both rescale that one scale-1
-    // partition, so their paint streams must be byte-identical (design invariant:
-    // "paint scales measured geometry; it does not repeat text layout"). Identity vs
-    // the full-RECOMPUTE path is intentionally NOT asserted here — recompute measures
-    // at the paint scale (a documented pre-existing property), not this PR's concern.
+  it('zoom maps the same retained point geometry through the device transform', async () => {
     const text = Array.from({ length: 120 }, () => 'w').join(' ');
     const model = doc([para(text) as unknown as BodyElement]); // pageHeight 60 → splits
-    const pages = paginateDocument(model);
+    const { pages } = await assertRetainedScaleInvariant(model);
     expect(pages.length).toBeGreaterThan(1);
     expect(pages.some((pg) => pg.some((el) => (el as PaginatedBodyElement).lineSlice))).toBe(true);
-
-    const production = await renderVariantScaled(model, pages, { fragmentPaint: true, reuse: true });
-    const reuse = await renderVariantScaled(model, pages, { fragmentPaint: false, reuse: true });
-    expect(production.length).toBe(reuse.length);
-    for (let p = 0; p < production.length; p++) {
-      expect(production[p]).toEqual(reuse[p]);
-    }
-    // Non-vacuity: the glyphs retain their canonical 10px shaping font and are
-    // mapped to the default 4/3 paint scale by the local Canvas transform.
-    const scaled = production.flat().some((c) =>
-      c.op !== 'img' && c.font.includes('10px') && Math.abs(c.scaleX - 4 / 3) < 1e-9);
-    expect(scaled).toBe(true);
-    expect(production.some((pg) => pg.length > 0)).toBe(true);
   });
 
-  it('first-line AND hanging indents: fragment paint === legacy (3-way)', async () => {
+  it('retains first-line and hanging indent geometry', async () => {
     const text = Array.from({ length: 120 }, () => 'w').join(' ');
     // First-line indent (positive indentFirst) with left + right indents.
-    const firstLine = await assertPaintIdentical(
+    const firstLine = await assertRetainedPaint(
       doc([para(text, { indentLeft: 24, indentRight: 12, indentFirst: 18 }) as unknown as BodyElement]),
     );
     expect(firstLine.drawn).toBeGreaterThan(0);
-    expect(firstLine.measuresProduction).toBeLessThan(firstLine.measuresRecompute); // fragment paint fired
+    expect(firstLine.measures).toBe(0);
     // Hanging indent (negative first-line) WITHOUT numbering — still fragment-paintable
     // (the numbering exclusion is about numBodyOffset, not a bare hanging indent).
-    const hanging = await assertPaintIdentical(
+    const hanging = await assertRetainedPaint(
       doc([para(text, { indentLeft: 36, indentFirst: -18 }) as unknown as BodyElement]),
     );
     expect(hanging.drawn).toBeGreaterThan(0);
-    expect(hanging.measuresProduction).toBeLessThan(hanging.measuresRecompute);
+    expect(hanging.measures).toBe(0);
   });
 
-  it('explicit tab stops + tab runs: fragment paint === legacy (3-way)', async () => {
+  it('explicit tab stops retain tab and leader geometry across device scales', async () => {
     // A run with embedded tab characters (\t) and custom tab stops. layoutLines splits
     // on '\t' and advances to the stops (left + right-aligned with a dot leader); the
     // fragment's stored lines carry the tabbed geometry, painted without re-tabbing.
@@ -429,12 +533,19 @@ describe('body paint byte-identity — fragment paint and compute-once line reus
       { pos: 130, alignment: 'right', leader: 'dot' },
     ] as unknown as DocParagraph['tabStops'];
     const p = para(Array.from({ length: 16 }, () => tabbed).join(' '), { tabStops });
-    const r = await assertPaintIdentical(doc([p as unknown as BodyElement]));
-    expect(r.drawn).toBeGreaterThan(0);
-    expect(r.measuresProduction).toBeLessThan(r.measuresRecompute); // fragment paint fired
+    const { pages } = await assertRetainedScaleInvariant(doc([p as unknown as BodyElement]));
+    const tabs = pages.flatMap((page) => page.flatMap((element) => {
+      const fragment = bodyFragmentFor(element)?.fragment;
+      return fragment?.kind === 'paragraph'
+        ? fragment.lines.flatMap((line) => line.placements.filter((placement) => placement.kind === 'tab'))
+        : [];
+    }));
+    expect(tabs.length).toBeGreaterThan(0);
+    expect(tabs.some((tab) => tab.leader === 'dot')).toBe(true);
+    expect(tabs.every((tab) => tab.advancePt >= 0)).toBe(true);
   });
 
-  it('two-column section: fragment paint === legacy (3-way)', async () => {
+  it('two-column section retains one point-space layout across device scales', async () => {
     // ECMA-376 §17.6.4 newspaper columns — the body flows through 2 equal columns.
     // Each column-slice fragment records its column band width; paint sets contentW
     // per column, and the placement guard's width check passes (equal columns).
@@ -442,9 +553,12 @@ describe('body paint byte-identity — fragment paint and compute-once line reus
     const text = Array.from({ length: 200 }, () => 'w').join(' ');
     const model = doc([para(text) as unknown as BodyElement]);
     (model.section as SectionProps).columns = columns;
-    const r = await assertPaintIdentical(model);
-    expect(r.drawn).toBeGreaterThan(0);
-    expect(r.measuresProduction).toBeLessThan(r.measuresRecompute); // fragment paint fired
+    const { pages } = await assertRetainedScaleInvariant(model);
+    const placedColumns = new Set(pages.flatMap((page) => page.flatMap((element) => {
+      const placed = bodyFragmentFor(element);
+      return placed === undefined ? [] : [placed.columnIndex];
+    })));
+    expect(placedColumns).toEqual(new Set([0, 1]));
   });
 
   it('same page rendered twice is identical (the shared measured line array is never mutated by paint)', async () => {
@@ -456,61 +570,31 @@ describe('body paint byte-identity — fragment paint and compute-once line reus
     for (let p = 0; p < first.perPage.length; p++) expect(second.perPage[p]).toEqual(first.perPage[p]);
   });
 
-  it('stale-placement fragment (a NEWER narrower measurement) → placement guard falls back to legacy, output correct', async () => {
-    // Design invariant: "a measurement is valid only for its recorded placement".
-    // A fragment measured for one placement must never be painted at another. Here the
-    // width-180 prebuiltPages carry the paragraph p (its element stamps say the column
-    // is 180 pt wide), but the side table is poisoned with a fragment measured at
-    // width 100 (a 3-line partition) whose SOURCE is still p. Painting it would draw
-    // the wrong (narrower) line breaks; the placement guard in
-    // isFragmentPaintableParagraph detects the fragment's recorded availableWidthPt
-    // (100) ≠ the paint column width (180) and falls back to legacy renderParagraph,
-    // which reproduces the correct width-180 layout.
-    //
-    // The stale fragment is INJECTED rather than produced by a second pagination:
-    // re-paginating the same p rewrites its colGeom/section stamps too, so the paint
-    // width would track the stale fragment and no mismatch would be observable — a
-    // faithful reproduction of "a stale side-table entry from a newer re-pagination
-    // paints older prebuiltPages" without corrupting the element geometry.
-    const p = para(Array.from({ length: 30 }, () => 'w').join(' '));
-    const wideModel = doc([p as unknown as BodyElement], 600); // colW 180
-    // A narrow pagination of the SAME p yields a width-100 fragment whose source is p.
-    const narrowModel = doc([p as unknown as BodyElement], 600);
+  it('acquires placement-specific retained nodes for narrow and wide columns', async () => {
+    const text = Array.from({ length: 30 }, () => 'w').join(' ');
+    const wideModel = doc([para(text) as unknown as BodyElement], 600); // colW 180
+    const narrowModel = doc([para(text) as unknown as BodyElement], 600);
     (narrowModel.section as SectionProps).pageWidth = 120; // colW 100
-    paginateDocument(narrowModel);
-    const stale = bodyFragmentFor(paginateDocument(narrowModel)[0][0]);
-    if (!stale) throw new Error('expected a narrow fragment to capture');
-    if (stale.fragment.kind !== 'paragraph') throw new Error('expected a paragraph fragment');
-    expect(stale.fragment.measured.placement.availableWidthPt).toBeCloseTo(100, 6);
-    expect(stale.fragment.source).toBe(p); // same source paragraph, different placement
-    // Re-paginate wide LAST so p's element stamps + prebuiltPages are the width-180 layout.
+    const pagesNarrow = paginateDocument(narrowModel);
     const pagesWide = paginateDocument(wideModel);
-    // Poison the side table for p's element with the stale width-100 fragment.
-    __test_setBodyFragment(pagesWide[0][0], stale);
-
-    const production = await renderVariant(wideModel, pagesWide, { fragmentPaint: true, reuse: true });
-    const legacy = await renderVariant(wideModel, pagesWide, { fragmentPaint: false, reuse: true });
-    expect(production.perPage.length).toBe(legacy.perPage.length);
-    for (let pg = 0; pg < production.perPage.length; pg++) {
-      // Guard falls back to legacy renderParagraph, so production === legacy (the
-      // correct width-180 layout). Without the guard, production paints the width-100
-      // fragment's 3-line partition and diverges — this is the Red case.
-      expect(production.perPage[pg]).toEqual(legacy.perPage[pg]);
+    const narrow = bodyFragmentFor(pagesNarrow[0][0]);
+    const wide = bodyFragmentFor(pagesWide[0][0]);
+    if (narrow?.fragment.kind !== 'paragraph' || wide?.fragment.kind !== 'paragraph') {
+      throw new Error('expected retained paragraph nodes');
     }
-    // Non-vacuity: the paragraph wrapped (multiple painted lines), so the stale
-    // width-100 fragment would have been a visible divergence had the guard not fired.
-    expect(production.perPage[0].filter((c) => c.op !== 'img').length).toBeGreaterThan(1);
+    expect(narrow.fragment.flowBounds.widthPt).toBe(100);
+    expect(wide.fragment.flowBounds.widthPt).toBe(180);
+    expect(narrow.fragment.lines.length).toBeGreaterThan(wide.fragment.lines.length);
+    expect(narrow.fragment.source.path).toEqual([0]);
+    expect(wide.fragment.source.path).toEqual([0]);
+    expect((await renderAllPages(narrowModel, pagesNarrow)).measures).toBe(0);
+    expect((await renderAllPages(wideModel, pagesWide)).measures).toBe(0);
   });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PR 6 Task 16 — TABLE-CELL paint byte-identity. A migrated block table paints its
-// cell paragraphs from CellFragment blocks; the per-block gate must exclude the SAME
-// divergence classes the PR 5 body gate excludes (marker firstLineIndent /
-// state-sensitive fields / in-cell float wrap), falling back to the legacy
-// renderParagraph — otherwise the fragment paints a partition the legacy paint would
-// never draw. Pinned against sample class: numbered paragraph inside a table cell
-// (the §17.9.28 marker's numBodyOffset ≠ para.indentFirst).
+// A4 keeps one explicit table adapter predicate for negative leading tblInd. Cell
+// paragraphs themselves already use the same retained contract as body paragraphs.
 // ─────────────────────────────────────────────────────────────────────────────
 
 function cellOf(content: unknown[], widthPt: number): Record<string, unknown> {
@@ -597,8 +681,8 @@ describe('table fragment-paint legacy gate', () => {
   });
 });
 
-describe('table-cell paint byte-identity — fragment table paint (PR 6)', () => {
-  it('negative leading tblInd table: fragment paint falls back to the page-width legacy budget', async () => {
+describe('table-cell retained paragraph paint', () => {
+  it('negative leading tblInd remains covered by the explicit A4 table adapter', async () => {
     const cellPara = para(Array.from({ length: 50 }, () => 'wide').join(' '));
     const model = doc([
       tableOf([cellPara], {
@@ -610,15 +694,11 @@ describe('table-cell paint byte-identity — fragment table paint (PR 6)', () =>
       }),
     ], 400);
 
-    const r = await assertPaintIdentical(model);
+    const r = await assertRetainedPaint(model);
     expect(r.drawn).toBeGreaterThan(0);
   });
 
-  it('numbered paragraph inside a table cell: fragment paint === legacy (marker indent)', async () => {
-    // Legacy cell paint recomputes a NUMBERED paragraph with the marker-aware
-    // numBodyOffset first-line indent (the stamp gate rejects it); the fragment's
-    // stored lines were measured with para.indentFirst. The per-block gate must fall
-    // back to legacy renderParagraph for numbered cell paragraphs.
+  it('numbered paragraph inside a table cell retains marker/body geometry', async () => {
     const numbering = { numId: 1, level: 0, format: 'decimal', text: '1.',
       indentLeft: 36, tab: 36, suff: 'tab', jc: 'left' } as unknown as DocParagraph['numbering'];
     const cellPara = {
@@ -628,16 +708,20 @@ describe('table-cell paint byte-identity — fragment table paint (PR 6)', () =>
       }),
     };
     const model = doc([tableOf([cellPara])], 400);
-    const r = await assertPaintIdentical(model);
-    expect(r.drawn).toBeGreaterThan(0);
-    // Non-vacuity: the marker itself was drawn.
-    expect(r.streams.some((page) => page.some((c) => c.text === '1.'))).toBe(true);
+    const pages = paginateDocument(model, createLayoutServices(model, {
+      localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+    }));
+    const production = await renderAllPages(model, pages);
+    expect(production.measures).toBe(0);
+    const calls = production.perPage.flat();
+    const marker = calls.find((call) => call.text === '1.');
+    const body = calls.find((call) => call.text === 'w ');
+    expect(marker).toBeDefined();
+    expect(body).toBeDefined();
+    expect(body!.x).toBeGreaterThan(marker!.x);
   });
 
-  it('NUMPAGES field inside a table cell: fragment paint === legacy (state-sensitive)', async () => {
-    // The fragment's segments freeze the measure-time totalPages (1); legacy paint
-    // re-resolves the field against the real page context. The per-block gate must
-    // fall back for paragraphSegsStateSensitive cell paragraphs.
+  it('NUMPAGES inside a table cell uses the converged retained value', async () => {
     const fieldPara = {
       type: 'paragraph',
       ...para('total pages:'),
@@ -651,17 +735,63 @@ describe('table-cell paint byte-identity — fragment table paint (PR 6)', () =>
     // totalPages (2) differs from the measure-time value (1).
     const filler = para(Array.from({ length: 120 }, () => 'w').join(' '));
     const model = doc([tableOf([fieldPara]), filler as unknown as BodyElement], 100);
-    const r = await assertPaintIdentical(model);
+    const r = await assertRetainedPaint(model);
     expect(r.pages).toBeGreaterThan(1);
+    expect(r.measures).toBe(0);
     // The REAL page count was drawn (not the frozen measure-time "1").
     expect(r.streams.some((page) => page.some((c) => c.text === String(r.pages)))).toBe(true);
   });
 
-  it('cell paragraph after an in-cell wrap float: fragment paint === legacy (wrap context)', async () => {
-    // Cell paragraph 1 carries an anchored square-wrap image (registered into the
-    // cell's isolated float set during paint); paragraph 2's legacy paint re-lays-out
-    // around it (wrap context), while its fragment lines were measured with no wrap
-    // oracle. The per-block gate must fall back when the cell's float set is non-empty.
+  it('acquires a later source-row PAGE field from its destination table slice', async () => {
+    const pageField = para('');
+    (pageField.runs as unknown[]).push({
+      type: 'field', fieldType: 'page', instruction: 'PAGE', fallbackText: '?',
+      bold: false, italic: false, underline: false, strikethrough: false,
+      fontSize: 10, color: null, fontFamily: 'Times New Roman', background: null,
+    });
+    const table = tableOf([para('first')]) as unknown as DocTable;
+    const row = (paragraph: DocParagraph): DocTable['rows'][number] => ({
+      cells: [cellOf([paragraph], 180) as unknown as DocTable['rows'][number]['cells'][number]],
+      rowHeight: 24,
+      rowHeightRule: 'exact',
+      isHeader: false,
+    });
+    table.rows = [row(para('first')), row(para('second')), row(pageField)];
+    const model = doc([table as unknown as BodyElement], 60);
+    const pages = paginateDocument(model, createLayoutServices(model, {
+      localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+    }));
+
+    const pageFieldFragments = pages.flatMap((elements, pageIndex) =>
+      elements.flatMap((element) => {
+        const placed = bodyFragmentFor(element);
+        if (placed?.fragment.kind !== 'table') return [];
+        return placed.fragment.rows.flatMap((tableRow) =>
+          tableRow.cells.flatMap((cell) =>
+            cell.blocks.flatMap((block) =>
+              block.kind === 'paragraph' && block.lines.some((line) =>
+                line.placements.some((placement) =>
+                  placement.kind === 'text' && placement.dependency === 'page'))
+                ? [{ pageIndex, fragment: block }]
+                : [])));
+      }));
+    expect(pageFieldFragments).toHaveLength(1);
+    const [{ pageIndex, fragment }] = pageFieldFragments;
+    expect(pageIndex).toBeGreaterThan(0);
+    expect(fragment.source.path).toEqual([0, 2, 0, 0]);
+    const retainedPage = fragment.lines.flatMap((line) => line.placements)
+      .find((placement) => placement.kind === 'text' && placement.dependency === 'page');
+    expect(retainedPage).toMatchObject({ text: String(pageIndex + 1) });
+
+    const production = await renderAllPages(model, pages);
+    expect(production.measures).toBe(0);
+    expect(production.perPage[pageIndex].some((call) =>
+      call.text === String(pageIndex + 1))).toBe(true);
+  });
+
+  it('acquires the following cell paragraph in the preceding float wrap context', async () => {
+    // Cell paragraph 1 contributes an anchored square-wrap exclusion to the cell's
+    // isolated flow domain; paragraph 2 retains the resulting wrapped partition.
     const imgPara = {
       type: 'paragraph',
       ...para(''),
@@ -680,16 +810,14 @@ describe('table-cell paint byte-identity — fragment table paint (PR 6)', () =>
       ...para(Array.from({ length: 40 }, () => 'w').join(' ')),
     };
     const model = doc([tableOf([imgPara, wrapPara])], 400);
-    const r = await assertPaintIdentical(model);
+    const r = await assertRetainedPaint(model);
     expect(r.drawn).toBeGreaterThan(0);
+    expect(r.measures).toBe(0);
   });
 });
 
-describe('re-wrapped continuation slices (issue #908) — fragment paint parity', () => {
-  it.each([
-    ['fragment paint', true],
-    ['legacy paint', false],
-  ])('does not re-apply first-line indent while painting a continuation (%s)', async (_label, fragmentPaint) => {
+describe('re-wrapped retained continuation slices (issue #908)', () => {
+  it('does not re-apply first-line indent while painting a continuation', async () => {
     const p = para('あ'.repeat(28), { defaultFontSize: 20, indentFirst: 20 });
     (p.runs[0] as { fontSize: number }).fontSize = 20;
     const model = doc([p as unknown as BodyElement], 60);
@@ -707,7 +835,8 @@ describe('re-wrapped continuation slices (issue #908) — fragment paint parity'
     }));
     expect(continuationPage).toBeGreaterThanOrEqual(0);
 
-    const painted = await renderVariant(model, pages, { fragmentPaint, reuse: true });
+    const painted = await renderAllPages(model, pages);
+    expect(painted.measures).toBe(0);
     const col1Origin = model.section.marginLeft + 100 + 32;
     const lineCalls = painted.perPage[continuationPage]
       .filter((call) => call.op === 'fill' && call.text.includes('あ') && call.x >= col1Origin);
@@ -725,15 +854,14 @@ describe('re-wrapped continuation slices (issue #908) — fragment paint parity'
     expect(lineStarts.slice(1).every((x) => x === lineStarts[0])).toBe(true);
   });
 
-  it('draws paragraph anchors ONCE for a re-wrapped continuation (fragment === legacy)', async () => {
+  it('draws a paragraph anchor once for a re-wrapped continuation', async () => {
     // A §17.6.4 unequal-width split: col0 keeps the wide partition, col1 gets a
     // RE-MEASURED remainder whose fragment covers its WHOLE partition (lineStart 0,
     // lineEnd = length). paintParagraphFragment must not degrade that full-range
     // continuation slice to "no slice": renderParagraph's first-slice-only work
     // (anchor drawing, §17.3.1.7 top border) would run again in the destination
-    // column. Legacy paint sees the element's `continues` flag; the fragment path
-    // must thread it through. The anchored no-wrap shape's text is the observable:
-    // its fillText must appear exactly once per page in BOTH paint modes.
+    // column. The retained continuation owns the source occurrence only once. The
+    // anchored no-wrap shape's text is the observable.
     const anchorShape = {
       type: 'shape',
       widthPt: 40, heightPt: 10,
@@ -769,21 +897,13 @@ describe('re-wrapped continuation slices (issue #908) — fragment paint parity'
       (PaginatedBodyElement & { lineSlice?: { start: number; end: number; continues?: boolean } })[];
     expect(slices.some((s) => s.lineSlice?.continues === true)).toBe(true);
 
-    const production = await renderVariant(model, pages, { fragmentPaint: true, reuse: true });
-    const legacy = await renderVariant(model, pages, { fragmentPaint: false, reuse: true });
-    expect(production.perPage.length).toBe(legacy.perPage.length);
+    const production = await renderAllPages(model, pages);
+    expect(production.measures).toBe(0);
     for (let pg = 0; pg < production.perPage.length; pg++) {
-      // Byte-identical streams — in particular the anchor's text appears the same
-      // number of times (once) in both modes.
       const anchorDrawsProduction = production.perPage[pg].filter((c) => c.text === 'ANCHORTEXT').length;
-      const anchorDrawsLegacy = legacy.perPage[pg].filter((c) => c.text === 'ANCHORTEXT').length;
-      expect(anchorDrawsProduction).toBe(anchorDrawsLegacy);
       expect(anchorDrawsProduction).toBe(1);
-      expect(anchorDrawsLegacy).toBe(1);
-      expect(production.perPage[pg]).toEqual(legacy.perPage[pg]);
     }
-    // The anchor really painted (observable non-vacuity).
-    expect(legacy.perPage.flat().some((c) => c.text === 'ANCHORTEXT')).toBe(true);
+    expect(production.perPage.flat().some((c) => c.text === 'ANCHORTEXT')).toBe(true);
   });
 
   it('draws behindDoc paragraph anchors once for a re-wrapped continuation', async () => {
@@ -818,14 +938,11 @@ describe('re-wrapped continuation slices (issue #908) — fragment paint parity'
       (PaginatedBodyElement & { lineSlice?: { start: number; end: number; continues?: boolean } })[];
     expect(slices.some((s) => s.lineSlice?.continues === true)).toBe(true);
 
-    const production = await renderVariant(model, pages, { fragmentPaint: true, reuse: true });
-    const legacy = await renderVariant(model, pages, { fragmentPaint: false, reuse: true });
-    expect(production.perPage.length).toBe(legacy.perPage.length);
+    const production = await renderAllPages(model, pages);
+    expect(production.measures).toBe(0);
     for (let pg = 0; pg < production.perPage.length; pg++) {
       const anchorDrawsProduction = production.perPage[pg].filter((c) => c.text === 'ANCHORTEXT').length;
-      const anchorDrawsLegacy = legacy.perPage[pg].filter((c) => c.text === 'ANCHORTEXT').length;
       expect.soft(anchorDrawsProduction).toBe(1);
-      expect.soft(anchorDrawsLegacy).toBe(1);
     }
   });
 });

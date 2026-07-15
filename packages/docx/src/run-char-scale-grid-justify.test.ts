@@ -204,36 +204,32 @@ describe('WD4 #816 — w:w charScale reaches paint under an active docGrid / jus
       section({ pageWidth: 205 }),
     );
 
-    // The first justified line's run — drawn with a non-zero justify pitch
-    // (letterSpacing) AND under the run's horizontal scale (post-fix). Before the
-    // fix the justify-pitched draw was at scaleX 1 (the ink overrun).
+    // The retained representation may be one contextual operation or several
+    // positioned slices. Every operation must keep the run scale, and their
+    // combined transformed ink extent must equal the reported box.
     const firstY = Math.min(...fills.map((f) => f.y));
     const firstLine = fills.filter((f) => f.y === firstY);
-    const pitched = firstLine.find((f) => f.letterSpacing > 0);
-    expect(pitched, 'the first line is fully-distributed (justify pitch present)').toBeDefined();
-    // Regression guard: the justify-pitched draw is under the horizontal scale.
-    expect(pitched!.scaleX, 'justify draw honours w:w scale').toBeCloseTo(scale, 9);
+    expect(firstLine.length).toBeGreaterThan(0);
+    expect(firstLine.every((operation) => Math.abs(operation.scaleX - scale) < 1e-9),
+      'every retained draw honours w:w scale').toBe(true);
 
     // Match the reported run box for the drawn text.
-    const seg = runs.find(
-      (r) => pitched!.text.startsWith(r.text) || r.text === pitched!.text,
-    );
+    const paintedText = firstLine.map((operation) => operation.text).join('');
+    const seg = runs.find((run) => paintedText.startsWith(run.text) || run.text === paintedText);
     expect(seg, 'run box for the justified line').toBeDefined();
 
-    // The fully-distributed line is drawn as ONE fillText carrying the whole run
-    // under `ctx.scale(scale, 1)` with letterSpacing = distPerGap/scale. Unlike a
-    // grid cell, the justify slack excludes the FINAL glyph's trailing gap (the
-    // box edge is the last glyph's advance, not one gap past it), so the painted
-    // segment span is n·FONT_PX·scale + (n−1)·distPerGap. That must equal the
-    // reported box (measure==paint); before the fix the glyphs painted at FULL
-    // width (n·FONT_PX + (n−1)·distPerGap) — a ~2× overrun.
-    expect(pitched!.text, 'whole line drawn in one piece').toBe(seg!.text);
-    const n = [...pitched!.text].length;
-    const distPerGapScaled = pitched!.scaleX * pitched!.letterSpacing; // distPerGap
-    const paintedSpan = n * FONT_PX * pitched!.scaleX + (n - 1) * distPerGapScaled;
-    const screenLeft = pitched!.translateX + pitched!.scaleX * pitched!.x;
+    const extents = firstLine.map((operation) => {
+      const count = [...operation.text].length;
+      const left = operation.translateX + operation.scaleX * operation.x;
+      const width = operation.scaleX
+        * (count * FONT_PX + Math.max(0, count - 1) * operation.letterSpacing);
+      return { left, right: left + width };
+    });
+    const screenLeft = Math.min(...extents.map((extent) => extent.left));
+    const screenRight = Math.max(...extents.map((extent) => extent.right));
     expect(screenLeft).toBeCloseTo(seg!.x, 3);
-    expect(paintedSpan, 'painted span fills the justified box (not full width)').toBeCloseTo(seg!.w, 3);
+    expect(screenRight - screenLeft,
+      'combined transformed ink fills the justified box').toBeCloseTo(seg!.w, 3);
   });
 
   // Sanity: the plain-scale arm (no grid, no justify) is unchanged — the existing

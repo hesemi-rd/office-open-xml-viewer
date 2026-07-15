@@ -16,6 +16,7 @@
 import type { FramePr } from './types.js';
 import type { RenderState } from './renderer.js';
 import { type FloatRect, resolveFloatOverlap } from './float-layout.js';
+import type { FrameGeometryState } from './layout/types.js';
 
 /** Resolved geometry (canvas px) of a `<w:framePr>` text frame. Exported for
  *  unit tests only (the table-driven frame-geometry assertions) — not part of
@@ -32,6 +33,10 @@ export interface FrameBox {
   exRight: number;
   exTop: number;
   exBottom: number;
+  /** False for non-owning paragraphs in one grouped frame. */
+  registerExclusion?: boolean;
+  /** Stable retained identity for the group's one wrap exclusion. */
+  exclusionId?: string;
 }
 
 /**
@@ -45,7 +50,7 @@ export interface FrameBox {
  *   - "page"   → the physical page edges (0..pageWidth).
  * All values in canvas px.
  */
-export function frameXContainer(hAnchor: string, state: RenderState): { left: number; right: number } {
+export function frameXContainer(hAnchor: string, state: FrameGeometryState): { left: number; right: number } {
   const sc = state.scale;
   switch (hAnchor) {
     case 'margin':
@@ -83,7 +88,7 @@ export function frameYContainer(
   vAnchor: string,
   paraTop: number,
   contentH: number,
-  state: RenderState,
+  state: FrameGeometryState,
 ): { start: number; end: number } {
   const sc = state.scale;
   switch (vAnchor) {
@@ -205,7 +210,7 @@ export function clampAbsBoxIntoContainer(
  */
 export function computeFrameBox(
   fp: FramePr,
-  state: RenderState,
+  state: FrameGeometryState,
   paraTop: number,
   contentW: number,
   contentH: number,
@@ -392,6 +397,7 @@ export function pushFloatRect(state: RenderState, o: PushFloatOpts): FloatRect {
  * Exported for unit tests only (frame-geometry table) — not package API.
  */
 export function registerFrameFloat(box: FrameBox, fp: FramePr, state: RenderState): void {
+  if (box.registerExclusion === false) return;
   if (fp.wrap === 'none') return;
   if (box.w <= 0 || box.h <= 0) return;
 
@@ -414,7 +420,7 @@ export function registerFrameFloat(box: FrameBox, fp: FramePr, state: RenderStat
     // RIGHT. A generic frame may sit anywhere, so text wraps on both sides
     // (resolveLineFloatWindow then takes the widest free gap around it).
     side: fp.dropCap === 'drop' || fp.dropCap === 'margin' ? 'right' : 'bothSides',
-    imageKey: '', // non-image float: the frame is painted above, not deferred.
+    imageKey: box.exclusionId ?? '',
     drawn: true, // painted by renderFrameParagraph; deferred path must skip it.
     paraId,
     avoidOverlap: false, // frames opt out of overlap re-seating.

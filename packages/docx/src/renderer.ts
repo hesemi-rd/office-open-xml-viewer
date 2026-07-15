@@ -4,6 +4,7 @@ import type {
   TabStop, ParagraphBorders, ParaBorderEdge, DocxRunBorder, SectionProps, SectionGeom, PageNumType, PageBorders, PageBorderEdge, DocNote, NumberingInfo, ColumnGeom, ColumnsSpec, FramePr, TblpPr, DocSettings,
 } from './types';
 import type { ArrowEnd, Stroke } from '@silurus/ooxml-core';
+import { textRunPaintInfo } from './paint/text-run-info.js';
 import {
   buildCustomPath,
   buildShapePath,
@@ -94,6 +95,7 @@ import {
 import {
   type FrameBox,
   computeFrameBox,
+  frameXContainer,
   registerFrameFloat,
   pushFloatRect,
 } from './frame-geometry.js';
@@ -130,11 +132,39 @@ import {
   type StoryContext,
 } from './layout-context.js';
 import { canvasFontString, justifiedPiecePositions } from '@silurus/ooxml-core';
-import type { LayoutServices } from './layout/types.js';
+import type { LayoutServices, Matrix2DData, ParagraphLayout, SourceRef, WrapExclusion } from './layout/types.js';
 import type { DocumentLayout as RetainedDocumentLayout } from './layout/types.js';
 import { normalizeLayoutOptions } from './layout/options.js';
 import type { LayoutOptions } from './layout/options.js';
-import { paintLayoutPage as paintRetainedLayoutPage } from './paint/canvas-page.js';
+import {
+  paginatedFlowHasPaginationDependentFields,
+  paginationFieldGeometryFingerprint,
+  paginationFieldFlowGeometry,
+  recordStoryPageFieldOccurrences,
+  resolvePaginationFieldLayout,
+} from './layout/pagination-fields.js';
+import {
+  createCanvasPaintResourcePainter,
+  paintLayoutPage as paintRetainedLayoutPage,
+} from './paint/canvas-page.js';
+import { canonicalCanvasPaintResourceHandlers } from './paint/canonical-resource-handlers.js';
+import { paintPlacedParagraphLayout, paintPlacedTextBoxLayout, paintTextBoxLayout } from './paint/canvas-text.js';
+import { paintDrawingLayout } from './paint/canvas-drawing.js';
+import type { CanvasPaintResourcePainter } from './paint/types.js';
+import { createDocumentPaintResourceRegistry } from './layout/production-paint-resources.js';
+import {
+  createProductionPaintResourceSession,
+  unavailablePaintResourceHandle,
+} from './paint/resource-session.js';
+import {
+  enqueueDeferredFrontPaint,
+  withDeferredFrontPaintSession,
+  type DeferredFrontPaintState,
+} from './paint/deferred-front-session.js';
+import {
+  createHeaderFooterStoryPainter,
+  type HeaderFooterStoryPainter,
+} from './paint/header-footer-story.js';
 import {
   mathResourceKey,
   bodyMathOccurrences,
@@ -147,18 +177,38 @@ import {
 import { createFontResolver, type FontInventoryFace } from './layout/font-service.js';
 import {
   attachPrivateResourceLookup,
+  attachPaintResourceRegistry,
+  createFieldAcquisitionServicesView,
+  fieldAcquisitionContextOf,
+  paintResourceRegistryOf,
   privateResourceLookupOf,
+  type PageFieldAcquisitionContext,
 } from './layout/runtime-state.js';
 import {
+  calcEffectiveFontPx,
   createTextLayoutService,
   classifyDocxFontGeneric,
+  EAST_ASIAN_RE,
+  nextTabStop,
+  shapeRunToDocRun,
   snapshotLocalMetrics,
   type GlyphMeasureRequest,
 } from './layout/text.js';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts.js';
-import { internalDocumentModel, numberingMarkerShapeInput } from './parser-model.js';
-import { normalizeInternalDocumentModel } from './parser-model.js';
 import {
+  internalDocumentModel,
+  numberingMarkerShapeInput,
+  paragraphAcquisitionInput,
+  paragraphMarkShapeInput,
+  textBoxAcquisitionInput,
+} from './parser-model.js';
+import {
+  normalizeInternalDocumentModel,
+  sectionPlacementInputFromBody,
+} from './parser-model.js';
+import {
+  applyNumberingBodyOffset,
+  resolveNumberingMarkerGeometry,
   shapeNumberingMarkerText,
   type NumberingMarkerTextLayout,
 } from './layout/numbering-marker.js';
@@ -174,20 +224,16 @@ export { computeColumns };
 // a TYPE only (erased), so there is no runtime cycle.
 import {
   DEFAULT_TAB_PT,
-  EAST_ASIAN_RE,
   buildFont,
   buildSegments,
-  calcEffectiveFontPx,
   fontClassesWithPitches,
   getDefaultFontSize,
   gridCharDeltaPx,
   gridSegDeltaPx,
   hasCJKBreakOpportunity,
   isGridLineRule,
-  kinsokuRulesEquivalent,
   layoutLines,
   lineBoxHeight,
-  nextTabStop,
   paragraphMarkLineHeight,
   paragraphSegsStateSensitive,
   rescaleLayoutLines,
@@ -195,7 +241,6 @@ import {
   segAdvanceWidth,
   segLetterSpacingPx,
   shapeRenderState,
-  shapeRunToDocRun,
   segmentCharacterGridDeltaPx,
   segmentEastAsiaFloorSingleLinePx,
   segmentIntendedSingleLinePx,
@@ -228,17 +273,28 @@ import {
   tableFragmentHeightPt,
   type DocumentLayout,
   type LayoutPage,
-  type ParagraphFragment,
   type PlacedFragment,
   type FlowFragment,
   type TableFragment,
   type CellFragment,
 } from './layout-fragments.js';
 import { buildTableFragment } from './table-fragments.js';
-// PR 5 — body fragment paint. renderer <-> fragment-paint is a deliberate import
-// cycle: both sides use the other only inside function bodies (never at module
-// evaluation), so ESM live bindings resolve them at call time.
-import { paintParagraphFragment, paintTableFragment } from './fragment-paint.js';
+import { acquireTableCellBlocks } from './layout/table-cell-blocks.js';
+import { paragraphGapAdjustment, paragraphGapPt } from './layout/paragraph-spacing.js';
+import { imageResourceKey } from './layout/source-key.js';
+import {
+  hasVisibleParagraphBorder as hasAnyBorderEdge,
+  paragraphsShareBorderBox as parasShareBorderBox,
+} from './layout/paragraph-border-adjacency.js';
+import {
+  acquireRetainedFrameGroup,
+  acquireShapeTextBoxLayout,
+  bodyFrameGroupFor,
+  bodyParagraphBorderEdgesFor,
+  bodySourceIndexFor,
+  paragraphLayoutFromMeasurement,
+  sliceParagraphLayout,
+} from './layout/paragraph.js';
 import {
   drawVerticalRun,
   drawTateChuYokoRun,
@@ -464,10 +520,20 @@ export function createLayoutServices(
           ctx.letterSpacing = `${request.letterSpacingPt}px`;
           if (request.kerning != null) ctx.fontKerning = request.kerning ? 'normal' : 'none';
           const metrics = ctx.measureText(request.text);
+          const inkBounds = {
+            xMinPt: Number.isFinite(metrics.actualBoundingBoxLeft)
+              ? -metrics.actualBoundingBoxLeft : 0,
+            xMaxPt: Number.isFinite(metrics.actualBoundingBoxRight)
+              ? metrics.actualBoundingBoxRight : metrics.width,
+            ascentPt: metrics.actualBoundingBoxAscent,
+            descentPt: metrics.actualBoundingBoxDescent,
+          };
+          const hasFiniteInkBounds = Object.values(inkBounds).every(Number.isFinite);
           return {
             advancePt: metrics.width,
             ascentPt: metrics.fontBoundingBoxAscent ?? metrics.actualBoundingBoxAscent ?? 0,
             descentPt: metrics.fontBoundingBoxDescent ?? metrics.actualBoundingBoxDescent ?? 0,
+            ...(hasFiniteInkBounds ? { inkBounds } : {}),
           };
         } finally {
           ctx.font = previousFont;
@@ -490,9 +556,18 @@ export function createLayoutServices(
       message: 'The optional DOM math engine is unavailable; using the worker-safe text fallback',
     }],
   }));
+  const imageMetadata = documentImageMetadataRecords(doc, (paragraph) => {
+    const numbering = paragraph.numbering;
+    if (!numbering) throw new Error('Picture-bullet metadata requires numbering');
+    const marker = numberingMarkerShapeInput(numbering, getDefaultFontSize(paragraph));
+    return {
+      widthPt: numbering.picBulletWidthPt ?? marker.fontSizePt,
+      heightPt: numbering.picBulletHeightPt ?? marker.fontSizePt,
+    };
+  });
   const services: LayoutServices = Object.freeze({
     text: textBase,
-    images: createImageMetadataService(documentImageMetadataRecords(doc)),
+    images: createImageMetadataService(imageMetadata),
     math: createMathMetadataService(mathResources),
   });
   const occurrenceKeys = mathOccurrences.map(({ source, display }) =>
@@ -513,6 +588,7 @@ export function createLayoutServices(
     options.mathDrawables ?? new Map(),
     availableMathKeys,
   );
+  attachPaintResourceRegistry(services, createDocumentPaintResourceRegistry(doc, imageMetadata));
   return services;
 }
 
@@ -575,13 +651,15 @@ export async function prepareMathRuns(
   return { records, drawables };
 }
 
-export interface RenderState {
+export interface RenderState extends DeferredFrontPaintState {
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
   scale: number;    // px per pt
   /** Device-pixel ratio the canvas was scaled by (`ctx.scale(dpr, dpr)`). Used to
    *  compute the crisp-line offset (see crispOffset) so thin axis-aligned strokes
    *  land on a single device row instead of straddling two. */
   dpr: number;
+  /** Retained point-space to final logical CSS, including the active page frame. */
+  pointToCss?: Matrix2DData;
   contentX: number; // left of content area (px)
   contentW: number; // width of content area (px)
   y: number;        // current Y cursor (px)
@@ -651,6 +729,10 @@ export interface RenderState {
   resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>>;
   /** Instance-scoped resource snapshot shared by pagination and paint. */
   layoutServices?: LayoutServices;
+  /** Per-render opaque retained resource session adapter. */
+  retainedResourcePainter?: CanvasPaintResourcePainter;
+  /** Renderer-owned retained table adapter, threaded through nested cell states. */
+  retainedTablePainter?: (fragment: TableFragment, state: RenderState) => void;
   /** ECMA-376 §17.15.1.58–.60 — resolved Japanese line-breaking rules
    *  (kinsoku enabled flag + line-start/line-end forbidden character sets).
    *  Default is the application's Japanese kinsoku table with kinsoku ON. */
@@ -705,37 +787,6 @@ export interface RenderState {
    *  flow reaches that paragraph. Reset whenever floats are reset (page flip
    *  or column relocation that rolls back this paragraph's own floats). */
   pageAnchorPrescanned?: Set<DocParagraph>;
-  /** ECMA-376 §20.4.2.10 `behindDoc` z-order: an anchored object with
-   *  `behindDoc="0"` floats IN FRONT of the inline text/image flow. The flow is
-   *  painted in document order, so a front-anchored shape in an EARLY paragraph
-   *  would be overpainted by a LATER inline image (sample-13: the "Journal
-   *  homepage" text box, anchored to the first paragraph, sat behind the inline
-   *  masthead banner that follows it). When this collector is set, the body
-   *  render defers each front-anchor draw into it (capturing the column band)
-   *  and replays them after the whole page's flow, so front floats land on top.
-   *  `null`/absent ⇒ draw in place (headers/footers and measurement passes). */
-  deferFront?: Array<() => void> | null;
-  /** ECMA-376 §17.6.8 `<w:lnNumType>` — active line-numbering config for the
-   *  BODY flow of the current section, or `undefined` when line numbering is off.
-   *  When set, {@link drawParagraphLine} draws the line's number in the left
-   *  margin (for lines whose 1-based count is a multiple of `countBy`) and the
-   *  body flow advances {@link lineNumberCounter}. Only the top-level body render
-   *  sets this — nested renders (headers/footers, table cells, notes) clear it so
-   *  their lines are not numbered (§17.6.8 numbers the main document story). */
-  lineNumbering?: {
-    countBy: number;
-    start: number;
-    /** Left-margin gap from the text margin to the number glyphs (pt). */
-    distancePt: number;
-    /** The number font size (pt) — the document's default, so numbers match the
-     *  body baseline grid. */
-    fontSizePt: number;
-  };
-  /** ECMA-376 §17.6.8 — the running body line count for the current page. Seeded
-   *  to `lineNumbering.start` at the top of each page (restart="newPage", the
-   *  default) or to the continued value for continuous/newSection. Incremented
-   *  once per body line drawn (or measured in a dry-run counting pass). */
-  lineNumberCounter?: number;
   /** ECMA-376 §17.6.20 vertical writing — the FRAME-level vertical flag. When
    *  true the page is laid out in a SWAPPED logical coordinate space (logical
    *  width = physical page height) and the whole page paint is rotated +90°
@@ -802,27 +853,49 @@ const BODY_STORY_CONTEXT: StoryContext = {
 };
 
 export function resolveBodyParagraphLayoutContext(
-  state: Pick<RenderState, 'layoutSettings' | 'sectionLayout'>,
+  state: Pick<RenderState, 'layoutSettings' | 'sectionLayout'>
+    & Partial<Pick<RenderState, 'layoutServices' | 'defaultTabPt'>>,
   paragraph: DocParagraph,
 ): ParagraphLayoutContext {
-  return resolveParagraphLayoutContext(
+  const context = resolveParagraphLayoutContext(
     state.layoutSettings,
     state.sectionLayout,
     BODY_STORY_CONTEXT,
     paragraph,
   );
+  return applyNumberingBodyOffset(context, {
+    numbering: paragraph.numbering,
+    ...(paragraph.numbering ? {
+      markerInput: numberingMarkerShapeInput(paragraph.numbering, getDefaultFontSize(paragraph)),
+    } : {}),
+    authoredFirstIndentPt: paragraph.indentFirst,
+    tabStops: paragraph.tabStops,
+    defaultTabPt: state.defaultTabPt,
+    service: state.layoutServices?.text,
+  });
 }
 
 function resolveStateParagraphLayoutContext(
-  state: Pick<RenderState, 'layoutSettings' | 'sectionLayout' | 'storyContext'>,
+  state: Pick<RenderState, 'layoutSettings' | 'sectionLayout' | 'storyContext'>
+    & Partial<Pick<RenderState, 'layoutServices' | 'defaultTabPt'>>,
   paragraph: DocParagraph,
 ): ParagraphLayoutContext {
-  return resolveParagraphLayoutContext(
+  const context = resolveParagraphLayoutContext(
     state.layoutSettings,
     state.sectionLayout,
     state.storyContext ?? BODY_STORY_CONTEXT,
     paragraph,
   );
+  return applyNumberingBodyOffset(context, {
+    numbering: paragraph.numbering,
+    ...(paragraph.numbering ? {
+      markerInput: numberingMarkerShapeInput(paragraph.numbering, getDefaultFontSize(paragraph)),
+    } : {}),
+    authoredFirstIndentPt: paragraph.indentFirst,
+    tabStops: paragraph.tabStops,
+    defaultTabPt: state.defaultTabPt,
+    service: state.layoutServices?.text,
+  });
 }
 
 function withTableCellStory(state: RenderState): RenderState {
@@ -1079,7 +1152,7 @@ function authorColor(author?: string): string {
   return TRACK_CHANGE_AUTHOR_PALETTE[Math.abs(h) % TRACK_CHANGE_AUTHOR_PALETTE.length];
 }
 
-function collectImagePairs(doc: DocxDocumentModel): ImagePair[] {
+function collectImagePairs(doc: DocxDocumentModel, layoutServices: LayoutServices): ImagePair[] {
   const seen = new Map<string, ImagePair>();
   // Record one image reference (collapsing duplicate keys, tracking the max
   // intended draw size so a vector metafile is rasterized sharply enough for its
@@ -1100,20 +1173,16 @@ function collectImagePairs(doc: DocxDocumentModel): ImagePair[] {
   // that lives on the paragraph's numbering, not in any run. Feed it into the
   // same decode pipeline (keyed by its zip path) so the marker draw site finds
   // a decoded bitmap.
-  const recordPara = (para: DocParagraph) => {
+  const recordPara = (para: DocParagraph, source: SourceRef) => {
     const num = para.numbering;
     const pb = num?.picBulletImagePath;
     if (pb && num) {
-      // Same §17.9.20 size resolution the draw site uses (picBulletSizePt): the
-      // extent if present, else the resolved marker font size. Keeping the two in
-      // lock-step matters for WMF/EMF bullets, where this size drives raster
-      // sharpness — a 0 here would rasterize a vector bullet at zero size.
-      const size = picBulletSizePt(num, para);
+      const size = layoutServices.images.resolve(imageResourceKey(source, pb));
       record({
         imagePath: pb,
         mimeType: num.picBulletMimeType ?? '',
-        widthPt: size.w,
-        heightPt: size.h,
+        widthPt: size.widthPt,
+        heightPt: size.heightPt,
       });
     }
   };
@@ -1149,34 +1218,53 @@ function collectImagePairs(doc: DocxDocumentModel): ImagePair[] {
       }
     }
   };
-  const walkTable = (tbl: DocTable) => {
-    for (const row of tbl.rows)
-      for (const cell of row.cells)
-        for (const ce of cell.content) {
+  const walkTable = (
+    tbl: DocTable,
+    story: SourceRef['story'],
+    storyInstance: string,
+    prefix: readonly number[],
+  ) => {
+    for (let rowIndex = 0; rowIndex < tbl.rows.length; rowIndex += 1) {
+      const row = tbl.rows[rowIndex]!;
+      for (let cellIndex = 0; cellIndex < row.cells.length; cellIndex += 1) {
+        const cell = row.cells[cellIndex]!;
+        for (let elementIndex = 0; elementIndex < cell.content.length; elementIndex += 1) {
+          const ce = cell.content[elementIndex]!;
+          const path = [...prefix, rowIndex, cellIndex, elementIndex];
           if (ce.type === 'paragraph') {
             const p = ce as unknown as DocParagraph;
-            recordPara(p);
+            recordPara(p, { story, storyInstance, path });
             walk(p.runs);
-          } else if (ce.type === 'table') walkTable(ce as unknown as DocTable);
+          } else if (ce.type === 'table') {
+            walkTable(ce as unknown as DocTable, story, storyInstance, path);
+          }
         }
-  };
-  const walkBody = (body: BodyElement[]) => {
-    for (const el of body) {
-      if (el.type === 'paragraph') {
-        const p = el as unknown as DocParagraph;
-        recordPara(p);
-        walk(p.runs);
       }
-      if (el.type === 'table') walkTable(el as unknown as DocTable);
     }
   };
-  walkBody(doc.body);
-  if (doc.headers.default) walkBody(doc.headers.default.body);
-  if (doc.headers.first)   walkBody(doc.headers.first.body);
-  if (doc.headers.even)    walkBody(doc.headers.even.body);
-  if (doc.footers.default) walkBody(doc.footers.default.body);
-  if (doc.footers.first)   walkBody(doc.footers.first.body);
-  if (doc.footers.even)    walkBody(doc.footers.even.body);
+  const walkBody = (
+    body: BodyElement[],
+    story: SourceRef['story'],
+    storyInstance: string,
+  ) => {
+    for (let elementIndex = 0; elementIndex < body.length; elementIndex += 1) {
+      const el = body[elementIndex]!;
+      const source = { story, storyInstance, path: [elementIndex] } as const;
+      if (el.type === 'paragraph') {
+        const p = el as unknown as DocParagraph;
+        recordPara(p, source);
+        walk(p.runs);
+      }
+      if (el.type === 'table') walkTable(el as unknown as DocTable, story, storyInstance, source.path);
+    }
+  };
+  walkBody(doc.body, 'body', 'body');
+  if (doc.headers.default) walkBody(doc.headers.default.body, 'header', 'default');
+  if (doc.headers.first)   walkBody(doc.headers.first.body, 'header', 'first');
+  if (doc.headers.even)    walkBody(doc.headers.even.body, 'header', 'even');
+  if (doc.footers.default) walkBody(doc.footers.default.body, 'footer', 'default');
+  if (doc.footers.first)   walkBody(doc.footers.first.body, 'footer', 'first');
+  if (doc.footers.even)    walkBody(doc.footers.even.body, 'footer', 'even');
   return [...seen.values()];
 }
 
@@ -1222,9 +1310,9 @@ async function applyColorReplacement(bmp: ImageBitmap, colorHex: string): Promis
  *     returning `null` for a true EMF (or a geometry-less metafile), else
  *     `createImageBitmap`. That `null` is a LEGITIMATE "no drawable output" (not
  *     an error), so we propagate it as `null` and `preloadImages` drops the image
- *     — the existing "missing image" behavior, no crash. (A *transient* fetch/
- *     decode failure still rejects; `preloadImages`' per-image catch absorbs that
- *     too.) Every draw site null-checks the map lookup, matching pptx's
+ *     — the existing "missing image" behavior, no crash. A fetch/decode failure
+ *     rejects and remains on the renderer/viewer's explicit error path. Every
+ *     draw site null-checks the map lookup, matching pptx's
  *     `if (!bitmap) return` and xlsx's "skip if falsy" draw guards.
  *  2. when a clrChange is requested, the make-transparent result is memoized per
  *     (imagePath, colorReplaceFrom) in {@link colorReplacedCacheFor} so the
@@ -1256,7 +1344,9 @@ export async function decodeRaster(
   // geometry-less metafile), NOT an error: propagate it so `preloadImages`
   // drops the image and every draw site skips it via its null-check. We return
   // null rather than throw so this expected outcome never travels the exception
-  // path (a transient fetch/decode failure still rejects and is caught upstream).
+  // path. A fetch/decode failure still rejects into the active renderer/viewer
+  // error contract; only a stale render suppresses it after the canvas ownership
+  // token shows that a newer render has superseded the operation.
   if (!base) return null;
   if (!colorReplaceFrom && !duotone) return base;
   // Second layer: memoize the recolour result per (path, colour, duotone). The
@@ -1312,10 +1402,11 @@ export async function decodeRaster(
 export async function preloadImages(
   doc: DocxDocumentModel,
   fetchImage: ((path: string, mime: string) => Promise<Blob>) | undefined,
+  layoutServices?: LayoutServices,
 ): Promise<Map<string, DecodedImage>> {
   if (!fetchImage) return new Map();
   const fetch = fetchImage;
-  const pairs = collectImagePairs(doc);
+  const pairs = collectImagePairs(doc, layoutServices ?? createLayoutServices(doc));
   const entries = await Promise.all(
     pairs.map(async (pair): Promise<[string, DecodedImage] | null> => {
       // Unified svgBlip selection (shared with pptx/xlsx). The decoded image is
@@ -1327,41 +1418,43 @@ export async function preloadImages(
       // flag, so it stands in for srcRect presence (`|| null` normalises the
       // undefined case). When true, `blip.svgImagePath` is narrowed to string.
       const blip = { svgImagePath: pair.svgImagePath, srcRect: pair.hasCrop || null };
-      try {
-        // `decodeRaster` may resolve to `null` for a legitimately undrawable
-        // metafile (true EMF / geometry-less WMF). That is not an error, so it
-        // does not travel the `catch` below — we detect it explicitly and drop
-        // the map entry, exactly as the caught (transient-failure) path does.
-        let img: DecodedImage | null;
-        if (preferVectorBlip(blip)) {
-          // Prefer the vector original (Microsoft `asvg:svgBlip` extension);
-          // fall back to the raster on any SVG decode failure. With an
-          // `<a:srcRect>` crop (§20.1.8.55) we skip this branch and decode the
-          // raster instead, because the crop math (drawImageCropped) needs the
-          // bitmap's native pixel grid — an SVG element has none.
-          try {
-            img = await getCachedSvgImageByPath(blip.svgImagePath, fetch);
-          } catch {
-            // The raster fallback carries the §20.1.8.23 duotone recolour; an SVG
-            // vector original has no readable pixel grid, so it stays un-recoloured.
-            img = dataIsSvg
-              ? await getCachedSvgImageByPath(pair.imagePath, fetch)
-              : await decodeRaster(pair.imagePath, pair.mimeType, pair.colorReplaceFrom, fetch, pair.widthPt, pair.heightPt, pair.duotone);
-          }
-        } else if (dataIsSvg) {
-          // svg-only picture (no svgImagePath surfaced — e.g. a non-svgBlip
-          // `.svg` part): `createImageBitmap` can't rasterize SVG, so decode
-          // through the path-keyed <img>-based SVG path.
-          img = await getCachedSvgImageByPath(pair.imagePath, fetch);
-        } else {
-          img = await decodeRaster(pair.imagePath, pair.mimeType, pair.colorReplaceFrom, fetch, pair.widthPt, pair.heightPt, pair.duotone);
+      // `decodeRaster` may resolve to `null` for a legitimately undrawable
+      // metafile (true EMF / geometry-less WMF). That is not an error: omit its
+      // map entry. Fetch, SVG+raster fallback, decode, and recolor failures are
+      // different outcomes and deliberately reject this preload operation.
+      let img: DecodedImage | null;
+      if (preferVectorBlip(blip)) {
+        // Prefer the vector original (Microsoft `asvg:svgBlip` extension);
+        // fall back to the raster on any SVG decode failure. With an
+        // `<a:srcRect>` crop (§20.1.8.55) we skip this branch and decode the
+        // raster instead, because the crop math (drawImageCropped) needs the
+        // bitmap's native pixel grid — an SVG element has none.
+        try {
+          img = await getCachedSvgImageByPath(blip.svgImagePath, fetch);
+        } catch (vectorError) {
+          // The raster fallback carries the §20.1.8.23 duotone recolour; an SVG
+          // vector original has no readable pixel grid, so it stays un-recoloured.
+          const fallback = dataIsSvg
+            ? await getCachedSvgImageByPath(pair.imagePath, fetch)
+            : await decodeRaster(pair.imagePath, pair.mimeType, pair.colorReplaceFrom, fetch, pair.widthPt, pair.heightPt, pair.duotone);
+          // A successful fallback is authoritative. A legitimate null raster,
+          // however, cannot erase the vector source's real decode failure: no
+          // drawable source remains, and classifying that outcome as merely an
+          // unsupported metafile would hide package corruption from onError.
+          if (!fallback) throw vectorError;
+          img = fallback;
         }
-        // Undrawable metafile → drop the entry (draw sites skip a missing key).
-        if (!img) return null;
-        return [imageKey(pair.imagePath, pair.colorReplaceFrom, pair.duotone), img];
-      } catch {
-        return null;
+      } else if (dataIsSvg) {
+        // svg-only picture (no svgImagePath surfaced — e.g. a non-svgBlip
+        // `.svg` part): `createImageBitmap` can't rasterize SVG, so decode
+        // through the path-keyed <img>-based SVG path.
+        img = await getCachedSvgImageByPath(pair.imagePath, fetch);
+      } else {
+        img = await decodeRaster(pair.imagePath, pair.mimeType, pair.colorReplaceFrom, fetch, pair.widthPt, pair.heightPt, pair.duotone);
       }
+      // Undrawable metafile → explicit unavailable resource at session binding.
+      if (!img) return null;
+      return [imageKey(pair.imagePath, pair.colorReplaceFrom, pair.duotone), img];
     }),
   );
   return new Map(entries.filter((e): e is [string, DecodedImage] => e !== null));
@@ -1802,10 +1895,48 @@ async function renderDocumentToCanvasLeased(
     ctx.rotate(Math.PI / 2);
   }
 
-  const images = await preloadImages(doc, opts.fetchImage);
+  let images: Map<string, DecodedImage>;
+  try {
+    images = await preloadImages(doc, opts.fetchImage, layoutServices);
+  } catch (error) {
+    // A stale render must not report a late decode failure after a newer render
+    // has taken ownership of this canvas. The active render still rejects so the
+    // viewer routes corruption/fetch failures through its onError contract.
+    if (superseded()) return;
+    throw error;
+  }
   // A newer render of this canvas started while we awaited image decode — stop
   // so we don't paint this (now stale) page over the newer one.
   if (superseded()) return;
+
+  const privateResources = privateResourceLookupOf<CanvasImageSource>(layoutServices);
+  const retainedResourceSession = createProductionPaintResourceSession(
+    paintResourceRegistryOf(layoutServices),
+    (descriptor) => {
+      if (descriptor.kind === 'math') {
+        return privateResources?.keys.includes(descriptor.resourceKey)
+          ? privateResources.resolve(descriptor.resourceKey)
+          : unavailablePaintResourceHandle('optional math renderer unavailable');
+      }
+      if (descriptor.kind === 'image' || descriptor.kind === 'picture-bullet') {
+        const image = images.get(imageKey(
+          descriptor.partPath,
+          descriptor.colorReplaceFrom,
+          descriptor.duotone as Duotone | undefined,
+        ));
+        return image ?? unavailablePaintResourceHandle(
+          opts.fetchImage
+            ? 'unsupported image format produced no drawable output'
+            : 'image byte source unavailable',
+        );
+      }
+      return undefined;
+    },
+  );
+  const retainedResourcePainter = createCanvasPaintResourcePainter(
+    retainedResourceSession,
+    canonicalCanvasPaintResourceHandlers,
+  );
 
   // ECMA-376 §17.11: map each note id to its 1-based display number so the
   // reference markers (and the in-note footnoteRef placeholder) show the
@@ -1829,6 +1960,9 @@ async function renderDocumentToCanvasLeased(
     // The backing store may have been clamped below `cssSize × dpr`; crisp-offset
     // math must use the SAME effective dpr the ctx was scaled by (see above).
     dpr: effectiveDpr,
+    pointToCss: vertical
+      ? { a: 0, b: scale, c: -scale, d: 0, e: cssWidth, f: 0 }
+      : { a: scale, b: 0, c: 0, d: scale, e: 0, f: 0 },
     contentX: sec.marginLeft * scale,
     contentW: (sec.pageWidth - sec.marginLeft - sec.marginRight) * scale,
     y: bodyTopPt * scale,
@@ -1864,6 +1998,8 @@ async function renderDocumentToCanvasLeased(
     fontFamilyClasses: fontClassesWithPitches(doc.fontFamilyClasses, doc.fontFamilyPitches),
     resolvedLocalFonts,
     layoutServices,
+    retainedResourcePainter,
+    retainedTablePainter: renderTableFragment,
     kinsoku,
     // §17.15.1.25 — automatic tab interval, resolved once and threaded like
     // `kinsoku` so the measure and draw passes agree.
@@ -1906,6 +2042,33 @@ async function renderDocumentToCanvasLeased(
         }
       : undefined,
   };
+  const paintHeaderFooterStory: HeaderFooterStoryPainter<RenderState, BodyElement> =
+    createHeaderFooterStoryPainter<RenderState, BodyElement, DocParagraph, DocTable, ParagraphBorders>({
+      preRegisterPageFloats: (storyElements, state) => {
+        state.pageAnchorPrescanned = new Set();
+        preRegisterPageFloats(storyElements, 0, state);
+      },
+      paragraphOf: (element: BodyElement) => element as unknown as DocParagraph,
+      tableOf: (element: BodyElement) => element as unknown as DocTable,
+      hasFrame: (paragraph: DocParagraph) => !!paragraph.framePr,
+      frameAnchorLineHeight: (storyElements, element, state) =>
+        frameAnchorLineHeightPx(
+          storyElements as PaginatedBodyElement[],
+          element as PaginatedBodyElement,
+          state,
+        ),
+      paintFrameParagraph: renderFrameParagraph,
+      spaceBefore: (paragraph: DocParagraph) => paragraph.spaceBefore,
+      spaceAfter: (paragraph: DocParagraph) => paragraph.spaceAfter,
+      bordersOf: (paragraph: DocParagraph) => paragraph.borders,
+      contextualSpacing: contextualSpacingAdjust,
+      hasBorder: hasAnyBorderEdge,
+      sharesBorder: parasShareBorderBox,
+      paintParagraph: (paragraph, state, suppressBefore, borderMerge) =>
+        renderParagraph(paragraph, state, suppressBefore, undefined, false, borderMerge),
+      paintTable: renderTable,
+      tableResetsParagraphFlow: (table: DocTable) => !table.tblpPr,
+    });
 
   // ECMA-376 §17.10.1 — per-section header/footer selection. resolvePageHeader and
   // resolvePageFooter resolve the section active at the top of this page (and whether
@@ -1943,6 +2106,7 @@ async function renderDocumentToCanvasLeased(
       const physSectionLayout = resolveSectionLayoutContext(layoutSettings, physSec);
       const physBaseState: RenderState = {
         ...baseState,
+        pointToCss: { a: scale, b: 0, c: 0, d: scale, e: 0, f: 0 },
         contentX: physSec.marginLeft * scale,
         contentW: (physPageWidth - physSec.marginLeft - physSec.marginRight) * scale,
         marginLeft: physSec.marginLeft,
@@ -1960,12 +2124,18 @@ async function renderDocumentToCanvasLeased(
       ctx.save();
       // Drop the +90° page paint so the header/footer land in physical space.
       ctx.setTransform(effectiveDpr, 0, 0, effectiveDpr, 0, 0);
-      if (header) renderHeaderFooter(header, physSec.headerDistance * scale, physBaseState);
-      if (footer) {
-        const footerHeight = measureHeaderFooterHeight(footer, physBaseState);
-        const footerTopY = cssHeight - physSec.footerDistance * scale - footerHeight;
-        renderHeaderFooter(footer, footerTopY, physBaseState);
+      const physicalStories: Array<readonly [HeaderFooter, number]> = [];
+      if (header !== null) {
+        const activeHeader = header as HeaderFooter;
+        physicalStories.push([activeHeader, physSec.headerDistance * scale]);
       }
+      if (footer !== null) {
+        const activeFooter = footer as HeaderFooter;
+        const footerHeight = measureHeaderFooterHeight(activeFooter, physBaseState);
+        const footerTopY = cssHeight - physSec.footerDistance * scale - footerHeight;
+        physicalStories.push([activeFooter, footerTopY]);
+      }
+      for (const [story, topY] of physicalStories) paintHeaderFooterStory(story, topY, physBaseState);
       ctx.restore();
     }
   } else {
@@ -1973,9 +2143,10 @@ async function renderDocumentToCanvasLeased(
     // top-margin allowance (§17.6.11) overflows the content area downward; the body
     // was already paginated to clear it (paginateWithHeaderFooterReserve), and its
     // start y is pushed down by the same overflow so no body line sits over the header.
-    if (header) {
-      const headerHeight = measureHeaderFooterHeight(header, baseState);
-      renderHeaderFooter(header, sec.headerDistance * scale, baseState);
+    if (header !== null) {
+      const activeHeader = header as HeaderFooter;
+      const headerHeight = measureHeaderFooterHeight(activeHeader, baseState);
+      paintHeaderFooterStory(activeHeader, sec.headerDistance * scale, baseState);
       // §17.6.11 overflow in device px (headerHeight is at canvas scale), via the shared
       // formula so the body start matches the pagination reserve exactly.
       headerReservePx = headerOverflowPt(headerHeight, sec.marginTop * scale, sec.headerDistance * scale);
@@ -1985,10 +2156,11 @@ async function renderDocumentToCanvasLeased(
     // than its bottom-margin allowance (§17.6.11) overflows the content area; the body
     // was already paginated to clear it (paginateWithHeaderFooterReserve), and the same
     // overflow raises the footnote block below so notes clear it too.
-    if (footer) {
-      const footerHeight = measureHeaderFooterHeight(footer, baseState);
+    if (footer !== null) {
+      const activeFooter = footer as HeaderFooter;
+      const footerHeight = measureHeaderFooterHeight(activeFooter, baseState);
       const footerTopY = cssHeight - sec.footerDistance * scale - footerHeight;
-      renderHeaderFooter(footer, footerTopY, baseState);
+      paintHeaderFooterStory(activeFooter, footerTopY, baseState);
       // §17.6.11 overflow in device px (footerHeight is at canvas scale), via the shared
       // formula so the footnote clearance matches the pagination reserve exactly.
       footerReservePx = footerOverflowPt(footerHeight, sec.marginBottom * scale, sec.footerDistance * scale);
@@ -2007,75 +2179,14 @@ async function renderDocumentToCanvasLeased(
   const bodyTopY = bodyTopPt * scale + headerReservePx;
   const bodyState: RenderState = { ...baseState, y: bodyTopY };
 
-  // ECMA-376 §17.6.8 — line numbering. Seed the body render's per-line counter so
-  // drawParagraphLine numbers each body line. `newPage` (the default) restarts at
-  // `start` on every page; `continuous`/`newSection` need the running total of body
-  // lines on the pages before this one, obtained by a dry-run body render of each
-  // prior page (the counter is advanced there too — the increment is outside the
-  // `!dryRun` ink guard). Header/footer/cell/note renders never carry `lineNumbering`
-  // (bodyState alone sets it; nested states clear it), so only the main document
-  // story (§17.6.8) is numbered. Line numbering runs only for a single-column body:
-  // per-column numbering geometry is not modeled (documented follow-up).
-  const lnCfg = sec.lineNumbering;
-  if (lnCfg && columns.length <= 1) {
-    const lineNumbering = {
-      countBy: lnCfg.countBy,
-      start: lnCfg.start,
-      distancePt: lnCfg.distance ?? LINE_NUMBER_DEFAULT_DISTANCE_PT,
-      fontSizePt: docDefaultFontSizePt(doc),
-    };
-    bodyState.lineNumbering = lineNumbering;
-    let startCount = lnCfg.start;
-    if ((lnCfg.restart === 'continuous' || lnCfg.restart === 'newSection') && pageIndex > 0) {
-      // Count body lines on all prior pages via a dry-run body render, so this
-      // page's numbering continues from the running total. (newSection restarts at
-      // a section boundary; single-section docs — the only fixtures here — have no
-      // interior boundary, so it behaves like continuous. A per-section reset is a
-      // documented follow-up.)
-      let count = lnCfg.start;
-      for (let p = 0; p < pageIndex; p++) {
-        const priorState: RenderState = {
-          ...bodyState,
-          y: 0,
-          dryRun: true,
-          floats: [],
-          lineNumberCounter: count,
-        };
-        renderBodyElements(pages[p] ?? [], priorState, computeColumns(sec), 0);
-        count = priorState.lineNumberCounter ?? count;
-      }
-      startCount = count;
-    }
-    bodyState.lineNumberCounter = startCount;
-  }
-
-  // ECMA-376 §17.6.23 — body vertical alignment (`<w:vAlign>`). "top" (default)
-  // leaves the body at the top margin. "center"/"bottom" measure the total body
-  // content height for THIS page and shift the whole flow down. "both" (vertical
-  // justification by distributing inter-paragraph space) is parsed but not yet
-  // distributed — it falls back to "top" (documented follow-up). vAlign is skipped
-  // when a header pushed the body down (headerReservePx > 0): the reserved area is
-  // not available for centering.
-  const vAlign = sec.vAlign;
-  if ((vAlign === 'center' || vAlign === 'bottom') && headerReservePx === 0) {
-    // Available vertical band between the top and bottom text margins (§17.6.23).
-    const bandTopY = bodyTopPt * scale;
-    const bandBottomY = cssHeight - bodyBottomPt * scale - footerReservePx;
-    const bandH = bandBottomY - bandTopY;
-    // Measure the body content height for this page (dry run; no ink, no counter).
-    const measureState: RenderState = { ...bodyState, y: 0, dryRun: true, floats: [], lineNumbering: undefined, lineNumberCounter: undefined };
-    renderBodyElements(elements, measureState, columns, 0);
-    const contentH = measureState.y;
-    if (contentH < bandH) {
-      const shift = vAlign === 'center' ? (bandH - contentH) / 2 : bandH - contentH;
-      bodyState.y = bandTopY + shift;
-    }
-  }
-
   // ECMA-376 §17.6.10 — page borders with zOrder="back" are painted UNDER the body
   // flow (behind intersecting text/objects). Drawn here, before the body.
-  if (sec.pageBorders && sec.pageBorders.zOrder === 'back' && pageBorderShownOnPage(sec.pageBorders, pageIndex)) {
-    drawPageBorders(ctx, sec.pageBorders, sec, scale);
+  const pageBorders = sec.pageBorders;
+  if (pageBorders != null) {
+    const activePageBorders = pageBorders as PageBorders;
+    if (activePageBorders.zOrder === 'back' && pageBorderShownOnPage(activePageBorders, pageIndex)) {
+      drawPageBorders(ctx, activePageBorders, sec, scale);
+    }
   }
   // Optional column separator rules (`<w:cols w:sep="1">`), drawn before the text
   // so glyphs sit on top. A thin rule is centred in each inter-column gap and
@@ -2115,8 +2226,11 @@ async function renderDocumentToCanvasLeased(
 
   // ECMA-376 §17.6.10 — page borders with zOrder="front" (the default) are painted
   // OVER intersecting text/objects, so draw them LAST (after the whole page flow).
-  if (sec.pageBorders && sec.pageBorders.zOrder !== 'back' && pageBorderShownOnPage(sec.pageBorders, pageIndex)) {
-    drawPageBorders(ctx, sec.pageBorders, sec, scale);
+  if (pageBorders != null) {
+    const activePageBorders = pageBorders as PageBorders;
+    if (activePageBorders.zOrder !== 'back' && pageBorderShownOnPage(activePageBorders, pageIndex)) {
+      drawPageBorders(ctx, activePageBorders, sec, scale);
+    }
   }
 }
 
@@ -2261,7 +2375,7 @@ function drawEndnotes(
   ctx.restore();
 
   // §17.6.8 numbers the main document story only — endnote lines are not numbered.
-  const noteState: RenderState = { ...bodyState, y: y + FOOTNOTE_SEPARATOR_GAP_PT * scale, lineNumbering: undefined, lineNumberCounter: undefined };
+  const noteState: RenderState = { ...bodyState, y: y + FOOTNOTE_SEPARATOR_GAP_PT * scale };
   for (const note of notes) {
     noteState.currentNoteNumber = doc.endnotes.findIndex((n) => n.id === note.id) + 1;
     const paras = note.content.filter((e) => e.type === 'paragraph') as unknown as DocParagraph[];
@@ -2474,6 +2588,9 @@ function drawPageBorders(
  *  footerOverflowPt. */
 interface PageReserve { top: number; bottom: number }
 const ZERO_RESERVE: PageReserve = { top: 0, bottom: 0 };
+/** The frozen kernel retains this historical cast name; line geometry now lives
+ * exclusively in immutable fragments, so the intersection has no extra fields. */
+type PaginatedElementWithLines = PaginatedBodyElement;
 
 export function computePages(
   body: BodyElement[],
@@ -4508,6 +4625,7 @@ function computeHeaderReserves(
   });
 }
 
+
 /**
  * Paginate with header/footer-height awareness (ECMA-376 §17.6.11). Pass 1 paginates
  * without reservation; a header or footer taller than its margin allowance overflows
@@ -4544,21 +4662,201 @@ function paginateWithHeaderFooterReserve(
 ): PaginatedBodyElement[][] {
   // §17.15.1.25 — resolve once here so both pagination passes and the
   // reserve-measure state share the document's automatic tab interval.
-  const pass1 = computePages(
-    doc.body,
-    doc.section,
-    ctx,
-    fontFamilyClasses,
-    layoutSettings.kinsoku,
-    footnotes,
-    [],
-    layoutSettings.defaultTabPt,
-    doc.settings,
-    layoutSettings,
-    resolvedLocalFonts,
-    layoutServices,
-    layoutOptions,
-  );
+  const hasPaginationFields = paginatedFlowHasPaginationDependentFields(doc.body, footnotes);
+  const computeConverged = (pageReserves: PageReserve[]): PaginatedBodyElement[][] => {
+    // PAGE belongs to one field occurrence, not to its enclosing paragraph: a
+    // paragraph can split and carry distinct PAGE runs on different pages.
+    let pageFieldOccurrences = new WeakMap<
+      object,
+      ReadonlyMap<number, PageFieldAcquisitionContext>
+    >();
+
+    const sourceParagraphAt = (path: readonly number[]): DocParagraph | undefined => {
+      let element = doc.body[path[0]!] as BodyElement | CellElement | undefined;
+      let offset = 1;
+      while (element) {
+        if (element.type === 'paragraph') return offset === path.length ? element : undefined;
+        if (element.type !== 'table' || offset + 2 >= path.length) return undefined;
+        const rowIndex = path[offset++]!;
+        const cellIndex = path[offset++]!;
+        const cellElementIndex = path[offset++]!;
+        element = element.rows[rowIndex]?.cells[cellIndex]?.content[cellElementIndex];
+      }
+      return undefined;
+    };
+
+    const retainPageFieldOccurrences = (
+      fragment: FlowFragment,
+      context: PageFieldAcquisitionContext,
+      target: WeakMap<object, Map<number, PageFieldAcquisitionContext>>,
+    ): void => {
+      if (fragment.kind === 'table') {
+        fragment.rows.forEach((row) => row.cells.forEach((cell) =>
+          cell.blocks.forEach((block) => retainPageFieldOccurrences(block, context, target))));
+        return;
+      }
+      const paragraph = sourceParagraphAt(fragment.source.path);
+      if (!paragraph) return;
+      fragment.lines.forEach((line) => line.placements.forEach((placement) => {
+        if (
+          placement.kind !== 'text'
+          || placement.dependency !== 'page'
+          || placement.sourceRunIndex === undefined
+        ) return;
+        retainPageFieldOccurrence(
+          paragraph,
+          placement.sourceRunIndex,
+          context,
+          target,
+        );
+      }));
+    };
+
+    const retainPageFieldOccurrence = (
+      paragraph: object,
+      sourceRunIndex: number,
+      context: PageFieldAcquisitionContext,
+      target: WeakMap<object, Map<number, PageFieldAcquisitionContext>>,
+    ): void => {
+      let occurrences = target.get(paragraph);
+      if (!occurrences) {
+        occurrences = new Map();
+        target.set(paragraph, occurrences);
+      }
+      const previous = occurrences.get(sourceRunIndex);
+      if (previous && (
+        previous.pageIndex !== context.pageIndex
+        || previous.displayPageNumber !== context.displayPageNumber
+        || previous.pageNumberFormat !== context.pageNumberFormat
+      )) {
+        throw new Error('A PAGE field occurrence cannot belong to multiple destination pages');
+      }
+      occurrences.set(sourceRunIndex, context);
+    };
+
+    const acquire = (totalPagesHint: number) => {
+      const iterationOccurrences = pageFieldOccurrences;
+      const iterationServices = layoutServices
+        ? hasPaginationFields
+          ? createFieldAcquisitionServicesView(layoutServices, {
+              totalPages: totalPagesHint,
+              resolvePageField: (paragraph, sourceRunIndex) =>
+                iterationOccurrences.get(paragraph)?.get(sourceRunIndex),
+            })
+          : layoutServices
+        : undefined;
+      const pages = computePages(
+        doc.body,
+        doc.section,
+        ctx,
+        fontFamilyClasses,
+        layoutSettings.kinsoku,
+        footnotes,
+        pageReserves,
+        layoutSettings.defaultTabPt,
+        doc.settings,
+        layoutSettings,
+        resolvedLocalFonts,
+        iterationServices,
+        layoutOptions,
+      );
+      if (!hasPaginationFields) {
+        return { pages, pageCount: pages.length, fingerprint: 'field-independent' };
+      }
+      const pageNumbers = computePageNumbering(pages);
+      const nextOccurrences = new WeakMap<object, Map<number, PageFieldAcquisitionContext>>();
+      pages.forEach((elements, pageIndex) => {
+        const number = pageNumbers[pageIndex]
+          ?? { displayNumber: pageIndex + 1, format: 'decimal' as NumberFormat };
+        const pageContext = Object.freeze({
+          pageIndex,
+          displayPageNumber: number.displayNumber,
+          pageNumberFormat: number.format,
+        });
+        elements.forEach((element) => {
+          const placed = bodyFlowFragments.get(element as object);
+          if (placed) retainPageFieldOccurrences(placed.fragment, pageContext, nextOccurrences);
+        });
+      });
+      // Footnote reserve ownership follows the page containing its body reference
+      // (§17.11.10). A split paragraph/table is currently charged on its final
+      // slice, so last-write by note id mirrors computePages' existing approximation
+      // without adding another pagination side channel.
+      const footnotePageById = new Map<string, number>();
+      pages.forEach((elements, pageIndex) => elements.forEach((element) => {
+        if (element.type === 'table') {
+          const sourceIndex = bodyFlowFragments.sourceIndices.get(element as object);
+          const sourceElement = sourceIndex === undefined ? undefined : doc.body[sourceIndex];
+          const sourceTable = sourceElement?.type === 'table' ? sourceElement : element;
+          footnoteRefsInElement(sourceTable).forEach((id) =>
+            footnotePageById.set(id, pageIndex));
+        } else {
+          footnoteRefsInElement(element).forEach((id) =>
+            footnotePageById.set(id, pageIndex));
+        }
+      }));
+      const noteById = indexNotes(footnotes);
+      footnotePageById.forEach((pageIndex, noteId) => {
+        const note = noteById.get(noteId);
+        if (!note) return;
+        const number = pageNumbers[pageIndex]
+          ?? { displayNumber: pageIndex + 1, format: 'decimal' as NumberFormat };
+        const pageContext = Object.freeze({
+          pageIndex,
+          displayPageNumber: number.displayNumber,
+          pageNumberFormat: number.format,
+        });
+        recordStoryPageFieldOccurrences(
+          note.content,
+          pageIndex,
+          (paragraph, sourceRunIndex) => retainPageFieldOccurrence(
+            paragraph,
+            sourceRunIndex,
+            pageContext,
+            nextOccurrences,
+          ),
+        );
+      });
+      pageFieldOccurrences = nextOccurrences;
+      return {
+        pages,
+        pageCount: pages.length,
+        fingerprint: paginationFieldGeometryFingerprint({
+          pageCount: pages.length,
+          pages: pages.map((page) => page.map((element) => {
+            const placed = bodyFlowFragments.get(element as object);
+            const runtimePlacement = element as PaginatedBodyElement & {
+              colY?: number;
+              colXPt?: number;
+              colWPt?: number;
+            };
+            return {
+              type: element.type,
+              colIndex: element.colIndex,
+              colY: runtimePlacement.colY,
+              colXPt: runtimePlacement.colXPt,
+              colWPt: runtimePlacement.colWPt,
+              lineSlice: element.lineSlice,
+              placed: placed ? {
+                columnIndex: placed.columnIndex,
+                xPt: placed.xPt,
+                yPt: placed.yPt,
+                widthPt: placed.widthPt,
+                heightPt: placed.heightPt,
+                fragment: paginationFieldFlowGeometry(placed.fragment),
+              } : undefined,
+            };
+          })),
+        }),
+      };
+    };
+    // The named policy bound is intentionally above the maximum decimal digit
+    // transitions of any practical document while still making an adversarial
+    // measurer or cyclic field/layout dependency fail deterministically. A2's
+    // seen-set catches cycles before this hard limit; no stale iteration escapes.
+    return resolvePaginationFieldLayout(acquire, hasPaginationFields).pages;
+  };
+  const pass1 = computeConverged([]);
   // ECMA-376 §17.6.20 + §17.10.1 (issue #988): a vertical (tbRl) section lays its
   // header/footer out HORIZONTALLY in physical space with NO body reserve (see the
   // paint path, which sets headerReservePx/footerReservePx = 0). For a vertical
@@ -4577,7 +4875,10 @@ function paginateWithHeaderFooterReserve(
     doc.body.some(
       (e) => e.type === 'sectionBreak' && !isVerticalTextDirection(e.textDirection ?? null),
     );
-  if (!anyHorizontalSection) return pass1;
+  if (!anyHorizontalSection) {
+    retainSectionFlowPlacement(pass1, doc, ctx, []);
+    return pass1;
+  }
   const measure = buildMeasureState(
     ctx,
     doc.section,
@@ -4609,26 +4910,171 @@ function paginateWithHeaderFooterReserve(
   const footerReserves = computeFooterReserves(pass1, doc, measureFor);
   const headerReserves = computeHeaderReserves(pass1, doc, measureFor);
   const overflows = (rs: number[]): boolean => rs.some((r) => r > MIN_MARGIN_OVERFLOW_PT);
-  if (!overflows(footerReserves) && !overflows(headerReserves)) return pass1;
+  if (!overflows(footerReserves) && !overflows(headerReserves)) {
+    retainSectionFlowPlacement(pass1, doc, ctx, []);
+    return pass1;
+  }
   const pageReserves = pass1.map((_unused, i): PageReserve => ({
     top: headerReserves[i] ?? 0,
     bottom: footerReserves[i] ?? 0,
   }));
-  return computePages(
-    doc.body,
-    doc.section,
-    ctx,
-    fontFamilyClasses,
-    layoutSettings.kinsoku,
-    footnotes,
-    pageReserves,
-    layoutSettings.defaultTabPt,
-    doc.settings,
-    layoutSettings,
-    resolvedLocalFonts,
-    layoutServices,
-    layoutOptions,
-  );
+  const converged = computeConverged(pageReserves);
+  retainSectionFlowPlacement(converged, doc, ctx, pageReserves);
+  return converged;
+
+/**
+ * Compose section-level flow placement after pagination has fixed every page and
+ * line partition. The resulting `PlacedFragment`s are the only body placement
+ * authority consumed by paint: section vAlign is a retained page translation,
+ * and line-number counter values/geometry/paint operations are attached to the
+ * immutable paragraph fragment. Paint never runs a counter or a dry layout.
+ */
+function retainSectionFlowPlacement(
+  pages: readonly PaginatedBodyElement[][],
+  doc: DocxDocumentModel,
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  pageReserves: readonly PageReserve[],
+): void {
+  const lineNumberFontSizePt = docDefaultFontSizePt(doc);
+  const lineNumberFont = buildFont(false, false, lineNumberFontSizePt, null, {});
+  const sectionCounters = new Map<string, number>();
+  let continuousCounter: number | undefined;
+  const reserveAtPage = (pageIndex: number): PageReserve =>
+    pageReserves.length === 0
+      ? ZERO_RESERVE
+      : pageReserves[Math.min(pageIndex, pageReserves.length - 1)] ?? ZERO_RESERVE;
+
+  pages.forEach((elements, pageIndex) => {
+    const placedEntries = elements.flatMap((element) => {
+      const placed = bodyFlowFragments.get(element as object);
+      const sourceIndex = placed?.fragment.kind === 'paragraph'
+        ? placed.fragment.source.path[0]
+        : bodyFlowFragments.sourceIndices.get(element as object);
+      const placement = typeof sourceIndex === 'number'
+        ? sectionPlacementInputFromBody(doc.body, doc.section, sourceIndex)
+        : undefined;
+      return placed && placement ? [{ element, placed, placement }] : [];
+    });
+    const pageSection = resolvePageSection(pages as PaginatedBodyElement[][], pageIndex, doc).geom;
+    const reserve = reserveAtPage(pageIndex);
+    const regions: Array<typeof placedEntries> = [];
+    for (const entry of placedEntries) {
+      const region = regions.at(-1);
+      if (region?.[0]?.placement.sectionId === entry.placement.sectionId) region.push(entry);
+      else regions.push([entry]);
+    }
+    for (let regionIndex = 0; regionIndex < regions.length; regionIndex += 1) {
+      const region = regions[regionIndex]!;
+      const placement = region[0]!.placement;
+      const lineNumbering = placement.lineNumbering ?? undefined;
+      const ordinaryEntries = region.filter(({ placed }) =>
+        placed.fragment.kind !== 'paragraph' || placed.fragment.ordinaryFlow);
+      const flowTopPt = ordinaryEntries.length
+        ? Math.min(...ordinaryEntries.map(({ placed }) => placed.yPt))
+        : (region[0]!.element.colTopPt ?? bodyMarginInsetPt(pageSection.marginTop));
+      const flowBottomPt = ordinaryEntries.length
+        ? Math.max(...ordinaryEntries.map(({ placed }) => placed.yPt + placed.heightPt))
+        : flowTopPt;
+      const bodyHeightPt = flowBottomPt - flowTopPt;
+      const authoredRegionTopPt = region[0]!.element.colTopPt
+        ?? bodyMarginInsetPt(pageSection.marginTop);
+      const nextRegionTopPt = regions[regionIndex + 1]?.[0]?.element.colTopPt;
+      const bandTopPt = authoredRegionTopPt + reserve.top;
+      const bandBottomPt = nextRegionTopPt === undefined
+        ? pageSection.pageHeight - bodyMarginInsetPt(pageSection.marginBottom) - reserve.bottom
+        : nextRegionTopPt + reserve.top;
+      const bandHeightPt = bandBottomPt - bandTopPt;
+      // A host-owned frame may follow an ordinary anchor's section translation,
+      // but a region containing frames only has no flow authority from which to
+      // derive center/bottom alignment. Leave it at its acquired anchor position.
+      let bodyTranslationPt = ordinaryEntries.length ? reserve.top : 0;
+      if (
+        ordinaryEntries.length > 0
+        &&
+        bodyHeightPt < bandHeightPt
+        && (placement.vAlign === 'center' || placement.vAlign === 'bottom')
+      ) {
+        const alignedTopPt = placement.vAlign === 'center'
+          ? bandTopPt + (bandHeightPt - bodyHeightPt) / 2
+          : bandBottomPt - bodyHeightPt;
+        bodyTranslationPt = alignedTopPt - flowTopPt;
+      }
+
+      let counter = lineNumbering?.restart === 'newPage'
+        ? lineNumbering.start
+        : lineNumbering?.restart === 'newSection'
+          ? (sectionCounters.get(placement.sectionId) ?? lineNumbering.start)
+          : (sectionCounters.get(placement.sectionId)
+            ?? continuousCounter
+            ?? lineNumbering?.start
+            ?? 1);
+      for (const { element, placed } of region) {
+        let fragment = placed.fragment;
+        if (fragment.kind === 'paragraph' && fragment.ordinaryFlow && lineNumbering) {
+        const paragraphFragment = fragment;
+        const distancePt = lineNumbering.distance ?? LINE_NUMBER_DEFAULT_DISTANCE_PT;
+        const lineNumbers = paragraphFragment.lines.map((line, lineIndex) => {
+          const counterValue = counter++;
+          const text = String(counterValue);
+          ctx.save();
+          ctx.font = lineNumberFont;
+          const metrics = ctx.measureText(text);
+          ctx.restore();
+          const ascentPt = metrics.fontBoundingBoxAscent
+            ?? metrics.actualBoundingBoxAscent
+            ?? Math.max(0, line.baselinePt - line.bounds.yPt);
+          const descentPt = metrics.fontBoundingBoxDescent
+            ?? metrics.actualBoundingBoxDescent
+            ?? Math.max(0, line.bounds.yPt + line.bounds.heightPt - line.baselinePt);
+          const origin = Object.freeze({
+            xPt: paragraphFragment.flowBounds.xPt - distancePt,
+            yPt: line.baselinePt,
+          });
+          const displayed = lineNumbering.countBy > 0
+            && counterValue % lineNumbering.countBy === 0;
+          return Object.freeze({
+            lineIndex,
+            counterValue,
+            bounds: Object.freeze({
+              xPt: origin.xPt - metrics.width,
+              yPt: origin.yPt - ascentPt,
+              widthPt: metrics.width,
+              heightPt: ascentPt + descentPt,
+            }),
+            paintOps: displayed ? Object.freeze([Object.freeze({
+              kind: 'text' as const,
+              text,
+              origin,
+              font: lineNumberFont,
+              color: '#000000',
+              textAlign: 'right' as const,
+            })]) : Object.freeze([]),
+          });
+        });
+          fragment = Object.freeze({
+            ...paragraphFragment,
+            lineNumbers: Object.freeze(lineNumbers),
+          });
+        }
+        const framePlacement = bodyFlowFragments.framePlacement.get(element as object);
+        const followsHostFlow = placed.fragment.kind !== 'paragraph'
+          || placed.fragment.ordinaryFlow
+          || framePlacement?.verticalOwnership === 'host-flow';
+        bodyFlowFragments.set(element as object, Object.freeze({
+          ...placed,
+          fragment,
+          columnIndex: element.colIndex ?? placed.columnIndex,
+          yPt: followsHostFlow ? placed.yPt + bodyTranslationPt : placed.yPt,
+        }));
+      }
+      if (lineNumbering) {
+        sectionCounters.set(placement.sectionId, counter);
+        continuousCounter = counter;
+      }
+    }
+  });
+}
+
 }
 
 /** Paginate with a throwaway measure context (a fresh OffscreenCanvas, scale 1).
@@ -4705,8 +5151,9 @@ export function layoutDocument(
 ): DocumentLayout {
   const ctx = new OffscreenCanvas(1, 1).getContext('2d');
   if (!ctx) return Object.freeze({ pages: Object.freeze([]) });
+  const normalizedDoc = normalizeInternalDocumentModel(doc).document;
   const resolvedLocalFonts = services.text.localMetrics;
-  const layoutDoc = verticalLayoutDoc(doc);
+  const layoutDoc = verticalLayoutDoc(normalizedDoc);
   const layoutSettings = resolveDocumentLayoutSettings(layoutDoc);
   const pages = paginateWithHeaderFooterReserve(
     layoutDoc,
@@ -4782,6 +5229,23 @@ function buildMeasureState(
   layoutOptions?: LayoutOptions,
 ): RenderState {
   const sectionLayout = resolveSectionLayoutContext(layoutSettings, section);
+  // `computePages` remains a useful low-level/public test seam whose historical
+  // signature permits callers to omit services. Acquisition itself no longer
+  // has an optional text authority: construct the same A2 service at this stable
+  // state boundary so every downstream buildSegments/layoutLines call records
+  // authoritative grapheme geometry. Production document entry points already
+  // pass their document-scoped service and therefore keep their exact font
+  // inventory/resource session.
+  const effectiveLayoutServices = layoutServices ?? createLayoutServices({
+    section,
+    body: [],
+    headers: EMPTY_HEADERS_FOOTERS,
+    footers: EMPTY_HEADERS_FOOTERS,
+    fontFamilyClasses,
+  }, {
+    measureContext: ctx,
+    localMetrics: resolvedLocalFonts,
+  });
   return {
     ctx,
     scale: 1,
@@ -4800,7 +5264,7 @@ function buildMeasureState(
     pageH: section.pageHeight,
     defaultColor: '#000000',
     pageIndex: 0,
-    totalPages: 1,
+    totalPages: fieldAcquisitionContextOf(effectiveLayoutServices).totalPages,
     images: new Map(),
     dryRun: true,
     marginLeft: section.marginLeft,
@@ -4824,7 +5288,7 @@ function buildMeasureState(
     docEastAsian: layoutSettings.documentHasEastAsianText,
     fontFamilyClasses,
     resolvedLocalFonts,
-    layoutServices,
+    layoutServices: effectiveLayoutServices,
     currentDateMs: layoutOptions?.currentDateMs,
     kinsoku: layoutSettings.kinsoku,
     defaultTabPt: layoutSettings.defaultTabPt,
@@ -4848,6 +5312,13 @@ function buildMeasureState(
     // one in computePages); a direction-MIXED document then re-seeds it per
     // section via computePages' `syncMeasureFrame` rail (issue #1000), so a
     // mid-body section's anchors resolve against ITS OWN physical frame.
+    get verticalCJK() {
+      return isVerticalTextDirection(this.sectionLayout.textDirection);
+    },
+    get verticalAllRotated() {
+      return isVerticalTextDirection(this.sectionLayout.textDirection)
+        && isAllRotatedVerticalTextDirection(this.sectionLayout.textDirection);
+    },
     verticalPhys: isVerticalSection(section)
       ? (() => {
           const phys = physicalLayoutSection(section);
@@ -4929,7 +5400,14 @@ function segmentEnvironmentOf(state: RenderState): RenderState {
  *  in PR 5, or a table fragment in PR 6). WeakMap so an element that is garbage
  *  collected drops its entry, and so the parsed `DocParagraph` / `DocTable` is never
  *  mutated (a non-split paragraph element is the source object itself). */
-const bodyFlowFragments = new WeakMap<object, PlacedFragment>();
+const bodyFlowFragments = Object.freeze(Object.assign(new WeakMap<object, PlacedFragment>(), {
+  /** Body source index for fragment kinds whose public source is the parsed node. */
+  sourceIndices: new WeakMap<object, number>(),
+  /** Placement ownership used by section vAlign/reserve composition. */
+  framePlacement: new WeakMap<object, Readonly<{
+    verticalOwnership: 'page' | 'host-flow';
+  }>>(),
+}));
 
 /** Read the placed fragment the paginator associated with an emitted body element,
  *  if any (paragraph or table elements the fragment migration covers). */
@@ -4962,26 +5440,81 @@ function buildParagraphFragment(
   isFirstSlice: boolean,
   isFinalSlice: boolean,
   trailingExtentPt: number,
-): ParagraphFragment {
-  const leadingSpacePt = isFirstSlice
-    ? measured.contentStartYPt - measured.placement.startYPt
-    : 0;
-  const trailingSpacePt = isFinalSlice ? trailingExtentPt : 0;
-  return Object.freeze({
-    kind: 'paragraph',
-    source,
+  state: RenderState,
+  sourceRef: SourceRef,
+  flowDomainId = 'body',
+  paragraphBorderEdges?: NonNullable<Parameters<typeof paragraphLayoutFromMeasurement>[1]['paragraphBorderEdges']>,
+): ParagraphLayout {
+  const exclusions: WrapExclusion[] = state.floats.map((float, index) => ({
+    id: float.imageKey || `${flowDomainId}:float:${index}`,
+    wrap: float.mode === 'topAndBottom' ? 'topAndBottom' : 'square',
+    bounds: {
+      xPt: float.xLeft, yPt: float.yTop,
+      widthPt: Math.max(0, float.xRight - float.xLeft),
+      heightPt: Math.max(0, float.yBottom - float.yTop),
+    },
+    polygon: [
+      { xPt: float.xLeft, yPt: float.yTop },
+      { xPt: float.xRight, yPt: float.yTop },
+      { xPt: float.xRight, yPt: float.yBottom },
+      { xPt: float.xLeft, yPt: float.yBottom },
+    ],
+  }));
+  const id = `${sourceRef.story}:${sourceRef.storyInstance}:${sourceRef.path.join('.')}`;
+  const whole = paragraphLayoutFromMeasurement(
+    paragraphAcquisitionInput(source, sourceRef),
+    {
+      id,
+      source: sourceRef,
+      flowDomainId,
+      ordinaryFlow: true,
+      context: resolveStateParagraphLayoutContext(state, source),
+      placement: measured.placement,
+      measurer: { context: state.ctx, fontFamilyClasses: state.fontFamilyClasses },
+      environment: paragraphMeasurementEnvironment(state),
+      exclusions,
+      containerShading: state.containerShading,
+      ...(paragraphBorderEdges ? { paragraphBorderEdges } : {}),
+      trailingExtentPt,
+      continuesFromPrevious: !isFirstSlice,
+      anchorFrames: {
+        page: {
+          xPt: 0, yPt: 0,
+          widthPt: state.pageWidth,
+          heightPt: state.pageH / state.scale,
+        },
+        margin: {
+          xPt: state.marginLeft,
+          yPt: state.marginTop,
+          widthPt: Math.max(0, state.pageWidth - state.marginLeft - state.marginRight),
+          heightPt: Math.max(0, state.pageH / state.scale - state.marginTop - state.marginBottom),
+        },
+        column: {
+          xPt: state.contentX / state.scale,
+          yPt: state.marginTop,
+          widthPt: state.contentW / state.scale,
+          heightPt: Math.max(0, state.pageH / state.scale - state.marginTop - state.marginBottom),
+        },
+        pageParity: state.pageIndex % 2 === 0 ? 'odd' : 'even',
+      },
+    },
     measured,
+  );
+  if (lineStart === 0 && lineEnd === whole.lines.length && isFirstSlice && isFinalSlice) {
+    return whole;
+  }
+  return sliceParagraphLayout(whole, {
     lineStart,
     lineEnd,
-    leadingSpacePt,
-    trailingSpacePt,
+    continuesFromPrevious: !isFirstSlice,
+    continuesOnNext: !isFinalSlice,
   });
 }
 
 /** Place a paragraph fragment at page-absolute scale-1 coordinates. `heightPt` is the
  *  cursor advancement (leadingSpacePt + measured line advances + trailingSpacePt). */
 function placeParagraphFragment(
-  fragment: ParagraphFragment,
+  fragment: ParagraphLayout,
   columnIndex: number,
   xPt: number,
   yPt: number,
@@ -4993,7 +5526,7 @@ function placeParagraphFragment(
     xPt,
     yPt,
     widthPt,
-    heightPt: paragraphFragmentAdvancePt(fragment),
+    heightPt: fragment.advancePt,
   });
 }
 
@@ -5010,7 +5543,7 @@ function placeParagraphFragment(
 /** Measure a table-cell paragraph at scale 1 in the cell story context, no page wrap
  *  oracle (a cell is isolated from page floats, §17.4.57). Mirrors the scale-1
  *  measurement {@link measureCellParagraphHeight} performs, but returns the
- *  {@link MeasuredParagraph} so a {@link ParagraphFragment} can own the line partition
+ *  {@link MeasuredParagraph} so a {@link ParagraphLayout} can own the line partition
  *  instead of stamping it onto the parsed paragraph. `contentWPt` is the cell's content
  *  width (spanned columns minus the cell margins). */
 function measureCellParagraphScale1(
@@ -5023,11 +5556,14 @@ function measureCellParagraphScale1(
     para,
     paragraphContext,
     {
-      startYPt: 0,
+      startYPt: cellState.y,
       paragraphXPt: 0,
       availableWidthPt: contentWPt,
       maximumYPt: cellState.pageH,
       suppressSpaceBefore: true,
+      wrap: cellState.floats.length > 0
+        ? createFloatWrapOracle(cellState.floats)
+        : undefined,
     },
     {
       context: cellState.ctx,
@@ -5035,84 +5571,6 @@ function measureCellParagraphScale1(
     },
     paragraphMeasurementEnvironment(cellState),
   );
-}
-
-/** Build the recursive content fragments of one table cell (the {@link buildTableFragment}
- *  {@link BuildCellBlocks} callback): a paragraph fragment per `<w:p>` and a nested-table
- *  fragment per `<w:tbl>`, in document order, measured at scale 1 in the cell story.
- *  `outerState` is the enclosing scale-1 measure state (body, or the parent cell for a
- *  nested table); this enters THIS cell's story once. `cellTotalWidthPt` is the sum of
- *  the grid columns the cell spans (before its own margins).
- *
- *  KNOWN COST (PR 6, review-acknowledged): this measures cell content a SECOND time —
- *  the paginator already measured every cell through `computeTablePtLayout` /
- *  `resolveTableRowHeights` for the row heights, and repeated header rows are re-built
- *  per continuation slice. The duplication exists because the row-height path measures
- *  HEIGHTS through `measureCellContentHeightPx` (which does not retain the line
- *  partitions) while fragments need the full {@link MeasuredParagraph}. It is resolved
- *  when the legacy measure path is retired and row heights are derived FROM the
- *  fragments (tracked with the stamp-field removal follow-up); pagination-time only,
- *  paint is unaffected. */
-function buildTableCellBlocks(
-  cell: DocTableCell,
-  table: DocTable,
-  cellTotalWidthPt: number,
-  outerState: RenderState,
-): FlowFragment[] {
-  const cellState = withTableCellStory(outerState);
-  const cm = effCellMargins(cell, table);
-  const contentWPt = Math.max(0, cellTotalWidthPt - (cm.left + cm.right));
-  const blocks: FlowFragment[] = [];
-  for (const ce of cell.content) {
-    if (ce.type === 'paragraph') {
-      const para = ce as unknown as DocParagraph;
-      const measured = measureCellParagraphScale1(cellState, para, contentWPt);
-      const trailingExtentPt = Math.max(
-        measured.requestedSpaceAfterPt,
-        bottomBorderExtentPt(para.borders),
-      );
-      const fullLineEnd = measured.markOnly ? 0 : measured.lines.length;
-      // A row-split-by-lines slice element carries a `lineSlice`; the fragment paints
-      // that sub-range of the one measurement (the whole paragraph is measured at the
-      // cell width, so the slice indexes it directly). Absent ⇒ the whole paragraph.
-      const lineSlice = (ce as unknown as { lineSlice?: { start: number; end: number } }).lineSlice;
-      const lineStart = lineSlice ? lineSlice.start : 0;
-      const lineEnd = lineSlice ? Math.min(lineSlice.end, fullLineEnd) : fullLineEnd;
-      blocks.push(
-        buildParagraphFragment(
-          para,
-          measured,
-          lineStart,
-          lineEnd,
-          lineStart === 0,
-          lineEnd >= fullLineEnd,
-          trailingExtentPt,
-        ),
-      );
-    } else if (ce.type === 'table') {
-      const inner = ce as unknown as DocTable;
-      const nestedSlice = ce as CellElement & {
-        nestedSliceContinuesFromPrevious?: boolean;
-        nestedSliceContinuesOnNext?: boolean;
-      };
-      const innerCols = resolveColumnWidths(inner, contentWPt, cellState);
-      const innerRowHs = resolveTableRowHeights(inner, innerCols, 1, (c, w) =>
-        measureCellContentHeightPx(c, inner, w, 1, cellState),
-      );
-      blocks.push(
-        buildTableFragment({
-          table: inner,
-          columnWidthsPt: innerCols,
-          rowHeightsPt: innerRowHs,
-          continuesFromPreviousPage: nestedSlice.nestedSliceContinuesFromPrevious ?? false,
-          continuesOnNextPage: nestedSlice.nestedSliceContinuesOnNext ?? false,
-          repeatedHeaderRowCount: 0,
-          buildCellBlocks: (c, w) => buildTableCellBlocks(c, inner, w, cellState),
-        }),
-      );
-    }
-  }
-  return blocks;
 }
 
 /** Side table: emitted table element -> the scale-1 content-band width its fragment
@@ -5144,6 +5602,10 @@ function attachTableFragment(
     sourceRowIndexOf?: (fragmentRowIndex: number) => number;
   },
 ): void {
+  const sourceIndex = bodySourceIndexFor(table);
+  if (sourceIndex === undefined) {
+    throw new Error('Body table source identity must be prepared before fragment acquisition');
+  }
   const fragment = buildTableFragment({
     table,
     columnWidthsPt: colWidthsPt,
@@ -5152,7 +5614,110 @@ function attachTableFragment(
     continuesOnNextPage: placement.continuesOnNextPage,
     repeatedHeaderRowCount: placement.repeatedHeaderRowCount,
     sourceRowIndexOf: placement.sourceRowIndexOf,
-    buildCellBlocks: (cell, w) => buildTableCellBlocks(cell, table, w, measureState),
+    buildCellBlocks: (cell, widthPt, sourceRowIndex, cellIndex) => acquireTableCellBlocks({
+      cell,
+      table,
+      cellTotalWidthPt: widthPt,
+      outerState: measureState,
+      sourcePath: [sourceIndex, sourceRowIndex, cellIndex],
+    }, {
+      resolveContentWidthPt: (targetCell, targetTable, totalWidthPt) => {
+        const margins = effCellMargins(targetCell, targetTable);
+        return Math.max(0, totalWidthPt - margins.left - margins.right);
+      },
+      createCellState: (outerState, contentWidthPt, targetCell) => ({
+        ...withTableCellStory(outerState),
+        contentX: 0,
+        contentW: contentWidthPt,
+        y: 0,
+        containerShading: targetCell.background ?? outerState.containerShading,
+        floats: [],
+        floatParaSeq: 0,
+        pageAnchorPrescanned: new Set<DocParagraph>(),
+      }),
+      acquireParagraph: (
+        cellState,
+        paragraph,
+        contentWidthPt,
+        sourcePath,
+        paragraphBorderEdges,
+      ) => {
+        registerAnchorFloats(paragraph, cellState, cellState.y);
+        const measured = measureCellParagraphScale1(cellState, paragraph, contentWidthPt);
+        const trailingExtentPt = Math.max(
+          measured.requestedSpaceAfterPt,
+          bottomBorderExtentPt(paragraph.borders),
+        );
+        const fullLineEnd = measured.markOnly ? 0 : measured.lines.length;
+        const lineSlice = (paragraph as unknown as {
+          lineSlice?: { start: number; end: number };
+        }).lineSlice;
+        const lineStart = lineSlice?.start ?? 0;
+        const lineEnd = lineSlice ? Math.min(lineSlice.end, fullLineEnd) : fullLineEnd;
+        const fragment = buildParagraphFragment(
+          paragraph,
+          measured,
+          lineStart,
+          lineEnd,
+          lineStart === 0,
+          lineEnd >= fullLineEnd,
+          trailingExtentPt,
+          cellState,
+          { story: 'body', storyInstance: 'body', path: [...sourcePath] },
+          'table-cell',
+          paragraphBorderEdges,
+        );
+        if (lineStart !== 0 || paragraph.spaceBefore === 0) return fragment;
+        return Object.freeze({
+          ...fragment,
+          flowBounds: Object.freeze({
+            ...fragment.flowBounds,
+            heightPt: fragment.flowBounds.heightPt + paragraph.spaceBefore,
+          }),
+          advancePt: fragment.advancePt + paragraph.spaceBefore,
+          spacing: Object.freeze({
+            ...fragment.spacing,
+            beforePt: paragraph.spaceBefore,
+          }),
+        });
+      },
+      acquireNestedTable: (
+        cellState,
+        inner,
+        contentWidthPt,
+        sourcePath,
+        continuation,
+        acquireNestedCellBlocks,
+      ) => {
+        const columnWidthsPt = resolveColumnWidths(inner, contentWidthPt, cellState);
+        const rowHeightsPt = resolveTableRowHeights(
+          inner,
+          columnWidthsPt,
+          1,
+          (nestedCell, nestedWidthPt) =>
+            measureCellContentHeightPx(nestedCell, inner, nestedWidthPt, 1, cellState),
+        );
+        return buildTableFragment({
+          table: inner,
+          columnWidthsPt,
+          rowHeightsPt,
+          continuesFromPreviousPage: continuation.fromPrevious,
+          continuesOnNextPage: continuation.onNext,
+          repeatedHeaderRowCount: 0,
+          buildCellBlocks: (nestedCell, nestedWidthPt, sourceRowIndex, cellIndex) =>
+            acquireNestedCellBlocks(
+              nestedCell,
+              inner,
+              nestedWidthPt,
+              cellState,
+              [...sourcePath, sourceRowIndex, cellIndex],
+            ),
+        });
+      },
+      advanceState: (cellState, advancePt) => {
+        cellState.y += advancePt;
+      },
+    }),
   });
   const widthPt = colWidthsPt.reduce((s, w) => s + w, 0);
   bodyFlowFragments.set(
@@ -5166,6 +5731,7 @@ function attachTableFragment(
       heightPt: tableFragmentHeightPt(fragment),
     }),
   );
+  bodyFlowFragments.sourceIndices.set(el, sourceIndex);
   tableFragmentBandPt.set(el as object, contentWPt);
 }
 
@@ -5204,7 +5770,6 @@ function isFragmentPaintableTable(
   state: RenderState,
 ): placed is PlacedFragment {
   if (
-    !fragmentPaintEnabled ||
     placed === undefined ||
     placed.fragment.kind !== 'table' ||
     table.tblpPr != null ||
@@ -5218,12 +5783,6 @@ function isFragmentPaintableTable(
   const paintBandPt = state.contentW / state.scale;
   return Math.abs(bandPt - paintBandPt) <= 1e-6 * Math.max(1, Math.abs(paintBandPt));
 }
-
-/** Master switch for the M-1 fit-check measurement reuse. Always ON in production; the
- *  non-vacuity test flips it OFF to force a second measurement and assert the reuse
- *  really avoided one (fewer measureText calls during pagination) with identical output.
- *  Module-local. */
-let fitMeasureReuseEnabled = true;
 
 /** Measure a NON-split body paragraph at its final placement and attach its placed
  *  fragment covering the whole line range.
@@ -5249,10 +5808,17 @@ function attachBodyParagraphFragment(
   },
   fitMeasured?: MeasuredParagraph,
 ): void {
+  const sourceIndex = bodySourceIndexFor(source);
+  if (sourceIndex === undefined) {
+    throw new Error('Body paragraph source identity must be prepared before fragment acquisition');
+  }
+  const paragraphBorderEdges = bodyParagraphBorderEdgesFor(source) ?? {
+    top: 'top',
+    bottom: 'bottom',
+  };
   const paragraphContext = resolveBodyParagraphLayoutContext(measureState, source);
   const measured =
     fitMeasured !== undefined &&
-    fitMeasureReuseEnabled &&
     measureState.floats.length === 0 &&
     fitMeasured.placement.wrap === undefined &&
     fitMeasured.placement.startYPt === measureState.y &&
@@ -5282,7 +5848,7 @@ function attachBodyParagraphFragment(
         );
   const trailingExtentPt = Math.max(
     measured.requestedSpaceAfterPt,
-    bottomBorderExtentPt(source.borders),
+    paragraphBorderEdges.bottom === 'none' ? 0 : bottomBorderExtentPt(source.borders),
   );
   const lineEnd = measured.markOnly ? 0 : measured.lines.length;
   const fragment = buildParagraphFragment(
@@ -5293,6 +5859,10 @@ function attachBodyParagraphFragment(
     true,
     true,
     trailingExtentPt,
+    measureState,
+    { story: 'body', storyInstance: 'body', path: [sourceIndex] },
+    'body',
+    paragraphBorderEdges,
   );
   bodyFlowFragments.set(el, placeParagraphFragment(
     fragment,
@@ -5478,6 +6048,14 @@ function splitParagraphAcrossPages(
    *  slices). Omitted ⇒ no stamp (the renderer's body-level fallback). */
   tagSectionTextDirection?: () => string | null,
 ): { endY: number } {
+  const sourceIndex = bodySourceIndexFor(para);
+  if (sourceIndex === undefined) {
+    throw new Error('Body paragraph source identity must be prepared before split acquisition');
+  }
+  const paragraphBorderEdges = bodyParagraphBorderEdgesFor(para) ?? {
+    top: 'top',
+    bottom: 'bottom',
+  };
   const colTop = columnTop ?? (() => 0);
   const colBot = columnBottom ?? (() => contentH);
   const stamp = (el: PaginatedBodyElement): PaginatedBodyElement => {
@@ -5545,7 +6123,7 @@ function splitParagraphAcrossPages(
       const measuredHeight = () => measured.contentEndYPt - measured.placement.startYPt
         + Math.max(
           measured.requestedSpaceAfterPt,
-          bottomBorderExtentPt(para.borders),
+          paragraphBorderEdges.bottom === 'none' ? 0 : bottomBorderExtentPt(para.borders),
         );
       let markH = measuredHeight();
       let top = initialY;
@@ -5576,10 +6154,9 @@ function splitParagraphAcrossPages(
       lines = measured.lines.map((line) => line.layout);
       lineExtents = measuredLineExtents();
     };
-    const stampLines = !paragraphSegsStateSensitive(para);
     const trailingExtent = Math.max(
       measured.requestedSpaceAfterPt,
-      bottomBorderExtentPt(para.borders),
+      paragraphBorderEdges.bottom === 'none' ? 0 : bottomBorderExtentPt(para.borders),
     );
 
     let lineIdx = 0;
@@ -5703,20 +6280,7 @@ function splitParagraphAcrossPages(
           end: lastFitting,
           ...(paragraphContinued ? { continues: true } : {}),
         },
-      } as PaginatedElementWithLines;
-      if (stampLines) {
-        stampParagraphLines(sliceEl, lines, {
-          paraW,
-          // A remainder is laid out with firstIndent=0, but this stamp is the legacy
-          // paint path's cache key. Keep what paint reconstructs so it reuses the
-          // stored remainder partition — the only correct lines for this slice.
-          firstIndent: para.indentFirst,
-          tabOriginPx: indLeft,
-          gridDeltaPx: gridCharDeltaPx(grid, 1),
-          hasFloats: measured.placement.wrap !== undefined,
-          kinsoku: measureState.kinsoku,
-        });
-      }
+      } as PaginatedBodyElement;
       // PR 5 — attach this slice's placement-aware fragment. All slices share the
       // paragraph measurement; `[firstFitting, lastFitting)` selects the painted
       // lines, leading spacing rides the first slice and trailing the last. The
@@ -5734,6 +6298,13 @@ function splitParagraphAcrossPages(
           firstFitting === 0 && !paragraphContinued,
           isFinalSlice,
           trailingExtent,
+          measureState,
+          { story: 'body', storyInstance: 'body', path: [sourceIndex] },
+          'body',
+          {
+            top: firstFitting === 0 ? paragraphBorderEdges.top : 'none',
+            bottom: isFinalSlice ? paragraphBorderEdges.bottom : 'none',
+          },
         );
         bodyFlowFragments.set(sliceEl, placeParagraphFragment(
           fragment,
@@ -5882,6 +6453,7 @@ function cellMinContentPt(cell: DocTableCell, table: DocTable, state: RenderStat
               text,
               fontSizePt: calcEffectiveFontPx(candidate, 1),
               measure: true,
+              clusterGeometry: false,
             });
             width += segAdvanceWidth(candidate, shaped.advancePt, 0, 1);
           } else {
@@ -6364,13 +6936,9 @@ function layoutCellParagraphForRowSplit(
   para: DocParagraph,
   innerWPt: number,
   state: RenderState,
-): { lines: LayoutLine[]; lineHeights: number[]; inputs: Parameters<typeof stampParagraphLines>[2] } | null {
+): { lines: LayoutLine[]; lineHeights: number[] } | null {
   {
     const paragraphContext = resolveStateParagraphLayoutContext(state, para);
-    const grid = gridForParagraphContext(state, paragraphContext);
-    const indLeft = paragraphContext.physicalIndentLeftPt;
-    const indRight = paragraphContext.physicalIndentRightPt;
-    const paraW = Math.max(1, innerWPt - indLeft - indRight);
     const measured = measureParagraph(
       para,
       paragraphContext,
@@ -6391,14 +6959,6 @@ function layoutCellParagraphForRowSplit(
     return {
       lines: measured.lines.map((line) => line.layout),
       lineHeights: measured.lines.map((line) => line.advancePt),
-      inputs: {
-        paraW,
-        firstIndent: para.indentFirst,
-        tabOriginPx: indLeft,
-        gridDeltaPx: gridCharDeltaPx(grid, 1),
-        hasFloats: false,
-        kinsoku: state.kinsoku,
-      },
     };
   }
 }
@@ -6427,9 +6987,6 @@ function paragraphLineSliceElement(
     type: 'paragraph',
     lineSlice: { start, end },
   } as unknown as CellElement;
-  if (!paragraphSegsStateSensitive(para)) {
-    stampParagraphLines(slice as unknown as PaginatedElementWithLines, layout.lines, layout.inputs);
-  }
   return slice;
 }
 
@@ -7518,15 +8075,37 @@ function resolvePageSection(
   return { headers, footers, titlePage, isFirstPageOfSection, geom };
 }
 
-function renderHeaderFooter(hf: HeaderFooter, topY: number, base: RenderState): void {
-  const state: RenderState = { ...base, y: topY };
-  renderBodyElements(hf.body, state);
-}
-
 function measureHeaderFooterHeight(hf: HeaderFooter, base: RenderState): number {
   const state: RenderState = { ...base, y: 0, dryRun: true, floats: [] };
-  renderBodyElements(hf.body, state);
-  return state.y;
+  // Series A intentionally migrates only the body story. Header/footer stories
+  // stay on their established paragraph/table acquisition until B1 gives every
+  // story the same retained layout owner; B1 deletes this explicit legacy seam.
+  return createHeaderFooterStoryPainter<RenderState, BodyElement, DocParagraph, DocTable, ParagraphBorders>({
+    preRegisterPageFloats: (storyElements, storyState) => {
+      storyState.pageAnchorPrescanned = new Set();
+      preRegisterPageFloats(storyElements, 0, storyState);
+    },
+    paragraphOf: (element: BodyElement) => element as unknown as DocParagraph,
+    tableOf: (element: BodyElement) => element as unknown as DocTable,
+    hasFrame: (paragraph: DocParagraph) => !!paragraph.framePr,
+    frameAnchorLineHeight: (storyElements, element, storyState) =>
+      frameAnchorLineHeightPx(
+        storyElements as PaginatedBodyElement[],
+        element as PaginatedBodyElement,
+        storyState,
+      ),
+    paintFrameParagraph: renderFrameParagraph,
+    spaceBefore: (paragraph: DocParagraph) => paragraph.spaceBefore,
+    spaceAfter: (paragraph: DocParagraph) => paragraph.spaceAfter,
+    bordersOf: (paragraph: DocParagraph) => paragraph.borders,
+    contextualSpacing: contextualSpacingAdjust,
+    hasBorder: hasAnyBorderEdge,
+    sharesBorder: parasShareBorderBox,
+    paintParagraph: (paragraph, storyState, suppressBefore, borderMerge) =>
+      renderParagraph(paragraph, storyState, suppressBefore, undefined, false, borderMerge),
+    paintTable: renderTable,
+    tableResetsParagraphFlow: (table: DocTable) => !table.tblpPr,
+  })(hf, 0, state);
 }
 
 // ===== Body element dispatch =====
@@ -7571,16 +8150,7 @@ function contextualSpacingAdjust(
   prevAfter: number,
   spaceBefore: number,
 ): { suppressBefore: boolean; overlap: number } {
-  const sameStyle = !!(prev?.styleId && prev.styleId === curr.styleId);
-  const dropPrev = !!(sameStyle && prev?.contextualSpacing);
-  const dropCurr = !!(sameStyle && curr.contextualSpacing);
-  if (dropPrev && dropCurr) return { suppressBefore: true, overlap: prevAfter };
-  // gap = prevAfter: curr's before-excess contribution is dropped whole.
-  if (dropCurr) return { suppressBefore: true, overlap: 0 };
-  // gap = max(before − after, 0): prev's spaceAfter contribution is dropped.
-  if (dropPrev) return { suppressBefore: false, overlap: prevAfter + Math.min(prevAfter, spaceBefore) };
-  // No suppression — the plain §17.3.1.33 max-collapse.
-  return { suppressBefore: false, overlap: Math.min(prevAfter, spaceBefore) };
+  return paragraphGapAdjustment(prev, curr, prevAfter, spaceBefore);
 }
 
 /**
@@ -7600,9 +8170,12 @@ export function shapeParagraphGapBefore(
   spBefore: readonly number[],
   spAfter: readonly number[],
 ): number {
-  if (i <= 0) return spBefore[i];
-  const adjust = contextualSpacingAdjust(blocks[i - 1], blocks[i], spAfter[i - 1], spBefore[i]);
-  return spAfter[i - 1] + (adjust.suppressBefore ? 0 : spBefore[i]) - adjust.overlap;
+  return paragraphGapPt(
+    i <= 0 ? null : blocks[i - 1],
+    blocks[i],
+    i <= 0 ? 0 : spAfter[i - 1],
+    spBefore[i],
+  );
 }
 
 /**
@@ -7801,8 +8374,70 @@ function renderBodyElements(
    *  and nested renders, which have no such reserve. */
   headerReservePx = 0,
 ): void {
-  let prevPara: DocParagraph | null = null;
-  let prevSpaceAfter = 0;
+  const paintRetainedBodyParagraph = (el: PaginatedBodyElement): PlacedFragment => {
+    const placed = bodyFragmentFor(el);
+    if (!placed || placed.fragment.kind !== 'paragraph') {
+      throw new Error('Body paragraph paint requires an acquired ParagraphLayout');
+    }
+    const paragraph = placed.fragment;
+    const resources = state.retainedResourcePainter;
+    if (!resources) throw new Error('Body paragraph paint requires a retained resource painter');
+    const retainedOnTextRun = state.onTextRun && state.verticalPhys
+      ? (run: DocxTextRunInfo) => {
+          const physical = verticalTextLayerPlacement(
+            run.x, run.y, state.verticalPhys!.cssWidthPx, true,
+          );
+          state.onTextRun!({
+            ...run,
+            x: physical!.left,
+            y: physical!.top,
+            transform: physical!.transform,
+          });
+        }
+      : state.onTextRun;
+    paintPlacedParagraphLayout(paragraph, { xPt: placed.xPt, yPt: placed.yPt }, {
+      ctx: state.ctx,
+      scale: state.scale,
+      dpr: state.dpr,
+      defaultTextColor: state.defaultColor,
+      showTrackChanges: state.showTrackChanges,
+      resources,
+      pointToCss: state.pointToCss,
+      onTextRun: retainedOnTextRun,
+      deferFrontDrawing: (drawing, textBoxes) => {
+        const layer = drawing.anchorLayer;
+        if (!layer) return false;
+        const paragraphDxPt = placed.xPt - paragraph.flowBounds.xPt;
+        const paragraphDyPt = placed.yPt - paragraph.flowBounds.yPt;
+        const dxPt = layer.horizontalOwnership === 'page' ? 0 : paragraphDxPt;
+        const dyPt = layer.verticalOwnership === 'page' ? 0 : paragraphDyPt;
+        return enqueueDeferredFrontPaint(state, () => {
+          state.ctx.save();
+          try {
+            state.ctx.translate(dxPt * state.scale, dyPt * state.scale);
+            state.ctx.scale(state.scale, state.scale);
+            const retainedContext = {
+              ctx: state.ctx,
+              scale: state.scale,
+              dpr: state.dpr,
+              defaultTextColor: state.defaultColor,
+              showTrackChanges: state.showTrackChanges,
+              resources,
+              pointToCss: state.pointToCss,
+            };
+            paintDrawingLayout(drawing, retainedContext);
+            for (const textBox of textBoxes) paintTextBoxLayout(textBox, retainedContext);
+          } finally {
+            state.ctx.restore();
+          }
+        }, {
+          relativeHeight: layer.relativeHeight,
+          sourceOrder: layer.sourceOrder,
+        });
+      },
+    });
+    return placed;
+  };
   // ECMA-376 §20.4.3.2/§20.4.3.5: a wp:anchor whose positionV relativeFrom is
   // page-level (page / margin / *Margin / column — anything but
   // paragraph/line/character) is positioned independently of its source-order
@@ -7817,11 +8452,7 @@ function renderBodyElements(
   // break, which is a no-op here but matches the paginator's call sites).
   state.pageAnchorPrescanned = new Set();
   preRegisterPageFloats(elements, 0, state);
-  // Collect front floats (behindDoc="0") and paint them after the whole flow, so
-  // they layer ON TOP of later inline content (§20.4.2.10). Saved/restored so a
-  // nested render (table cell / header-footer) keeps its own top layer.
-  const prevDeferFront = state.deferFront;
-  state.deferFront = [];
+  withDeferredFrontPaintSession(state, () => {
   // The (geometry, column index) the flow `state` is currently set to. `activeCol`
   // starts at -1 so the first element always seeds the column. `activeGeom` tracks
   // the SECTION whose columns are in effect (per-section newspaper columns,
@@ -7830,29 +8461,7 @@ function renderBodyElements(
   // against the right widths.
   let activeCol = -1;
   let activeGeom: ColumnGeom[] | undefined;
-  // ECMA-376 §17.3.1.7 — the next IN-FLOW paragraph that is adjacent to `elements[i]`
-  // in the SAME newspaper column (same colGeom + colIndex), with no intervening
-  // non-paragraph element (a table/floating-table boundary closes the border box).
-  // A `framePr` paragraph is out of flow (§17.3.1.11) and is skipped/blocks the run.
-  // Returns null when the run is broken (column change, table between, end of page).
-  // A page break never appears mid-`elements` (the paginator splits pages), so the
-  // box correctly closes at the column/page bottom without a special case here.
-  const sameColumn = (a: PaginatedBodyElement, b: PaginatedBodyElement): boolean =>
-    (a.colGeom ?? columns) === (b.colGeom ?? columns) && (a.colIndex ?? 0) === (b.colIndex ?? 0);
-  const flowParaInColumn = (cur: PaginatedBodyElement, sibling: PaginatedBodyElement | undefined): DocParagraph | null => {
-    if (!sibling) return null;
-    if (sibling.type !== 'paragraph') return null; // table/other ends the run
-    if (!sameColumn(cur, sibling)) return null; // column change ends the run
-    const p = sibling as unknown as DocParagraph;
-    if (p.framePr) return null; // out-of-flow frame paragraph is not in the run
-    return p;
-  };
-  const prevFlowParaInColumn = (i: number): DocParagraph | null =>
-    flowParaInColumn(elements[i], elements[i - 1]);
-  const nextFlowParaInColumn = (i: number): DocParagraph | null =>
-    flowParaInColumn(elements[i], elements[i + 1]);
-  for (let elIdx = 0; elIdx < elements.length; elIdx++) {
-    const el = elements[elIdx];
+  for (const el of elements) {
     // Per-section column geometry: prefer the element's own (stamped by the
     // paginator), else the page-level columns. A single full-width column (or no
     // geometry) is the unchanged single-column path.
@@ -7883,8 +8492,6 @@ function renderBodyElements(
         // re-add is a no-op there (the body already overlaps the header).
         state.y = (el.colTopPt ?? state.marginTop) * state.scale + headerReservePx;
       }
-      prevPara = null;
-      prevSpaceAfter = 0;
       activeCol = elCol;
       activeGeom = cols;
     } else if (!multiCol && cols && cols.length === 1 && cols !== activeGeom) {
@@ -7902,117 +8509,55 @@ function renderBodyElements(
       const col = cols[0];
       state.contentX = col.xPt * state.scale;
       state.contentW = col.wPt * state.scale;
-      prevPara = null;
-      prevSpaceAfter = 0;
       activeCol = elCol;
       activeGeom = cols;
     }
     if (el.type === 'paragraph') {
       const para = el as unknown as DocParagraph;
-      const slice = (el as PaginatedBodyElement).lineSlice;
-      // A frame paragraph (ECMA-376 §17.3.1.11) is positioned out of flow and
-      // does not participate in spacing collapse or pagination splitting. Draw
-      // it absolutely and leave prevPara/spaceAfter untouched so the following
-      // non-frame paragraph spaces against the paragraph BEFORE the frame.
+      // A frame paragraph (§17.3.1.11) owns retained absolute geometry and no
+      // body cursor height; spacing and the group's exclusion were finalized by
+      // acquisition.
       if (para.framePr) {
-        renderFrameParagraph(para, state, frameAnchorLineHeightPx(elements, el, state));
+        paintRetainedBodyParagraph(el);
         continue;
       }
       // A zero-before continuous-section spacer renders no mark line box (Word's
       // section-mark collapse; stamped by the paginator — see
       // isCollapsedContinuousSpacer). Skip it: paint nothing, advance y by nothing,
-      // and leave prevPara/prevSpaceAfter as the paragraph BEFORE it so the new
-      // section's first paragraph spaces against that paragraph. Mirrors the
-      // paginator's identical skip so fill and paint stay in lockstep.
+      // Its retained placement has zero paint, so the adapter skips it.
       if ((el as PaginatedBodyElement).collapsedSpacer) continue;
       // ECMA-376 §17.3.1.29 + §17.3.2.41: a fully-hidden paragraph (inkless +
       // vanished mark) the paginator collapsed to zero height paints nothing and
-      // advances y by nothing, leaving prevPara/prevSpaceAfter as the paragraph
-      // BEFORE it — the paint mirror of the paginator's identical skip.
+      // advances y by nothing; the paginator already owns the surrounding flow.
       if ((el as PaginatedBodyElement).hiddenCollapsed) continue;
-      // Empty section-break spacer: drop only its own before (see
-      // isSectionBreakSpacerAt); §17.3.1.9 per-side contextualSpacing
-      // (contextualSpacingAdjust) drops each toggling side's own contribution.
-      // The adjacency was detected during pagination and stamped (the sectionBreak
-      // marker is gone from this per-page list), so read the tag here. Mirrors the
-      // paginator's identical computation (lockstep).
-      const spacer = !!(el as PaginatedBodyElement).sectionBreakSpacer;
-      const adjust = contextualSpacingAdjust(prevPara, para, prevSpaceAfter, spacer ? 0 : para.spaceBefore);
-      const suppress = adjust.suppressBefore || spacer;
-      // An empty paragraph immediately before a COLLAPSED continuous spacer begins the
-      // section-break empty run; Word renders it FLUSH below the preceding content,
-      // dropping the previous paragraph's spaceAfter too. Read the paginator-stamped
-      // flag rather than looking ahead in this per-page slice: the collapsed spacer can
-      // sit on the next page, where `elements[elIdx + 1]` would be undefined.
-      const leadsCollapsedRun = !!(el as PaginatedBodyElement).leadsCollapsedRun;
-      const overlap = leadsCollapsedRun ? prevSpaceAfter : adjust.overlap;
-      state.y -= overlap * state.scale;
-      // Continuation slices (slice.start > 0) suppress spaceBefore: the
-      // earlier slice already consumed it on the previous page. Likewise
-      // mid-paragraph slices (slice.end < total) suppress spaceAfter — only
-      // the slice covering the FINAL line of the paragraph emits it.
-      const isContinuation = (!!slice && slice.start > 0) || slice?.continues === true;
-      // ECMA-376 §17.3.1.7 paragraph-border merge: suppress this paragraph's TOP
-      // edge when the previous IN-FLOW paragraph (already null on column/section
-      // change, table/frame boundary — exactly the run-breaking cases) shares its
-      // border box, and its BOTTOM edge when the next adjacent same-column
-      // paragraph does. The run is thus drawn as one box: top on the first member,
-      // bottom on the last, `between` (if any) at the inner joins.
-      const borderMerge: ParaBorderMerge | undefined =
-        hasAnyBorderEdge(para.borders)
-          ? {
-              suppressTop: parasShareBorderBox(prevFlowParaInColumn(elIdx), para),
-              suppressBottom: parasShareBorderBox(para, nextFlowParaInColumn(elIdx)),
-            }
-          : undefined;
-      // PR 5 — a migrated body paragraph paints from its stored fragment (no
-      // re-layout). Marker / float paragraphs (and any element the paginator did
-      // not fragment) fall through to the legacy `renderParagraph` acquisition.
-      // The fragment already carries this element's slice, so `slice` is not
-      // re-passed; suppression and border-merge are paint-adjacency inputs.
-      const placedFragment = bodyFragmentFor(el);
-      if (isFragmentPaintableParagraph(para, placedFragment, state, slice === undefined)) {
-        paintParagraphFragment(placedFragment, state, {
-          suppressSpaceBefore: suppress || isContinuation,
-          borderMerge,
-          // §17.6.4 remainder re-wrap — a re-measured continuation covers its whole
-          // partition (fragment range [0, len)), so the fragment cannot see that it
-          // is a continuation; thread the element slice's marker through so the
-          // fragment path mirrors the legacy path's first-slice-only guards.
-          continuesParagraph: slice?.continues === true,
-        });
-      } else {
-        renderParagraph(para, state, suppress || isContinuation, slice, false, borderMerge);
-      }
-      prevPara = para;
-      prevSpaceAfter = para.spaceAfter;
+      // Spacing, border ownership, continuation slicing, and absolute placement
+      // were finalized during acquisition. Body paint consumes that authority.
+      const placedFragment = paintRetainedBodyParagraph(el);
+      state.y = (placedFragment.yPt + placedFragment.heightPt) * state.scale;
     } else if (el.type === 'table') {
       const tbl = el as unknown as DocTable;
-      // A floating table (ECMA-376 §17.4.57 `<w:tblpPr>`) is out of flow: it is
-      // drawn absolutely by renderFloatTable and adds no flow height, so leave
-      // prevPara/spaceAfter untouched (the following content spaces against the
-      // paragraph BEFORE the table, exactly like a frame paragraph). A block
-      // table resets them (it ends the previous spacing context).
+      // A floating table (ECMA-376 §17.4.57 `<w:tblpPr>`) remains on its
+      // absolute legacy paint adapter; block tables prefer retained geometry.
       // PR 6 — a migrated block table paints from its stored fragment (geometry +
       // cell content, no re-layout). Floating, unsupported nested-placement, and
       // band-mismatch tables fall through to the legacy `renderTable` recompute path.
       const placedTable = bodyFragmentFor(el);
-      if (isFragmentPaintableTable(tbl, placedTable, state)) {
-        paintTableFragment(placedTable, state);
+      const fragmentPaintable = isFragmentPaintableTable(tbl, placedTable, state);
+      if (fragmentPaintable) {
+        if (placedTable.fragment.kind !== 'table') {
+          throw new Error('Body table paint requires a TableFragment');
+        }
+        if (!state.retainedTablePainter) {
+          throw new Error('Body table paint requires a retained table painter');
+        }
+        state.y = placedTable.yPt * state.scale;
+        state.retainedTablePainter(placedTable.fragment, state);
       } else {
         renderTable(tbl, state);
       }
-      if (!tbl.tblpPr) {
-        prevPara = null;
-        prevSpaceAfter = 0;
-      }
     }
   }
-  // Paint the deferred front floats on top of the page's inline flow, then
-  // restore the enclosing render's collector.
-  const deferredFront = state.deferFront ?? [];
-  state.deferFront = prevDeferFront;
-  for (const draw of deferredFront) draw();
+  });
 }
 
 function renderParaList(paras: DocParagraph[], state: RenderState): void {
@@ -8114,6 +8659,7 @@ function renderEmptyMarkParagraph(
   const emptyH = paragraphMarkLineHeight(
     para, scale, grid, paraHasRuby, state.docEastAsian, ctx, state.fontFamilyClasses,
     para.lineSpacing, state.resolvedLocalFonts, state.layoutServices?.text,
+    paragraphMarkShapeInput(para),
   );
   if (para.shading && !dryRun) {
     ctx.fillStyle = `#${para.shading}`;
@@ -8176,6 +8722,7 @@ function frameAnchorLineHeightPx(
       p.lineSpacing,
       state.resolvedLocalFonts,
       state.layoutServices?.text,
+      paragraphMarkShapeInput(p),
     );
   }
   const fp = frameEl as unknown as DocParagraph;
@@ -8190,37 +8737,134 @@ function frameAnchorLineHeightPx(
     fp.lineSpacing,
     state.resolvedLocalFonts,
     state.layoutServices?.text,
+    paragraphMarkShapeInput(fp),
   );
 }
 
-/**
- * Render a paragraph that is part of a text frame (`para.framePr` set), per
- * ECMA-376 §17.3.1.11.
- *
- * The frame is OUT OF FLOW: it is drawn at an absolute (anchor-relative)
- * position and does NOT advance the in-flow `state.y`, so the following
- * non-frame paragraph begins where this paragraph sat. The frame's glyphs are
- * painted at their own run sizes (a drop cap's big letter is just a large `sz`
- * run, e.g. sample-11's 58.5 pt "D"). A wrap exclusion FloatRect is registered
- * (unless wrap="none") so the following body text flows around the frame — the
- * exclusion x-range is built from the frame's COLUMN-relative band so
- * resolveLineFloatWindow only constrains the matching column (#513).
- *
- * `anchorLineHpx` is one line height of the following non-frame paragraph,
- * needed to size a drop cap by `lines`. Falls back to the frame paragraph's own
- * single-line height when there is no following paragraph.
- */
-/**
- * Resolve a frame paragraph's box (canvas px) from the current flow geometry.
- * Lays the frame content out at a wide width to get its natural size, then maps
- * the framePr anchors/alignment. Shared by the renderer (draw) and the
- * paginator (wrap estimate) so both see the same band.
- */
+/** Resolve a prepared body frame group and attach its retained member layouts. */
 function resolveFrameBox(
   para: DocParagraph,
   state: RenderState,
   anchorLineHpx: number,
 ): FrameBox {
+  const group = bodyFrameGroupFor(para);
+  if (group && state.dryRun) {
+    const measurer = { context: state.ctx, fontFamilyClasses: state.fontFamilyClasses };
+    const environment = paragraphMeasurementEnvironment(state);
+    const borderEdges = group.members.map(bodyParagraphBorderEdgesFor);
+    const scale = state.scale;
+    const horizontalBand = frameXContainer(group.framePr.hAnchor, state);
+    const pointPlacement = {
+      contentXPt: state.contentX / scale,
+      contentWidthPt: state.contentW / scale,
+      pageHeightPt: state.pageH / scale,
+      yPt: state.y / scale,
+      anchorLineHeightPt: anchorLineHpx / scale,
+    };
+    const acquired = acquireRetainedFrameGroup(group, {
+      contexts: group.members.map((paragraph) =>
+        resolveBodyParagraphLayoutContext(state, paragraph)),
+      inputs: group.members.map((paragraph, index) =>
+        paragraphAcquisitionInput(paragraph, {
+          story: 'body', storyInstance: 'body', path: [group.sourceIndices[index]!],
+        })),
+      borderEdges,
+      borderExtentsPt: group.members.map((paragraph, index) =>
+        borderEdges[index]?.bottom === 'none' ? 0 : bottomBorderExtentPt(paragraph.borders)),
+      measurer,
+      environment,
+      containerShading: state.containerShading,
+      maximumWidthPt: Math.max(0, horizontalBand.right - horizontalBand.left) / scale,
+      acquisitionSession: state,
+      placementSignature: [
+        pointPlacement.contentXPt,
+        pointPlacement.contentWidthPt,
+        pointPlacement.pageHeightPt,
+        pointPlacement.yPt,
+        pointPlacement.anchorLineHeightPt,
+        state.pageWidth,
+        state.marginLeft,
+        state.marginRight,
+        state.marginTop,
+        state.marginBottom,
+      ].join('|'),
+      place: (contentWidthPt, contentHeightPt) => {
+        const box = computeFrameBox(
+          group.framePr,
+          state,
+          pointPlacement.yPt * scale,
+          contentWidthPt * scale,
+          contentHeightPt * scale,
+          pointPlacement.anchorLineHeightPt * scale,
+        );
+        return Object.freeze({
+          bounds: Object.freeze({
+            xPt: box.x / scale,
+            yPt: box.y / scale,
+            widthPt: box.w / scale,
+            heightPt: box.h / scale,
+          }),
+          exclusionBounds: Object.freeze({
+            xPt: box.exLeft / scale,
+            yPt: box.exTop / scale,
+            widthPt: (box.exRight - box.exLeft) / scale,
+            heightPt: (box.exBottom - box.exTop) / scale,
+          }),
+        });
+      },
+      anchorFrames: {
+        page: {
+          xPt: 0, yPt: 0,
+          widthPt: state.pageWidth,
+          heightPt: state.pageH / state.scale,
+        },
+        margin: {
+          xPt: state.marginLeft,
+          yPt: state.marginTop,
+          widthPt: Math.max(0, state.pageWidth - state.marginLeft - state.marginRight),
+          heightPt: Math.max(0, state.pageH / state.scale - state.marginTop - state.marginBottom),
+        },
+        column: {
+          xPt: state.contentX / state.scale,
+          yPt: state.marginTop,
+          widthPt: state.contentW / state.scale,
+          heightPt: Math.max(0, state.pageH / state.scale - state.marginTop - state.marginBottom),
+        },
+        pageParity: state.pageIndex % 2 === 0 ? 'odd' : 'even',
+      },
+    });
+    const box: FrameBox = {
+      x: acquired.box.bounds.xPt * scale,
+      y: acquired.box.bounds.yPt * scale,
+      w: acquired.box.bounds.widthPt * scale,
+      h: acquired.box.bounds.heightPt * scale,
+      exLeft: acquired.box.exclusionBounds.xPt * scale,
+      exTop: acquired.box.exclusionBounds.yPt * scale,
+      exRight: (acquired.box.exclusionBounds.xPt + acquired.box.exclusionBounds.widthPt) * scale,
+      exBottom: (acquired.box.exclusionBounds.yPt + acquired.box.exclusionBounds.heightPt) * scale,
+      registerExclusion: true,
+      exclusionId: acquired.box.exclusionId,
+    };
+    acquired.members.forEach(({ paragraph, fragment }) => {
+      bodyFlowFragments.set(paragraph, Object.freeze({
+        fragment,
+        columnIndex: 0,
+        xPt: fragment.flowBounds.xPt,
+        yPt: fragment.flowBounds.yPt,
+        widthPt: acquired.box.bounds.widthPt,
+        heightPt: 0,
+      }));
+      bodyFlowFragments.framePlacement.set(paragraph, Object.freeze({
+        verticalOwnership: group.framePr.vAnchor === 'text' ? 'host-flow' : 'page',
+      }));
+    });
+    return para === group.owner
+      ? box
+      : { ...box, registerExclusion: false };
+  }
+  // B1 compatibility scope: only the header/footer story adapter reaches this
+  // branch. Body pagination prepares a §17.3.1.11 group for every frame and is
+  // structurally prevented from calling the legacy painter by the boundary gate.
   const fp = para.framePr!;
   const { scale } = state;
   const paraTop = state.y;
@@ -8228,55 +8872,38 @@ function resolveFrameBox(
   const paragraphContext = resolveBodyParagraphLayoutContext(state, para);
   const paraHasRuby = paragraphContext.hasRuby;
   const segments = buildSegments(para.runs, segmentEnvironmentOf(state));
-
-  // Measure the frame's natural content size at a wide width (single-line frame
-  // content stays one line). No floats apply INSIDE the frame; the cap glyph's
-  // own run size drives its extent.
   const measureW = 100000;
-  const lines =
-    segments.length === 0
-      ? []
-      : layoutLines(
-          state.ctx,
-          segments,
-          measureW,
-          0,
-          scale,
-          para.tabStops,
-          undefined,
-          state.fontFamilyClasses,
-          0,
-          state.kinsoku,
-          gridCharDeltaPx(grid, scale),
-          state.defaultTabPt,
-          measureW,
-          paragraphContext.baseRtl,
-          paragraphContext.isJustified,
-          paragraphContext.stretchLastLine,
-        );
-  const contentW =
-    lines.length === 0
-      ? 0
-      : Math.max(...lines.map((l) => l.segments.reduce((s, sg) => s + sg.measuredWidth, 0)));
-  const contentH = lines.reduce(
-    (s, l) =>
-      s +
-      lineBoxHeight(
-        para.lineSpacing,
-        l.ascent,
-        l.descent,
-        scale,
-        grid,
-        paraHasRuby,
-        l.intendedSingle,
-        // §17.6.5 cell rounding follows this line's script, matching text boxes;
-        // ruby paragraphs retain their established uniform paragraph resolver.
-        paraHasRuby ? paragraphContext.hasEastAsianText : (l.eastAsian ?? false),
-        l.gridCountSingle,
-      ),
+  const lines = segments.length === 0 ? [] : layoutLines(
+    state.ctx,
+    segments,
+    measureW,
     0,
+    scale,
+    para.tabStops,
+    undefined,
+    state.fontFamilyClasses,
+    0,
+    state.kinsoku,
+    gridCharDeltaPx(grid, scale),
+    state.defaultTabPt,
+    measureW,
+    paragraphContext.baseRtl,
+    paragraphContext.isJustified,
+    paragraphContext.stretchLastLine,
   );
-
+  const contentW = lines.length === 0 ? 0 : Math.max(...lines.map((line) =>
+    line.segments.reduce((sum, segment) => sum + segment.measuredWidth, 0)));
+  const contentH = lines.reduce((sum, line) => sum + lineBoxHeight(
+    para.lineSpacing,
+    line.ascent,
+    line.descent,
+    scale,
+    grid,
+    paraHasRuby,
+    line.intendedSingle,
+    paraHasRuby ? paragraphContext.hasEastAsianText : (line.eastAsian ?? false),
+    line.gridCountSingle,
+  ), 0);
   return computeFrameBox(fp, state, paraTop, contentW, contentH, anchorLineHpx);
 }
 
@@ -8371,6 +8998,10 @@ function resolveNumberingMarker(
   let markerWidthPx = 0;
   let markerTextLayout: NumberingMarkerTextLayout | null = null;
   if (para.numbering) {
+    const markerShapeInput = numberingMarkerShapeInput(
+      para.numbering,
+      getDefaultFontSize(para),
+    );
     numMarker = para.numbering.text;
     numTab = para.numbering.tab * scale;
     const suff = para.numbering.suff || 'tab';
@@ -8378,20 +9009,16 @@ function resolveNumberingMarker(
     if (pbPath) {
       const bmp = state.images.get(imageKey(pbPath));
       if (bmp) {
-        // §17.9.20 — size from the bullet drawing's extent, else the resolved
-        // marker font size (picBulletSizePt is the single source of truth shared
-        // with the collect side; no magic pt default).
-        const size = picBulletSizePt(para.numbering, para);
-        picBullet = { bmp, w: size.w * scale, h: size.h * scale };
+        picBullet = {
+          bmp,
+          w: (para.numbering.picBulletWidthPt ?? markerShapeInput.fontSizePt) * scale,
+          h: (para.numbering.picBulletHeightPt ?? markerShapeInput.fontSizePt) * scale,
+        };
       }
     }
     // Marker glyph width (px) with its RESOLVED font (§17.3.2.26 + §17.9.6); the
     // picture bullet's own width when present. Needed for both the suff≠tab abut
     // and the suff=tab overrun check below, so measure once up front.
-    const markerShapeInput = numberingMarkerShapeInput(
-      para.numbering,
-      getDefaultFontSize(para),
-    );
     let markerW: number;
     if (picBullet) {
       markerW = picBullet.w;
@@ -8765,88 +9392,15 @@ function renderParagraph(
   // position the marker).
   const firstLineIndent = markerUsesBodyOffset ? numBodyOffset : firstLineX - paraX;
   const paintGridDeltaPx = gridCharDeltaPx(grid, scale);
-  // Phase 4-1 B2 Stage 2 — compute-once, ZOOM-INVARIANT reuse. When the paginator
-  // split this paragraph it stamped the scale-1 lines it laid out
-  // (splitParagraphAcrossPages). Reuse the scale-1 line PARTITION at ANY paint
-  // scale — skipping this scale's line-BREAK decisions. Ordinary horizontal body
-  // paragraphs map their complete scale-1 geometry through a Canvas viewport
-  // transform; excluded legacy paths re-measure at paint scale. Scale 1 returns
-  // the stamp unchanged. This is a deliberate BEHAVIOUR
-  // CHANGE from Stage 1, which reused only at scale 1 and otherwise re-ran the
-  // break decisions at the paint scale: with a real (hinted) font those decisions
-  // could move wrap points as the zoom changes, whereas Word lays text out in the
-  // document's coordinate space and treats the display scale as a viewport
-  // transform (the wrap partition is scale 1 at every zoom). Reuse is gated to the
-  // cases where the scale-1 partition is the one this paint would intend — every
-  // layout INPUT must match the paginator's, compared in the paginator's scale-1
-  // space (the paint values are exactly `scale ×` the scale-1 values; see the
-  // per-field derivation below). The input check still rejects the numbering
-  // firstLineIndent case (measure uses para.indentFirst, paint uses numBodyOffset
-  // for a marker) so those recompute. A float context is excluded outright: float
-  // wrap depends on the page-absolute Y of THIS slice, which the stamped
-  // (whole-paragraph, first-page) lines do not carry.
-  //
-  // Scale-1 input reconstruction: the pt sources are read straight off the
-  // paragraph (para.indent*) — NO division — except paraW, whose only scaled term
-  // is contentW (= colW·scale, no rounding), so contentW/scale recovers colW. At
-  // scale 1 every reconstruction is the identity (÷1), so the gate stays
-  // bit-exact there and the Stage-1 pixel-identity test is unaffected. paraW is
-  // compared with a magnitude-relative epsilon because contentW/scale − indL − indR
-  // and (colW − indL − indR) are two float paths to the same real width (round-off
-  // ~1e-13); this is a geometric equality test, not a snapping heuristic.
-  //
-  // Segment stability: the reuse also assumes buildSegments(para.runs, ·) yields
-  // the SAME segments under the paginator's measure state and this paint state.
-  // buildSegments is pure over `para.runs` (both passes read the same paragraph
-  // object) EXCEPT for two paint-context text sources — page/numPages fields and
-  // noteRef labels — and paragraphs carrying those are never stamped in the
-  // first place (paragraphSegsStateSensitive, checked at the stamp site), so no
-  // per-segment gate comparison is needed here. If buildSegments ever gains a
-  // new state-dependent text source, extend that predicate — this gate cannot
-  // see inside the stamped segments.
-  const stamped = para as unknown as PaginatedElementWithLines;
-  // Reconstruct THIS paint's layout inputs in the paginator's scale-1 pt space.
+  // Legacy non-retained stories still resolve their line partition in point
+  // space and map it through the Canvas viewport. Body and retained table-cell
+  // paragraphs bypass this branch and paint their acquired ParagraphLayout.
   const paraW1 = contentW / scale
     - (inFrame ? 0 : paragraphContext.physicalIndentLeftPt)
     - (inFrame ? 0 : paragraphContext.physicalIndentRightPt);
   const indLeft1 = inFrame ? 0 : paragraphContext.physicalIndentLeftPt;
   const firstIndent1 = markerUsesBodyOffset ? numBodyOffset / scale : para.indentFirst;
   const gridDelta1 = gridCharDeltaPx(grid, 1);
-  const reuse =
-    lineReuseEnabled &&
-    stamped.layoutLines !== undefined &&
-    stamped.layoutLinesInputs !== undefined &&
-    stamped.layoutLinesInputs.scale === 1 &&
-    !wrapCtx &&
-    !stamped.layoutLinesInputs.hasFloats &&
-    Math.abs(stamped.layoutLinesInputs.paraW - paraW1) <= 1e-6 * Math.max(1, Math.abs(paraW1)) &&
-    stamped.layoutLinesInputs.firstIndent === firstIndent1 &&
-    stamped.layoutLinesInputs.tabOriginPx === indLeft1 &&
-    stamped.layoutLinesInputs.gridDeltaPx === gridDelta1 &&
-    // §17.3.1.16 / §17.15.1.58–.59 — kinsoku governs CJK retract decisions in
-    // layoutLines, so differing rules mean a (potentially) different partition.
-    // Value equivalence, NOT `===`: the prebuiltPages path resolves the rules
-    // independently in paginateDocument and here (fresh Sets per call), so the
-    // references legitimately differ while the rules are identical.
-    kinsokuRulesEquivalent(stamped.layoutLinesInputs.kinsoku, state.kinsoku);
-  // Zoom-invariant line breaking (Phase 4-1 B2 Stage 2). Three cases, all feeding
-  // the SAME draw loop below; rescaleLayoutLines bridges the scale-1 PARTITION to
-  // paint using canonical geometry when eligible, or legacy paint-scale metrics:
-  //  1. reuse — the paginator's scale-1 stamp.
-  //  2. no float context — recompute the partition in the paginator's SAME scale-1
-  //     space (paraW1 / firstIndent1 / indLeft1 / gridDelta1). A paragraph that
-  //     missed the stamp (never split, or its inputs differ — e.g. a numbered
-  //     list's firstLineIndent) must STILL break at the scale-1 partition, or a
-  //     page would MIX scale-1-broken (split) and paint-scale-broken (non-split)
-  //     paragraphs — two wrap regimes side by side — and a paint-scale re-break
-  //     can even overflow the height the paginator reserved (estimateParagraphHeight
-  //     also lays out at scale 1). Keeping the whole non-float body on scale-1
-  //     breaking makes the page coherent and paginate-aligned.
-  //  3. float wrap context — stays at the paint scale (a straight layoutLines):
-  //     the wrap windows are evaluated against paint-scale float rectangles at
-  //     page-absolute Y, which have no scale-1 form here (the stamp reuse excludes
-  //     floats for the same reason). Pre-existing paginate(scale 1)/paint(scale s)
-  //     float behaviour, unchanged.
   // ECMA-376 §17.3.3.23 — paraX-relative X of the text-margin right edge, for
   // resolving a `<w:ptab w:relativeTo="margin">` (paraW is the content box; add
   // the right indent to reach the margin). Scale and scale-1 mirrors kept in sync.
@@ -8855,12 +9409,10 @@ function renderParagraph(
   const marginRightPx1 = paraW1 + indRight1;
   const lines = suppliedScale1Lines !== undefined
     // Body fragment paint: use the fragment's scale-1 partition, rescaled to the
-    // paint scale via the same bridge the reuse gate uses. No re-layout, so paint
+    // paint scale via the canonical geometry bridge. No re-layout, so paint
     // scales stored geometry only (scale 1 returns the partition unchanged, so a
     // scale-1 paint invokes no measureText).
     ? rescaleLayoutLines([...suppliedScale1Lines], scale, ctx, state.fontFamilyClasses, paintGridDeltaPx, canonicalTextScale)
-    : reuse
-    ? rescaleLayoutLines(stamped.layoutLines as LayoutLine[], scale, ctx, state.fontFamilyClasses, paintGridDeltaPx, canonicalTextScale)
     : wrapCtx
       ? layoutLines(ctx, segments, paraW, firstLineIndent, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, paintGridDeltaPx, state.defaultTabPt, marginRightPx, baseRtl, jcIsFullyJustified(para.alignment), jcStretchesLastLine(para.alignment))
       : rescaleLayoutLines(
@@ -9025,93 +9577,6 @@ function renderParagraph(
   if (!lineSlice || (lineSlice.start === 0 && !lineSlice.continues)) {
     renderAnchorImages(para, state, paragraphStartY);
   }
-}
-
-/** Master switch for body fragment paint (PR 5). Always ON in production; the
- *  byte-identity characterization test (layout-lines-reuse-identity.test.ts) flips
- *  it OFF to paint the migrated paragraphs through the legacy `renderParagraph`
- *  acquisition and assert an IDENTICAL paint stream. Module-local. */
-let fragmentPaintEnabled = true;
-
-/** PR 5 — true when a body paragraph may be painted from its stored fragment. It
- *  excludes the two cases where the fragment's scale-1 line partition would NOT
- *  reproduce the legacy paint byte-for-byte:
- *   - numbering markers: paint derives the first-line indent from `numBodyOffset`,
- *     which differs from the placement-aware measurement's `para.indentFirst`;
- *   - floating-wrap context: float paragraphs are laid out at the PAINT scale
- *     against page-absolute float rectangles (renderParagraph case 3), which a
- *     scale-1 fragment cannot reproduce (its measurement carries a wrap oracle).
- *  It also excludes state-sensitive paragraphs (a NUMPAGES/page-ref field whose
- *  resolved TEXT depends on the paint page context): the fragment's line segments
- *  bake in the pagination-time field text, so those must recompute their segments at
- *  paint — the same exclusion the legacy reuse stamp applies (`stampLines`).
- *  Finally it excludes vertical (tbRl) text: the paginator's measure state has no
- *  `verticalCJK`, so its fragment is laid out HORIZONTALLY (no 縦中横 grouping,
- *  §17.3.2.10), whereas paint recomputes the lines vertically. Vertical text is
- *  migrated with the vertical-text follow-up.
- *  Excluded paragraphs stay on the legacy `renderParagraph` path; they are migrated
- *  with markers / floats / table cells in later work.
- *
- *  PLACEMENT SANITY GUARD (design §"Placement-Aware Paragraph Measurement": "a
- *  measurement is valid only for its recorded placement"). The fragment is associated
- *  through a WeakMap keyed by the emitted element; the paint pass trusts that
- *  association. As a cheap safety net against a STALE entry (e.g. a newer
- *  re-pagination overwrote the side table while these older prebuiltPages are being
- *  painted), verify the fragment still matches THIS paint's placement before trusting
- *  it: its recorded `availableWidthPt` must equal the current paint column width
- *  (state.contentW rescaled to scale-1 pt), and — for a NON-split paragraph, whose
- *  emitted element IS the parsed paragraph — its `source` must be this very paragraph
- *  (a split slice's source is intentionally the ORIGINAL paragraph, not the slice
- *  element, so that identity is skipped for slices). On any mismatch we fall through
- *  to the correct-but-slower legacy `renderParagraph` path; we never throw. */
-function isFragmentPaintableParagraph(
-  para: DocParagraph,
-  placed: PlacedFragment | undefined,
-  state: RenderState,
-  isNonSplitElement: boolean,
-): placed is PlacedFragment {
-  if (
-    !fragmentPaintEnabled ||
-    placed === undefined ||
-    placed.fragment.kind !== 'paragraph' ||
-    para.numbering != null ||
-    state.floats.length !== 0 ||
-    state.verticalCJK ||
-    placed.fragment.measured.placement.wrap !== undefined ||
-    paragraphSegsStateSensitive(para)
-  ) {
-    return false;
-  }
-  // Placement guard: the fragment's recorded band width must equal this paint's
-  // column width (both in scale-1 pt; state.contentW = colW·scale). A magnitude-
-  // relative epsilon absorbs float round-off between the two derivations.
-  const paintAvailableWidthPt = state.contentW / state.scale;
-  const recordedWidthPt = placed.fragment.measured.placement.availableWidthPt;
-  const widthMatches =
-    Math.abs(recordedWidthPt - paintAvailableWidthPt) <=
-    1e-6 * Math.max(1, Math.abs(paintAvailableWidthPt));
-  const sourceMatches = !isNonSplitElement || placed.fragment.source === para;
-  return widthMatches && sourceMatches;
-}
-
-/**
- * PR 5 — render a body paragraph from its fragment's stored scale-1 line partition,
- * WITHOUT re-running line layout. Shares the exact draw path of
- * {@link renderParagraph} (via its supplied-lines parameter), so the paint stream is
- * byte-identical to the legacy acquisition for the migrated (non-marker, non-float)
- * class. Called by {@link paintParagraphFragment} in fragment-paint.ts, which owns
- * the fragment boundary; the scale-1 → paint-scale rescale happens inside
- * `renderParagraph` through the existing `rescaleLayoutLines` bridge.
- */
-export function renderBodyParagraphLines(
-  source: DocParagraph,
-  state: RenderState,
-  scale1Lines: readonly LayoutLine[],
-  suppressSpaceBefore: boolean,
-  lineSlice: { start: number; end: number; continues?: boolean } | undefined,
-  borderMerge: ParaBorderMerge | undefined,
-): void {
-  renderParagraph(source, state, suppressSpaceBefore, lineSlice, false, borderMerge, scale1Lines);
 }
 
 /** Per-line draw context for {@link drawParagraphLine}. Bundles the read-only
@@ -10242,7 +10707,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           const letterSpacingPx = !verticalUpright && !s.tateChuYoko
             ? segLetterSpacingPx(s, drawGridDeltaPx, scale)
             : 0;
-          state.onTextRun({
+          state.onTextRun(textRunPaintInfo({
             text: s.text,
             x: place ? place.left : x,
             y: place ? place.top : state.y,
@@ -10262,7 +10727,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
             // 縦中横 draw path (above) actually fires; `undefined` otherwise so a
             // non-縦中横 run's payload is byte-identical.
             eastAsianVert: verticalUpright && s.tateChuYoko ? true : undefined,
-          });
+          }));
         }
 
         // Underline / strike share the glyph colour, so an inverse-video run
@@ -10362,126 +10827,10 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
     flushBorderGroup();
     if (paraNeedsBidi) ctx.direction = 'ltr'; // reset for subsequent draws
 
-    // ECMA-376 §17.6.8 — line numbering. Each body line advances the section's
-    // line counter; a number is drawn in the left margin when its 1-based count
-    // is an even multiple of countBy. Only the top-level body render sets
-    // `state.lineNumbering` (nested renders clear it), so header/footer/cell/note
-    // lines are never numbered (§17.6.8 numbers the main document story).
-    if (state.lineNumbering && state.lineNumberCounter !== undefined) {
-      const n = state.lineNumberCounter;
-      if (n % state.lineNumbering.countBy === 0 && !dryRun) {
-        drawLineNumber(ctx, n, baseline, contentX, state.lineNumbering, scale, state.defaultColor);
-      }
-      state.lineNumberCounter = n + 1;
-    }
-
     state.y += lineH;
 }
 
-/** ECMA-376 §17.6.8 — draw one line number `n` in the left margin, its RIGHT edge
- *  `distancePt` to the left of the text margin (`contentX`), aligned to the line's
- *  `baseline`. The distance attribute is "the distance between the text margin and
- *  the edge of any line numbers" (§17.6.8). */
-function drawLineNumber(
-  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
-  n: number,
-  baseline: number,
-  contentX: number,
-  cfg: { distancePt: number; fontSizePt: number },
-  scale: number,
-  color: string,
-): void {
-  ctx.save();
-  ctx.fillStyle = color;
-  ctx.font = buildFont(false, false, cfg.fontSizePt * scale, null, {});
-  const prevAlign = ctx.textAlign;
-  ctx.textAlign = 'right';
-  ctx.fillText(String(n), contentX - cfg.distancePt * scale, baseline);
-  ctx.textAlign = prevAlign;
-  ctx.restore();
-}
-
 // ===== Text layout =====
-
-/** Phase 4-1 B2 Stage 1 — a paginated element carrying the paginator's scale-1
- *  laid-out lines (compute-once). `splitParagraphAcrossPages` stamps the FULL
- *  paragraph line array (not the per-slice sub-range) onto every slice so the
- *  paint pass can index it by ABSOLUTE line number exactly like a freshly
- *  computed array (drawParagraphLine reads `lines[li]` / `lines.length`). Kept as
- *  a renderer-internal intersection — `LayoutLine` is private to renderer.ts, so
- *  this deliberately does NOT touch the public `PaginatedBodyElement` in types.ts
- *  (which would need a renderer↔types import for the payload type; see the
- *  ColumnGeom note above). `layoutLinesInputs` records the scale-1 inputs the
- *  paginator laid the lines out with; the paint pass reuses them ONLY when its
- *  own scale is 1 and every input matches, so no px field is ever rescaled. */
-type PaginatedElementWithLines = PaginatedBodyElement & {
-  layoutLines?: LayoutLine[];
-  /** The line-layout inputs the paginator used (all in the paginator's scale-1 pt
-   *  space). The paint pass reuses the stamped lines ONLY when its own scale is 1
-   *  AND every one of these inputs equals the value it would pass to layoutLines
-   *  itself — a self-verifying gate that stays correct across single/multi-column,
-   *  float wrap, and the numbering firstLineIndent derivation (which differs
-   *  between measure and paint for numbered lists, so those simply fail the
-   *  `firstIndent` check and recompute). No px field is ever rescaled. */
-  layoutLinesInputs?: {
-    scale: number;      // always 1 (paginator space)
-    paraW: number;      // pt
-    firstIndent: number; // pt
-    tabOriginPx: number; // pt (== indLeft at scale 1)
-    gridDeltaPx: number; // pt
-    hasFloats: boolean;  // a float context changes wrap → never reuse across it
-    /** The kinsoku rules the paginator laid out with (§17.3.1.16 / §17.15.1.58–.59).
-     *  Compared by {@link kinsokuRulesEquivalent} in the paint gate. NOTE this is
-     *  usually NOT reference-identical to the paint state's rules: the production
-     *  path resolves document layout settings once in paginateDocument and
-     *  again in renderDocumentToCanvas, and the resolver builds fresh Set
-     *  objects per call — so the gate needs value equivalence, not `===` alone. */
-    kinsoku: KinsokuRules;
-  };
-};
-
-/** Phase 4-1 B2 — record a paragraph's scale-1 laid-out lines + the layout inputs
- *  that produced them onto the paragraph object, so the paint pass can reuse the
- *  wrap partition instead of re-running {@link layoutLines} (compute-once). Used
- *  by both the BODY split path ({@link splitParagraphAcrossPages}, Stage 1) and
- *  the table-CELL measure path ({@link measureCellParagraphHeight}, T2). Only ever called
- *  at scale 1 (the paginator's pt space), so every recorded number is already in
- *  pt and the paint gate compares against it without rescaling — see the
- *  self-verifying reuse gate in {@link renderParagraph}, which fires ONLY when its
- *  own reconstructed scale-1 inputs match every field here. The FULL line array is
- *  stamped (never a slice) because the paint loop indexes lines by absolute number;
- *  the array is immutable to the draw path, so it is safe to share across page
- *  slices and repeated renderPage calls. Callers must have already excluded
- *  state-sensitive paragraphs (`paragraphSegsStateSensitive`) whose segment TEXT
- *  would go stale, and float contexts (`hasFloats` records whether one was active;
- *  the cell path never wraps cell paragraphs around floats, so it always passes
- *  false). */
-function stampParagraphLines(
-  // A DocParagraph (the table-cell path passes the paragraph directly) or an
-  // already-paginated paragraph slice (the body path passes its PaginatedElementWithLines
-  // slice). Both carry the two runtime line fields via the internal cast below.
-  para: DocParagraph | PaginatedElementWithLines,
-  lines: LayoutLine[],
-  inputs: {
-    paraW: number;
-    firstIndent: number;
-    tabOriginPx: number;
-    gridDeltaPx: number;
-    hasFloats: boolean;
-    kinsoku: KinsokuRules;
-  },
-): void {
-  const stamped = para as unknown as PaginatedElementWithLines;
-  stamped.layoutLines = lines;
-  stamped.layoutLinesInputs = { scale: 1, ...inputs };
-}
-
-/** Phase 4-1 B2 Stage 1 — master switch for the compute-once line reuse. Always
- *  ON in production; the pixel-identity characterization test flips it OFF to
- *  capture a fresh-recompute reference and assert the reuse path paints an
- *  IDENTICAL stream (see layout-lines-reuse-identity.test.ts). Module-local so it
- *  never leaks onto the public surface. */
-let lineReuseEnabled = true;
 
 /** B2 table stage 1b — master switch for the compute-once TABLE layout reuse
  *  (stamped column widths + row heights, {@link computeTableLayout}). Always ON in
@@ -10638,21 +10987,20 @@ function renderAnchorImages(
   // Front floats (behindDoc="0"): defer to the page's top layer so a later inline
   // image cannot overpaint them (§20.4.2.10). Capture the current column band so
   // the replayed draw resolves a column-relative anchor against the right widths.
-  if (state.deferFront) {
-    const cx = state.contentX;
-    const cw = state.contentW;
-    state.deferFront.push(() => {
-      const sx = state.contentX;
-      const sw = state.contentW;
-      const sd = state.deferFront;
-      state.contentX = cx;
-      state.contentW = cw;
-      state.deferFront = null; // draw in place this time
+  const capturedContentX = state.contentX;
+  const capturedContentW = state.contentW;
+  if (enqueueDeferredFrontPaint(state, () => {
+    const sx = state.contentX;
+    const sw = state.contentW;
+    state.contentX = capturedContentX;
+    state.contentW = capturedContentW;
+    try {
       renderAnchorImages(para, state, paragraphTopPx, 'front', wrapFloatParagraphTopPx);
+    } finally {
       state.contentX = sx;
       state.contentW = sw;
-      state.deferFront = sd;
-    });
+    }
+  })) {
     return;
   }
   const frontRuns = para.runs
@@ -10916,8 +11264,9 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
   // physical top = the column band's logical x (`state.contentX`), matching
   // resolveShapeBox's logical-projection branch so the float band (registered
   // from the LOGICAL projection) and the painted shape share one geometry.
-  if (state.verticalPhys) {
-    const cssW = state.verticalPhys.cssWidthPx;
+  const verticalFrame = state.verticalPhys;
+  if (verticalFrame) {
+    const cssW = verticalFrame.cssWidthPx;
     const { ctx } = state;
     ctx.save();
     ctx.rotate(-Math.PI / 2);
@@ -11144,7 +11493,52 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
   // sits on top of the panel. Rotation is intentionally not applied to body
   // text — the cover-template usage we care about uses anchor-only text.
   if (shape.textBlocks && shape.textBlocks.length > 0) {
-    renderShapeText(shape, x, y, w, h, ctx as CanvasRenderingContext2D, scale, state.fontFamilyClasses, state.images, state);
+    const grid = state.docGrid;
+    const lineGridActive = grid?.linePitchPt != null
+      && grid.linePitchPt > 0
+      && isGridLineRule(grid);
+    const characterGridActive = grid?.charSpacePt != null
+      && (grid.type === 'linesAndChars' || grid.type === 'snapToChars');
+    const textBoxSource = {
+      story: 'textbox' as const, storyInstance: 'legacy-shape', path: [] as number[],
+    };
+    const textBoxLayout = acquireShapeTextBoxLayout(shape, {
+      xPt: x / scale, yPt: y / scale, widthPt: w / scale, heightPt: h / scale,
+    }, {
+      id: 'legacy-shape-textbox',
+      source: textBoxSource,
+      flowDomainId: 'legacy-shape',
+      context: {
+        lineGrid: { active: lineGridActive, pitchPt: lineGridActive ? grid?.linePitchPt ?? null : null },
+        characterGrid: {
+          active: characterGridActive,
+          deltaPt: characterGridActive ? grid.charSpacePt ?? 0 : 0,
+        },
+        physicalIndentLeftPt: 0, physicalIndentRightPt: 0, firstIndentPt: 0,
+        lineSpacing: null, spaceBeforePt: 0, spaceAfterPt: 0,
+        baseRtl: false, isJustified: false, stretchLastLine: false,
+        tabStops: [], hasRuby: false, hasEastAsianText: false,
+        kinsoku: state.kinsoku, defaultTabPt: state.defaultTabPt,
+        mathDefJc: state.mathDefJc,
+      },
+      measurer: { context: ctx, fontFamilyClasses: state.fontFamilyClasses },
+      environment: paragraphMeasurementEnvironment(state),
+      input: textBoxAcquisitionInput(shape, textBoxSource),
+    });
+    if (textBoxLayout) {
+      if (!state.retainedResourcePainter) {
+        throw new Error('Shape text-box paint requires a retained resource painter');
+      }
+      paintPlacedTextBoxLayout(textBoxLayout, {
+        ctx, scale, dpr: state.dpr,
+        defaultTextColor: shape.defaultTextColor
+          ? `#${shape.defaultTextColor}` : state.defaultColor,
+        showTrackChanges: state.showTrackChanges,
+        resources: state.retainedResourcePainter,
+        pointToCss: state.pointToCss,
+        onTextRun: state.onTextRun,
+      });
+    }
   }
 }
 
@@ -11350,7 +11744,7 @@ export function measureShapeTextAutoFitHeight(
               bold: b.bold,
               italic: b.italic,
             } as ShapeTextRun];
-      const segs = buildSegments(runs.map(shapeRunToDocRun), effState);
+      const segs = buildSegments(runs.map((run) => shapeRunToDocRun(run, shape.textVert)), effState);
       const baseRtl = resolveBaseDirection(b.bidi, b.text) === 'rtl';
       const lines = layoutLines(
         ctx,
@@ -11436,997 +11830,6 @@ export function resolveShapeAutofitBox(
   return Number.isFinite(fitW) && fitW > 0 ? { x, y, w: fitW, h } : { x, y, w, h };
 }
 
-/** Render a shape's body text inside its bounding box, honoring lIns/tIns/
- *  rIns/bIns and the wps:bodyPr @anchor (t / ctr / b). Alignment within each
- *  line is read from the per-block paragraph alignment.
- *
- *  Text is laid out by the main line engine ({@link buildSegments} +
- *  {@link layoutLines}), so a text box gets the SAME kinsoku (§17.15.1.58–.60),
- *  UAX#9 bidi (§17.3.1.6), §17.18.44 justification and §17.3.1.37 tab stops the
- *  body does. Shape-specific concerns — insets, the bodyPr @anchor, the
- *  §21.1.2.1.1 noAutofit clip, per-paragraph §17.3.1.33 spacing, and inline
- *  images — stay here; only the line-breaking/segmentation was moved onto the
- *  shared engine.
- *
- *  Blocks carrying an `imagePath` (an inline image inside the text box, e.g. a
- *  WMF chart wrapped as the sole content of a paragraph) draw the decoded
- *  bitmap from `images` instead of text, fitted to the inner width. The
- *  reserved height is the SAME value used by the first-pass measurement and the
- *  draw advance, so vertical anchoring (t/ctr/b) stays consistent. A missing
- *  bitmap reserves its height but draws nothing (no crash).
- *
- *  Exported for unit testing the inline-image fit/draw + missing-bitmap paths. */
-export function renderShapeText(
-  shape: ShapeRun,
-  x: number, y: number, w: number, h: number,
-  ctx: CanvasRenderingContext2D,
-  scale: number,
-  fontFamilyClasses: Record<string, string> = {},
-  images: Map<string, DecodedImage> = new Map(),
-  // The document render state. Threaded from the production caller so text-box
-  // text is laid out by the SAME segment builder / line breaker the body uses
-  // ({@link buildSegments} + {@link layoutLines}) with the document's resolved
-  // kinsoku (§17.3.1.16) and defaultTabStop (§17.15.1.25). Optional: unit tests
-  // call this with only ctx/scale/fonts, so a minimal state is synthesized from
-  // those (buildSegments reads `state` only on field/noteRef runs, which shape
-  // runs never produce — so the minimal state is exact for text-box content).
-  state?: RenderState,
-): void {
-  // ECMA-376 §20.1.10.83 `<wps:bodyPr vert>` — a VERTICAL text box. Lay the body
-  // out with the SAME horizontal engine (buildSegments + layoutLines, so
-  // kinsoku/bidi/justify/tabs are reused), rotated ±90° about the box centre with
-  // width/height swapped — the section-level tbRl "rotate-layout" approach,
-  // mirroring pptx `renderTextBody`. `vert`/`vert270` rotate EVERY glyph (their
-  // spec meaning), so a plain draw in the rotated frame already IS that rotation;
-  // `eaVert` additionally counter-rotates East-Asian glyphs per code point so CJK
-  // stands upright (the `eaVertUpright` flag routes text runs through
-  // {@link drawVerticalRun} below). The shape PANEL (fill/stroke) is drawn by the
-  // caller BEFORE this call and stays unrotated; only the body text rotates. The
-  // horizontal path is byte-identical when `vmode === null`.
-  //
-  // The §21.1.2.1.1 bodyPr insets (lIns/tIns/rIns/bIns) travel UNCHANGED into the
-  // rotated frame — lIns bounds the flow-left of the (rotated) text body, not the
-  // physical page left — matching the Word/PowerPoint-verified pptx `renderTextBody`
-  // (packages/pptx/src/renderer.ts, which re-enters the rotated layout with the
-  // body's insets unchanged). This is the DrawingML text-frame semantics: the
-  // insets belong to the text body's own rectangle, which rotates with `vert`.
-  //
-  // Deferred (fall back to the horizontal draw of the affected element): a
-  // shape's own `rotation` is not composed with the text-body rotation (already
-  // true before this change — the panel-rotation restore precedes this call).
-  const vmode = verticalTextboxMode(shape.textVert);
-  // §20.1.10.83 — East-Asian upright per-glyph orientation (CJK upright, non-EA
-  // rotated 90°): both `eaVert` and `mongolianVert`. They differ ONLY in the
-  // column-stacking direction, handled by `mongolianLineFlip` below.
-  const eaVertUpright = vmode === 'eaVert' || vmode === 'mongolianVert';
-  // §20.1.10.83 `mongolianVert` stacks columns LEFT→RIGHT — the MIRROR of the
-  // `eaVert`/`vert` R→L frame. It is not a pure rotation of that frame (chars stay
-  // top→bottom while lines reverse), so it reuses the +90° CW eaVert draw and then
-  // reflects each line's cross-position within the inner box (see the draw loop).
-  const mongolianLineFlip = vmode === 'mongolianVert';
-  // Sign of the page rotation: +1 for the +90° CW frames (vert/eaVert/
-  // mongolianVert), −1 for vert270's −90° frame. An UPRIGHT inline image must
-  // counter-rotate by `-rotSign * 90°` to cancel it (drawing it with the shared
-  // +90°-only `drawUprightBox` would leave a vert270 image at −180°, upside down).
-  const rotSign = vmode === 'vert270' ? -1 : 1;
-  if (vmode) {
-    const boxW = w;
-    const boxH = h;
-    ctx.save();
-    ctx.translate(x + boxW / 2, y + boxH / 2);
-    // +90° (vert/eaVert/mongolianVert): chars advance T→B (local +x → device +y),
-    // lines stack R→L (local +y → device −x, first line at the right edge; for
-    // mongolianVert the per-line cross reflection re-stacks them L→R). −90°
-    // (vert270): chars B→T, lines L→R (first line at the left edge). The swapped
-    // LOGICAL box — width = physical height (the column length), height = physical
-    // width (the line-stacking extent) — is drawn centred on the pivot.
-    ctx.rotate(rotSign * (Math.PI / 2));
-    x = -boxH / 2;
-    y = -boxW / 2;
-    w = boxH;
-    h = boxW;
-  }
-  const effState: RenderState =
-    state ?? shapeRenderState(ctx, scale, fontFamilyClasses, images);
-  // Default glyph colour for a run/leader that carries no explicit colour.
-  // Precedence (ECMA-376 §17.3.2.6 run color > §20.1.4.1.17 shape fontRef default
-  // > document/theme default): a `<wps:style><a:fontRef>` gives the WHOLE text box
-  // a default color (sample-28's cover banner draws its color-less Arabic runs in
-  // the fontRef's `lt1` = white; without this they fell back to black on the dark
-  // panel). The shape default folds OVER the document default (black when the
-  // caller threads no state — the unit-test path). A run's own `<w:color>` still
-  // wins (resolved per segment below). Mirrors pptx renderTextBody's
-  // `shapeDefaultTextColor ?? themeDefaultColor`.
-  const documentDefaultColor = effState.defaultColor ?? '#000000';
-  const defaultColor = shape.defaultTextColor
-    ? `#${shape.defaultTextColor}`
-    : documentDefaultColor;
-  const blocks = shape.textBlocks ?? [];
-  const { lIns, rIns } = shapeTextHorizontalInsetsPx(shape, scale);
-  const tIns = (shape.textInsetT ?? 0) * scale;
-  const bIns = (shape.textInsetB ?? 0) * scale;
-  const innerX = x + lIns;
-  const innerW = Math.max(0, w - lIns - rIns);
-  const innerY = y + tIns;
-  const innerH = Math.max(0, h - tIns - bIns);
-
-  // §20.1.10.83 `mongolianVert` — `flipBlockTop` keeps its historical name, but
-  // this mapping is not a pure reflection about the inner-box centre. It first
-  // reflects the cross-axis interval `[top, top + extent]`, then `+ bIns - lIns`
-  // re-homes the reflected stack so the FIRST column starts at the physical LEFT
-  // inset `lIns` (§21.1.2.1.1 names insets by physical bounding-rectangle edge).
-  // This helper positions the line band only; the draw site mirrors each line's
-  // centerline within that band and keeps ruby reservation on the band-interior /
-  // physical-right side. Identity for every non-mongolian mode.
-  const flipBlockTop = (top: number, extent: number): number =>
-    mongolianLineFlip ? 2 * innerY + innerH - top - extent + bIns - lIns : top;
-
-  // ECMA-376 §17.3.1.12 — per-paragraph indent (px). `leftPx`/`rightPx` shrink
-  // the text column from the inner box edges; `firstPx` is the SIGNED first-line
-  // indent (positive = first line further right; negative = first line hangs
-  // LEFT, so its width is WIDER). The body renderer honors the sign the same way
-  // (Word applies a signed hanging first-line list-independently); the shape path
-  // mirrors it rather than clamping. `paraW` is the continuation-line width;
-  // `firstLineW` the first line's. When all indents are 0 ⇒ leftPx=rightPx=
-  // firstPx=0 ⇒ paraW=firstLineW=innerW and regionLeft=innerX (no-op).
-  const indentOf = (b: ShapeText) => {
-    const leftPx = (b.indentLeft ?? 0) * scale;
-    const rightPx = (b.indentRight ?? 0) * scale;
-    const rawFirstPx = (b.indentFirst ?? 0) * scale; // SIGNED
-    const firstPx = b.numbering && rawFirstPx < 0 ? 0 : rawFirstPx;
-    const paraW = Math.max(0, innerW - leftPx - rightPx);
-    const firstLineW = Math.max(0, paraW - firstPx);
-    return { leftPx, firstPx, markerFirstPx: rawFirstPx, paraW, firstLineW };
-  };
-
-  // First pass: lay out each block. Text blocks WRAP to the inner width
-  // (ECMA-376 §21.1.2.1.1) — a long title/abstract that exceeds the box width
-  // breaks onto multiple lines instead of overflowing the page; image blocks
-  // reserve their fitted height. The computed layout drives both vertical
-  // anchoring (totalH) and the draw pass (no re-wrapping).
-  type BlockIndent = { leftPx: number; firstPx: number; markerFirstPx: number; paraW: number; firstLineW: number };
-  // A text-box paragraph laid out by the MAIN engine: `lines` are the shared
-  // LayoutLine[] (from buildSegments → layoutLines, so kinsoku / bidi / justify /
-  // tabs all apply), `lineHeights`/`baselineOffsets` give each line its shape
-  // line-box height + centred baseline (PR #640 discipline, computed over the
-  // line's segments), and `baseRtl` is the paragraph base direction (§17.3.1.6
-  // `<w:bidi>` when set, else first-strong of the block text).
-  // For a HORIZONTAL box `fitW`/`fitH` are the image's draw width/height and it
-  // reserves `fitH` down the block flow. For a VERTICAL box (§20.1.10.83) the
-  // image is drawn UPRIGHT (a graphic keeps its physical orientation — the
-  // batch-3 GT / issue #988), so `fitW`/`fitH` stay the PHYSICAL width/height and
-  // `crossExtent` (= physical width) is what it reserves along the column-stacking
-  // axis; the along-column placement uses `fitH` (physical height).
-  type BlockLayout =
-    | { kind: 'image'; fitW: number; fitH: number; crossExtent?: number; ind: BlockIndent }
-    | {
-        kind: 'text';
-        lines: LayoutLine[];
-        lineHeights: number[];
-        baselineOffsets: number[];
-        baseRtl: boolean;
-        alignment: string;
-        ind: BlockIndent;
-      };
-  // ECMA-376 line box: the font's NATURAL line height (OS/2 win metrics, read via
-  // the browser's fontBoundingBox and corrected for substituted faces by
-  // correctLineMetrics), NOT a flat 1.2×em. The flat factor understates real
-  // faces, so a text box's trailing line stayed inside a `noAutofit` box that
-  // Word clips (sample-6's 3-line banner). The §17.3.1.33 line-spacing rule is
-  // applied by the SHARED `lineBoxHeight` (single source of truth with the body
-  // renderer, incl. the `intendedSingleLinePx` floor that keeps a substituted
-  // CJK face — Meiryo — from under-measuring). Returns the CENTERED baseline
-  // offset (half-leading) so the draw pass seats glyphs the way Word centers the
-  // font's natural line within an expanded line box, instead of top-aligning.
-  const shapeLineMetrics = (
-    family: string | null | undefined,
-    bold: boolean,
-    italic: boolean,
-    fontPx: number,
-    b: ShapeText,
-    familyEa?: string | null | undefined,
-    // Explicit design-line floor (px). The body floors the line box by the MAX
-    // intendedSingleLinePx across ALL segments on the line (~5684), not just the
-    // tallest one, because a shorter-but-tabled face (e.g. a small Meiryo run
-    // after a large untabled-ascii run) still raises the box. The rich call site
-    // passes that all-runs max here; when omitted (the single-format path) the
-    // floor falls back to this run's own ascii+eastAsia faces. Either way it is a
-    // FLOOR (0 for all-untabled lines ⇒ unchanged).
-    lineFloorPx?: number,
-    // Deterministic per-line docGrid count height produced by layoutLines.
-    gridCountSinglePx?: number,
-    grid?: DocGridCtx,
-    eastAsian = false,
-    hasRuby = false,
-    // METRIC script hint (issue #1013): the measured/tallest segment's own
-    // script — eaOnly design heights (Word FE 1.3 × hhea) size the glyph box
-    // only when the measured segment is East Asian. `eastAsian` above stays
-    // line-wide (it gates the §17.6.5 grid cell rounding).
-    metricEastAsian = eastAsian,
-    familyRoute?: CanvasFontRoute,
-    familyEaRoute?: CanvasFontRoute,
-  ): { lineH: number; baselineOffset: number } => {
-    // Floor the single-line box by the TALLEST design line among the run's
-    // declared faces (ascii §17.3.2.26 + eastAsia). The common Japanese encoding
-    // sets Meiryo (1.596×em) / Sakkal Majalla (1.3965×em) ONLY on
-    // `<w:rFonts w:eastAsia>` while `<w:rFonts w:ascii>` stays an untabled Latin
-    // default, so an ascii-only floor would leave the box flat
-    // (intendedSingleLinePx(untabledAscii)=0). This is a FLOOR, not a replace —
-    // intendedSingleLinePx returns 0 for every untabled face, so non-Meiryo/
-    // Sakkal text boxes are unchanged. Mirrors the xlsx shape-text floor
-    // (PR #646) and the docx BODY per-eastAsia-segment floor. It is NOT per-glyph
-    // CJK font switching (a larger change deferred here).
-    const asciiIntended = intendedSingleLinePx(family ?? null, fontPx, metricEastAsian);
-    const eaIntended = intendedSingleLinePx(familyEa ?? null, fontPx, metricEastAsian);
-    // Use the explicit all-runs floor when provided (rich path); else fall back
-    // to this run's own faces (single-format path). Both are a floor, so the
-    // per-run ascii/eastAsia max is still folded in for the fallback.
-    const intended = lineFloorPx ?? Math.max(asciiIntended, eaIntended);
-    // Measure the glyph metrics on the RENDERING face — the one whose design line
-    // wins the floor. When the eastAsia face is tabled and taller than the ascii
-    // box (the CJK glyphs are the tallest ink on the line), read c.ascent/descent
-    // from `familyEa`, not the untabled ascii default, so the baseline is placed
-    // relative to the CJK ink — mirroring the body's `line.ascent` being the
-    // eastAsia-resolved corrected ascent. If the ascii face wins (Latin line, or
-    // both untabled) keep measuring ascii, so an all-untabled line is byte-for-
-    // byte unchanged from before this change.
-    const measureFamily = eaIntended > asciiIntended ? (familyEa ?? null) : (family ?? null);
-    const measureRoute = eaIntended > asciiIntended ? familyEaRoute : familyRoute;
-    ctx.font = buildFont(bold, italic, fontPx, measureFamily, fontFamilyClasses, measureRoute);
-    const m = ctx.measureText('Mg');
-    const rawAsc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? fontPx * 0.8;
-    const rawDesc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? fontPx * 0.2;
-    const c = correctLineMetrics(measureFamily, fontPx, rawAsc, rawDesc, metricEastAsian);
-    // The glyph box (measured, corrected) is kept SEPARATE from the floored line
-    // box: `intended` may inflate `lineH` above the glyph box, and Word centers
-    // the glyph box within that expanded box (half-leading) rather than pinning
-    // the ink to the top. Mirrors the body's `glyphNatural = ascent + descent`
-    // (lineBoxHeight) vs the floor-inflated `natural`.
-    const glyphNatural = c.ascent + c.descent;
-    const ls: LineSpacing | null = b.lineSpacingRule
-      ? { value: b.lineSpacingVal ?? 0, rule: b.lineSpacingRule as 'auto' | 'exact' | 'atLeast' }
-      : null;
-    // Ruby lines reserve real furigana height, so use the measured glyph box,
-    // mirroring the body path.
-    const lineH = lineBoxHeight(
-      ls,
-      c.ascent,
-      c.descent,
-      scale,
-      grid,
-      hasRuby,
-      intended,
-      eastAsian,
-      gridCountSinglePx,
-    );
-    // Baseline placement inside the line box, mirroring the body draw path
-    // (~7859). §17.3.1.33 sizes the box; the placement is Word's OBSERVED
-    // behaviour (#990), not an ECMA rule:
-    //   • lineRule="auto" is MULTIPLE spacing — Word pins the baseline at the
-    //     natural ascent and places the multiplier's extra leading ENTIRELY BELOW
-    //     the glyph box, rather than centring it in the enlarged box (#990). The
-    //     design-line FLOOR (intended > glyphNatural, font substitution) still
-    //     centres the glyph within the single design line (half-leading), so a
-    //     single-spaced Meiryo text box (sample-6's banner) is unchanged.
-    //   • exact/atLeast (and docGrid/ruby, sized separately) keep the full-box
-    //     centring: baseline = (lineH − glyphNatural)/2 below the box top + ascent
-    //     (reduces to c.ascent when the box is not expanded).
-    const autoMultiple = ls?.rule === 'auto' && !hasRuby && !isGridLineRule(grid);
-    // For auto multiple spacing, centre only within the single design-line box
-    // (= max(glyphNatural, intended), matching lineBoxHeight's `natural`); the
-    // multiplier's extra (lineH − singleBox) then falls below.
-    const centerBox = autoMultiple ? Math.max(glyphNatural, intended) : lineH;
-    const baselineOffset = (centerBox - glyphNatural) / 2 + c.ascent;
-    return { lineH, baselineOffset };
-  };
-  // Per-line shape metrics over the line's laid-out segments. The line-box FLOOR
-  // is the MAX intendedSingleLinePx across EVERY text segment (§17.3.2.26; each
-  // buildSegments segment is already single-font, so its own family is both the
-  // ascii and the eastAsia contribution) — mirrors the body's per-segment max
-  // (~5684) and the previous rich path. The measurement face + size come from the
-  // TALLEST text segment. A line with no text segment (e.g. only a tab) falls
-  // back to the block's own font.
-  const lineMetricsFor = (b: ShapeText, line: LayoutLine): { lineH: number; baselineOffset: number } => {
-    if (vmode && line.hasRuby) {
-      return verticalRubyLineMetrics(line, shapeLineSpacingOf(b), scale, effState.docGrid);
-    }
-    let tallest: LayoutTextSeg | null = null;
-    let tallestEa = false;
-    let floorPx = 0;
-    let lineText = '';
-    for (const seg of line.segments) {
-      if (!('text' in seg)) continue;
-      const ts = seg as LayoutTextSeg;
-      lineText += ts.text;
-      // Design-line FLOOR is the MAX intendedSingleLinePx over EVERY segment's
-      // ascii AND declared eastAsia face (§17.3.2.26), at that segment's size —
-      // mirrors the body's per-segment max and the pre-refactor per-run floor.
-      // The eastAsia term (`eaFloorFamily`) is what raises the box to Meiryo when
-      // the run declares it on eastAsia even though the glyphs are Latin. 0 for an
-      // all-untabled line ⇒ unchanged (a pure FLOOR, PR #640/#646/#648).
-      const segPx = ts.fontSize * scale;
-      // Script hint: eaOnly design heights apply to EA segments only, and ruby
-      // segments keep their measured box (#1013).
-      const segEa = EAST_ASIAN_RE.test(ts.text) && !ts.ruby;
-      if (!tallest || ts.fontSize > tallest.fontSize) {
-        tallest = ts;
-        tallestEa = segEa;
-      }
-      floorPx = Math.max(
-        floorPx,
-        segmentIntendedSingleLinePx(ts, segPx, segEa),
-        segmentEastAsiaFloorSingleLinePx(ts, segPx, segEa),
-      );
-    }
-    const fontPx = (tallest?.fontSize ?? b.fontSizePt) * scale;
-    const eastAsian = EAST_ASIAN_RE.test(lineText);
-    return shapeLineMetrics(
-      tallest?.fontFamily ?? b.fontFamily,
-      tallest?.bold ?? b.bold ?? false,
-      tallest?.italic ?? b.italic ?? false,
-      fontPx,
-      b,
-      // eastAsia axis of the TALLEST segment selects the MEASUREMENT face inside
-      // shapeLineMetrics (the glyph box read for the baseline) when it is the
-      // tabled face that wins the floor; the FLOOR itself is the all-segments max
-      // passed explicitly, so a shorter tabled segment still raises the box.
-      tallest?.eaFloorFamily ?? b.fontFamily,
-      floorPx,
-      line.gridCountSingle,
-      effState.docGrid,
-      eastAsian,
-      line.hasRuby ?? false,
-      // METRIC hint = tallest segment's own script (Latin tallest keeps its
-      // Canvas box on a CJK-bearing line); grid rounding stays line-wide.
-      tallestEa,
-      tallest?.fontRoute,
-      tallest?.eaFloorRoute,
-    );
-  };
-
-  const layouts: BlockLayout[] = blocks.map((b) => {
-    const ind = indentOf(b);
-    if (b.imagePath) {
-      if (vmode) {
-        // §20.1.10.83 vertical box — draw the image UPRIGHT. The along-column
-        // available space is `firstLineW` (= the column-length axis in the swapped
-        // frame), so the image's PHYSICAL HEIGHT is fitted to it; the physical
-        // WIDTH is the cross (line-stacking) extent it reserves. `fitShapeImage`
-        // fits its first arg to the constraint, so pass (heightPt, widthPt) and
-        // read the fitted physical height/width back.
-        const fit = fitShapeImage(b.imageHeightPt ?? 0, b.imageWidthPt ?? 0, ind.firstLineW, scale);
-        const physH = fit.w; // fitted physical height (≤ column length)
-        const physW = fit.h; // physical width (cross extent)
-        return { kind: 'image', fitW: physW, fitH: physH, crossExtent: physW, ind };
-      }
-      // The image occupies the FIRST line, so it fits to firstLineW (= paraW −
-      // signed first-line indent), not the full inner width.
-      const { w: fitW, h: fitH } = fitShapeImage(b.imageWidthPt ?? 0, b.imageHeightPt ?? 0, ind.firstLineW, scale);
-      return { kind: 'image', fitW, fitH, ind };
-    }
-    // Text paragraph. Build body-model runs (per-run rich formatting when the
-    // parser surfaced `runs`; otherwise a single synthesized run from the block's
-    // conflated format fields — the image-less legacy path). buildSegments splits
-    // each run into single-font segments (ascii / eastAsia / cs), then layoutLines
-    // breaks them into lines honoring kinsoku + tab stops. Tabs are measured from
-    // the box content-left (`tabOriginPx = leftPx`, the same margin space the
-    // body's `indLeft` establishes). No float wrap context inside a shape, and
-    // shape text is not on the section docGrid character grid (gridDelta 0).
-    const runs: ShapeTextRun[] =
-      b.runs && b.runs.length > 0
-        ? b.runs
-        : [{
-            text: b.text,
-            fontSizePt: b.fontSizePt,
-            color: b.color,
-            fontFamily: b.fontFamily,
-            bold: b.bold,
-            italic: b.italic,
-          } as ShapeTextRun];
-    const docRuns = runs.map(shapeRunToDocRun);
-    const segs = buildSegments(docRuns, effState);
-    // Base direction (§17.3.1.6): honor an explicit `<w:bidi>` on the block, else
-    // first-strong of the concatenated block text (the pre-change per-line probe
-    // used the same auto rule; a set flag now overrides it as Word does).
-    // Resolved BEFORE layout so a base-RTL block's tab stops mirror in layout
-    // (§17.3.1.37 / §17.18.84 — see layoutBidiTabStops).
-    const baseRtl = resolveBaseDirection(b.bidi, b.text) === 'rtl';
-    const lines = layoutLines(
-      ctx,
-      segs,
-      ind.paraW,
-      ind.firstPx, // signed first-line indent (px): narrows the first line's width
-      scale,
-      b.tabStops ?? [],
-      undefined,
-      fontFamilyClasses,
-      ind.leftPx, // tab origin = content-left indent (§17.3.1.37 margin space)
-      effState.kinsoku,
-      0,
-      effState.defaultTabPt,
-      ind.paraW, // marginRightPx: block text has no separate right-indent origin
-      baseRtl,
-      jcIsFullyJustified(b.alignment),
-      jcStretchesLastLine(b.alignment),
-    );
-    const metrics = lines.map((line) => lineMetricsFor(b, line));
-    return {
-      kind: 'text',
-      lines,
-      lineHeights: metrics.map((m) => m.lineH),
-      baselineOffsets: metrics.map((m) => m.baselineOffset),
-      baseRtl,
-      alignment: b.alignment,
-      ind,
-    };
-  });
-  const blockHeight = (l: BlockLayout): number => {
-    // A vertical box's upright image reserves its CROSS extent (physical width)
-    // along the column-stacking axis, not its `fitH` (physical height).
-    if (l.kind === 'image') return l.crossExtent ?? l.fitH;
-    return l.lineHeights.reduce((s, h) => s + h, 0);
-  };
-  // ECMA-376 §17.3.1.33 — each text-box paragraph's own spaceBefore/After is
-  // reserved inside the box (px). sample-13's "Journal homepage" line carries
-  // spaceBefore = 50 pt, which drops it well below the box top so it clears the
-  // masthead banner instead of hiding behind it. The gap BETWEEN two paragraphs
-  // is max(prev.after, this.before) — NOT their sum (same collapse the body uses);
-  // the first block reserves only its own before, and a trailing after overflows
-  // the box (it is not part of the laid-out block extent, so it is excluded from
-  // totalH used for ctr/bottom anchoring).
-  const spBefore = blocks.map((b) => (b.spaceBefore ?? 0) * scale);
-  const spAfter = blocks.map((b) => (b.spaceAfter ?? 0) * scale);
-  const gapBefore = (i: number): number => shapeParagraphGapBefore(blocks, i, spBefore, spAfter);
-  const totalH = layouts.reduce((s, l, i) => s + gapBefore(i) + blockHeight(l), 0);
-
-  const anchor = shape.textAnchor ?? 't';
-  let cursorY: number;
-  if (anchor === 'b') {
-    cursorY = innerY + Math.max(0, innerH - totalH);
-  } else if (anchor === 'ctr') {
-    cursorY = innerY + Math.max(0, (innerH - totalH) / 2);
-  } else {
-    cursorY = innerY;
-  }
-
-  // ECMA-376 §21.1.2.1.1 — a `<a:noAutofit/>` (normalized to "none") text box
-  // keeps a FIXED size and Word CLIPS text that overflows the box ("sp"/spAutoFit
-  // grows the box, "norm"/normAutofit shrinks the text, so only "none" needs a
-  // clip: the box is already the resolved size for the other modes). Clip to the
-  // shape's box so an overflowing trailing line is hidden exactly as Word does —
-  // e.g. sample-6's 3-line banner box whose 3rd line ("All mccp … Creative
-  // Commons licence") sits below the 82 pt box and is not shown in Word.
-  //
-  // Deliberate cross-package divergence (do NOT unify): PowerPoint does NOT clip
-  // its shape text — an overflowing paragraph renders past the shape bounds — so
-  // the pptx renderer intentionally omits this clip (see packages/pptx/src/
-  // renderer.ts, "does NOT clip text that overflows its shape"). Word clips a
-  // fixed box; PowerPoint overflows. Same bodyPr concept, different app behavior.
-  const clipToBox = shape.textAutofit === 'none';
-  if (clipToBox) {
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(x, y, w, h);
-    ctx.clip();
-  }
-
-  for (let i = 0; i < blocks.length; i++) {
-    const block = blocks[i];
-    const layout = layouts[i];
-
-    // Reserve the gap above this paragraph: its own spaceBefore collapsed with
-    // the previous paragraph's spaceAfter (max, not sum — §17.3.1.33).
-    cursorY += gapBefore(i);
-
-    if (layout.kind === 'image') {
-      // Inline image inside the text box. The image is the paragraph's FIRST
-      // (only) line, so it lives in the first-line region: region-left =
-      // innerX + leftPx + firstPx, region-width = firstLineW (ECMA-376
-      // §17.3.1.12). Place horizontally per the paragraph alignment (figures
-      // default to centered), and advance by the reserved height regardless of
-      // whether a bitmap is present (a missing decode must not shift the rest of
-      // the layout).
-      const { fitW, fitH, ind } = layout;
-      const regionLeft = innerX + ind.leftPx + ind.firstPx;
-      const regionW = ind.firstLineW;
-      const bmp = block.imagePath ? images.get(imageKey(block.imagePath)) : undefined;
-      if (vmode) {
-        // §20.1.10.83 vertical box — draw the image UPRIGHT (a graphic keeps its
-        // physical orientation, matching the section-level tbRl image path and the
-        // batch-3 GT / issue #988). The image occupies one column: `fitH` is the
-        // physical height placed DOWN the column (along-column, local +x from
-        // regionLeft) and `crossExtent` (= physical width) is its extent across the
-        // stacking axis (local +y, reflected for mongolianVert). `drawUprightBox`
-        // counter-rotates −90° about the box centre so the +90° page rotation is
-        // cancelled and the raster paints in its native orientation.
-        const crossExt = layout.crossExtent ?? fitW;
-        const alongExt = fitH;
-        // Centre the image along its column region (paragraph alignment collapses
-        // to centred for a lone figure, matching the horizontal default).
-        let alongStart = regionLeft + Math.max(0, (regionW - alongExt) / 2);
-        if (block.alignment === 'left' || block.alignment === 'both') alongStart = regionLeft;
-        else if (block.alignment === 'right') alongStart = regionLeft + Math.max(0, regionW - alongExt);
-        const crossTop = flipBlockTop(cursorY, crossExt);
-        if (bmp) {
-          // Counter-rotate about the image-column centre by `-rotSign*90°` to
-          // cancel the page frame (drawUprightBox hardcodes −90°, correct only for
-          // the +90° modes; vert270 needs +90°). In the cancelled frame the image
-          // is upright with physical width = crossExt and physical height = alongExt.
-          ctx.save();
-          ctx.translate(alongStart + alongExt / 2, crossTop + crossExt / 2);
-          ctx.rotate((-rotSign * Math.PI) / 2);
-          ctx.drawImage(bmp, -crossExt / 2, -alongExt / 2, crossExt, alongExt);
-          ctx.restore();
-        }
-        cursorY += crossExt;
-        continue;
-      }
-      if (bmp) {
-        let drawX = regionLeft + Math.max(0, (regionW - fitW) / 2); // default: centered
-        if (block.alignment === 'left' || block.alignment === 'both') {
-          drawX = regionLeft;
-        } else if (block.alignment === 'right') {
-          drawX = regionLeft + Math.max(0, regionW - fitW);
-        }
-        ctx.drawImage(bmp, drawX, cursorY, fitW, fitH);
-      }
-      cursorY += fitH;
-      continue;
-    }
-
-    if (layout.kind === 'text') {
-      // Text paragraph laid out by the MAIN engine. Draw each LayoutLine inside
-      // the box: align within the per-line INDENTED region (§17.3.1.12 — the first
-      // line carries the signed first-line indent), reorder segments per UAX#9
-      // (§17.18.44 bidi, base = block `<w:bidi>` / first-strong), distribute
-      // §17.18.44 justification slack on `both`/`distribute` lines, and honor tab
-      // widths (already resolved onto each tab seg by layoutLines). Text-box
-      // paragraph numbering is drawn in the hanging margin; floats /
-      // decimal-auto-tab / body-only decorations do not apply, but ShapeTextRun
-      // ruby is carried through the shared line engine and painted above the base
-      // glyphs like body text ruby (§17.3.3.25).
-      const { lines: lineList, baseRtl, ind } = layout;
-      // 'distribute' spreads every line; 'both'/'justify'/kashida/'thaiDistribute'
-      // spread all but the logical-last; otherwise resolve the physical edge from
-      // the block alignment + base dir. (§17.18.44 classification in bidi-line.)
-      const alignEdge = jcIsFullyJustified(layout.alignment)
-        ? 'justify'
-        : resolveAlignEdge(layout.alignment, baseRtl);
-      const isJustified = alignEdge === 'justify';
-      const stretchLastLine = jcStretchesLastLine(layout.alignment);
-      const paraNeedsBidi = baseRtl || lineList.some((ln) => segmentsHaveRtl(ln.segments));
-      ctx.textAlign = 'left';
-      for (let li = 0; li < lineList.length; li++) {
-        const line = lineList[li];
-        const isFirstLine = li === 0;
-        const isLastLine = li === lineList.length - 1;
-        const lineH = layout.lineHeights[li];
-        // §20.1.10.83 mongolianVert reflects the line's cross (stacking) position
-        // within the inner box (L→R columns); no-op for every other mode. The
-        // reflection mirrors the line CENTERLINE within its band too. Ruby grows
-        // `baselineOffset` on its ascent side, so add that same reservation back
-        // only in the mongolian arm: the base keeps its non-ruby centerline and
-        // the furigana occupies the band-interior / physical-right side.
-        const baselineOffset = layout.baselineOffsets[li];
-        const rubyReserve = mongolianLineFlip
-          ? line.segments.reduce((reserve, seg) => {
-              if (!('text' in seg) || !seg.ruby) return reserve;
-              return Math.max(
-                reserve,
-                rubyAscentReservePx(seg.ruby.fontSizePt, seg.ruby.hpsRaisePt, scale),
-              );
-            }, 0)
-          : 0;
-        const baseline =
-          flipBlockTop(cursorY, lineH) +
-          (mongolianLineFlip ? lineH - baselineOffset + rubyReserve : baselineOffset);
-        // Per-line indented region (§17.3.1.12): content-left = innerX + leftPx,
-        // shifted by the signed first-line indent on the first line; width =
-        // firstLineW (first) / paraW (continuation).
-        const regionLeft = innerX + ind.leftPx + (isFirstLine ? ind.firstPx : 0);
-        const regionW = isFirstLine ? ind.firstLineW : ind.paraW;
-
-        const segCount = line.segments.length;
-        const visual: LineVisualOrder | null = paraNeedsBidi
-          ? computeLineVisualOrder(line.segments, baseRtl)
-          : null;
-        const lastDrawnSi = visual ? visual.order[segCount - 1] : segCount - 1;
-        const lineWidth = line.segments.reduce((s, seg) => s + seg.measuredWidth, 0);
-
-        // §17.18.44: a `both` line justifies UNLESS it is the paragraph's true last
-        // line OR ends at a manual break; `distribute` spreads every line.
-        const endsLogicalLine = isLastLine || (line.endsWithBreak ?? false);
-        const applyJustify = isJustified && (!endsLogicalLine || stretchLastLine);
-
-        const lineSlack = regionW - lineWidth;
-
-        // Slack distribution across the line's gaps (§17.18.44) — the SAME kernel
-        // the body uses. `segStretch` / `distPerGap` are set either by the JUSTIFY
-        // block (expansion / compression of a justified line) or, for a NON-
-        // justified line that overran the region because layoutLines' fit judgment
-        // spent the shrink budget to keep it on one row, by the compression here
-        // (sample-10 p1's centred text-box title). The two are mutually exclusive.
-        let segStretch: Map<number, SegStretch> | null = null;
-        let distPerGap = 0;
-        let kashidaPlan: Map<number, KashidaSegmentPlan> | null = null;
-        // First content segment (leading 字下げ whitespace is fixed); 0 under bidi.
-        let firstContentSi = 0;
-        if (!paraNeedsBidi) {
-          for (let i = 0; i < segCount; i++) {
-            const seg = line.segments[i];
-            if (!('text' in seg) || /\S/.test((seg as LayoutTextSeg).text)) { firstContentSi = i; break; }
-          }
-        }
-        // Shrink-to-fit compression for a non-justified overflowing line: squeeze
-        // its inter-word spaces by the SPACE_SHRINK_RATIO budget the fit test
-        // already spent so the last glyph lands inside the box instead of being
-        // clipped. `shrinkDelta` (≤ 0) folds into the align slack so the narrower
-        // line re-aligns correctly.
-        let shrinkDelta = 0;
-        if (!applyJustify && lineSlack < 0) {
-          const distSegs = line.segments.map((seg) =>
-            // §17.3.2.14 fixes fit-region pitch; §17.18.44 must therefore treat
-            // the region like a non-text object with no distributable gaps.
-            'text' in seg && (seg as LayoutTextSeg).fitTextRegionIndex === undefined
-              ? { text: (seg as LayoutTextSeg).text }
-              : {},
-          );
-          const shrinkDist = shrinkFitCompression(
-            distSegs,
-            lineSlack,
-            firstContentSi,
-            paraNeedsBidi ? lastDrawnSi : segCount,
-            line.ascent,
-          );
-          if (shrinkDist) {
-            segStretch = shrinkDist.perSeg;
-            distPerGap = shrinkDist.perGap;
-            shrinkDelta = distributedDelta(shrinkDist);
-          }
-        }
-
-        // Alignment offset within the region, AFTER any shrink squeeze. Justified
-        // lines keep 0 (slack is distributed into the gaps below); the unstretched
-        // last line of a justified RTL paragraph aligns to the leading (right) edge
-        // (§17.18.44). The drawn width is lineWidth + shrinkDelta, so the remaining
-        // slack to centre / right-align against is lineSlack − shrinkDelta.
-        const alignSlack = lineSlack - shrinkDelta;
-        let alignOffset = 0;
-        if (!applyJustify) {
-          if (alignEdge === 'right') alignOffset = Math.max(0, alignSlack);
-          else if (alignEdge === 'center') alignOffset = Math.max(0, alignSlack / 2);
-          else if (alignEdge === 'justify' && baseRtl) alignOffset = Math.max(0, alignSlack);
-        }
-        let x = regionLeft + alignOffset;
-
-        if (isFirstLine && block.numbering) {
-          const markerSize = block.fontSizePt * scale;
-          ctx.font = buildFont(false, false, markerSize, markerFontFamily(block.numbering), fontFamilyClasses);
-          // §17.9.24 — a color on the numbering level rPr wins for the marker
-          // glyph (same precedence as the body path), and an explicit
-          // level `auto` (§17.3.2.6) stops at the default ink; the block/run
-          // colors remain the textbox fallback (the textbox model carries no
-          // paragraph-mark color — a known, narrower approximation).
-          const markerColor = block.numbering.color
-            ?? (block.numbering.colorAuto
-              ? null
-              : block.color ?? block.runs?.find((r) => r.color)?.color ?? null);
-          ctx.fillStyle = markerColor ? `#${markerColor}` : defaultColor;
-          const markerText = markerDisplayText(block.numbering);
-          // A2's narrow text-box migration: snapshot private parser facts at the
-          // renderer boundary, then use the same retained service spans for both
-          // marker geometry and paint. The boundary checker recognizes only this
-          // exact sequence so unrelated renderShapeText changes remain frozen.
-          const markerShapeInput = numberingMarkerShapeInput(block.numbering, block.fontSizePt);
-          const markerTextLayout = shapeNumberingMarkerText(
-            markerShapeInput,
-            markerText,
-            scale,
-            effState.layoutServices?.text,
-          );
-          const markerW = markerTextLayout?.shape.advancePt ?? ctx.measureText(markerText).width;
-          const lvlJc = block.numbering.jc || 'left';
-          const markerShift = lvlJc === 'right' ? -markerW : lvlJc === 'center' ? -markerW / 2 : 0;
-          const markerX = innerX + ind.leftPx + ind.markerFirstPx + markerShift;
-          if (markerTextLayout) {
-            paintNumberingMarkerText(
-              ctx,
-              markerTextLayout,
-              markerX,
-              baseline,
-              eaVertUpright
-                ? (paintCtx, text, drawX, drawBaseline, fontSizePx) => {
-                    drawVerticalRun(paintCtx, text, drawX, drawBaseline, fontSizePx, 0);
-                  }
-                : undefined,
-            );
-          } else if (eaVertUpright) {
-            drawVerticalRun(ctx, markerText, markerX, baseline, block.fontSizePt * scale, 0);
-          } else {
-            ctx.fillText(markerText, markerX, baseline);
-          }
-        }
-
-        if (applyJustify) {
-          const minPerGap = -line.ascent * 0.25;
-          const distSegs = line.segments.map((seg) =>
-            // §17.3.2.14 fixes fit-region pitch; §17.18.44 must therefore treat
-            // the region like a non-text object with no distributable gaps.
-            'text' in seg && (seg as LayoutTextSeg).fitTextRegionIndex === undefined
-              ? { text: (seg as LayoutTextSeg).text }
-              : {},
-          );
-          const kashidaLevel = !effState.verticalCJK
-            ? kashidaLevelOf(layout.alignment)
-            : null;
-          const kashidaDist = kashidaLevel
-            ? computeLineKashidaDistribution(
-                ctx,
-                line.segments,
-                lineSlack,
-                kashidaLevel,
-                scale,
-                fontFamilyClasses,
-                0,
-              )
-            : null;
-          if (kashidaDist) kashidaPlan = kashidaDist.perSeg;
-          const residualSlack = kashidaDist?.residualPx ?? lineSlack;
-          const dist = distributeLineSlack(
-            distSegs,
-            residualSlack,
-            firstContentSi,
-            paraNeedsBidi ? lastDrawnSi : segCount,
-            minPerGap,
-            residualSlack > 0,
-            // §17.18.44 thaiDistribute: open Thai/Lao/Khmer cluster gaps on
-            // expansion so a space-free SEA line justifies (issue #959).
-            layout.alignment === 'thaiDistribute' && residualSlack > 0,
-          );
-          segStretch = dist ? dist.perSeg : null;
-          distPerGap = dist ? dist.perGap : 0;
-        }
-
-        for (let vi = 0; vi < segCount; vi++) {
-          const si = visual ? visual.order[vi] : vi;
-          const seg = line.segments[si];
-          if (visual) ctx.direction = visual.rtl[si] ? 'rtl' : 'ltr';
-          if ('isTab' in seg) {
-            // Tabs render as blank space, optionally with a leader (TOC dots etc.).
-            if (seg.leader && seg.leader !== 'none' && seg.measuredWidth > 1) {
-              drawTabLeader(ctx, seg.leader, x, baseline, seg.measuredWidth, seg.fontSize * scale, defaultColor, seg.bold, seg.italic);
-            }
-            x += seg.measuredWidth;
-            continue;
-          }
-          if ('imagePath' in seg || 'mathNodes' in seg) {
-            // Shape text builds only text runs, so image/math segments never
-            // appear here; advance defensively without drawing.
-            x += seg.measuredWidth;
-            continue;
-          }
-          const s = seg as LayoutTextSeg;
-          const kashida = kashidaPlan?.get(si);
-          const drawText = kashida?.text ?? s.text;
-          const distributedStretch = segStretch?.get(si);
-          // Kashida glyphs must remain one contextually-shaped string; residual
-          // space distribution may still own a trailing inter-segment gap.
-          const stretch = kashida ? undefined : distributedStretch;
-          const internalStretch =
-            (stretch?.internalStretch ?? 0) + (kashida?.advanceDeltaPx ?? 0);
-          const effSizePx = calcEffectiveFontPx(s, scale);
-          const yOffset = s.vertAlign === 'super'
-            ? -s.fontSize * scale * 0.35
-            : s.vertAlign === 'sub'
-              ? s.fontSize * scale * 0.15
-              : 0;
-          ctx.font = buildFont(s.bold, s.italic, effSizePx, s.fontFamily, fontFamilyClasses, s.fontRoute);
-          // §17.3.2.6: a run's own color wins; otherwise fall to `defaultColor`,
-          // which folds the shape's §20.1.4.1.17 fontRef default over the
-          // document/theme default (black). A color-less run in a fontRef text
-          // box (sample-28's white cover banner) thus draws in the fontRef color.
-          ctx.fillStyle = s.color ? `#${s.color}` : defaultColor;
-          if (eaVertUpright) {
-            // ECMA-376 §20.1.10.83 eaVert — East-Asian upright vertical text box.
-            // Draw the run's glyphs advancing DOWN the column (local +x) with CJK
-            // counter-rotated UPRIGHT and Latin/digits kept sideways, via the SAME
-            // per-glyph UAX#50 helper the section tbRl body path uses. §17.3.2.43
-            // `w:w` and §17.3.2.35 `w:spacing` pitch are threaded in exactly as the
-            // body does. §17.18.44 justify / kashida slicing (the branches below)
-            // is NOT applied inside an eaVert cell — vertical text boxes flow their
-            // columns start-aligned, the same stage limitation as the body tbRl
-            // path — so the segment advances by its NATURAL `measuredWidth` (the
-            // width drawVerticalRun paints), NOT the justify/kashida-expanded
-            // `internalStretch`, keeping paint==advance. A whole-line center/right
-            // `alignOffset` still applies via the starting `x`.
-            drawVerticalRun(
-              ctx,
-              s.text,
-              x,
-              baseline + yOffset,
-              effSizePx,
-              segLetterSpacingPx(s, 0, scale),
-              s.charScale ?? 1,
-              // #1014 — couple the ink-grow to the measure exactly as the body path:
-              // `s.verticalRun` is unset here (the eaVert text box builds segments with
-              // a non-tbRl-page `verticalCJK`), so paint stays advance-sized and matches
-              // its (un-grown) measured advance. A follow-up that wires the text box's
-              // vertical measure would flip this on automatically.
-              s.verticalRun === true,
-            );
-            // ECMA-376 §17.3.3.25 ruby (furigana) on a vertical text-box run. Word
-            // sets the annotation on the RIGHT side of the vertical base column
-            // (the batch-3 GT / issue #988): in the +90° CW frame the physical
-            // RIGHT is device +x, i.e. a SMALLER local +y than the base baseline.
-            // The GT cross offset (base-column centre → ruby-column centre) is
-            // effSize/2 + rubySize (≈ one base em when ruby is the usual half size).
-            // Each ruby glyph stands upright (kana ⇒ UAX#50 vo=U) and advances DOWN
-            // the column, distributed over the base segment's along-column span
-            // (rubyAlign="distributeSpace"); when the ruby run is wider than the
-            // base it is centred. Ruby shares the base glyph colour.
-            //
-            // MONORUBY em-cell model (JIS X 4051 §4): each ruby CODE POINT occupies
-            // one `rubyPx` cell along the column. This is exact for the furigana
-            // this path serves (upright kana, one square cell each) and matches
-            // Word's distributeSpace cell layout; it does not attempt per-advance
-            // shaping for the rare non-kana / proportional / combining-mark ruby
-            // (those would need measured advances — a follow-up, not seen in the GT).
-            if (s.ruby && s.ruby.text.length > 0) {
-              const rubyPx = s.ruby.fontSizePt * scale;
-              const rubyChars = [...s.ruby.text];
-              const spanAlong = s.measuredWidth;
-              const rubyCross = s.ruby.hpsRaisePt != null
-                ? baseline + yOffset - s.ruby.hpsRaisePt * scale
-                : baseline + yOffset - (effSizePx / 2 + rubyPx);
-              const natural = rubyChars.length * rubyPx;
-              const along0 = natural <= spanAlong ? x : x + (spanAlong - natural) / 2;
-              const step = natural <= spanAlong ? spanAlong / rubyChars.length : rubyPx;
-              // ctx.save()/restore() preserves font/textAlign/textBaseline.
-              ctx.save();
-              ctx.font = buildFont(s.bold, s.italic, rubyPx, s.fontFamily, fontFamilyClasses, s.fontRoute);
-              ctx.textAlign = 'center';
-              ctx.textBaseline = 'middle';
-              for (let ri = 0; ri < rubyChars.length; ri++) {
-                const alongCenter = along0 + step * (ri + 0.5);
-                ctx.save();
-                ctx.translate(alongCenter, rubyCross);
-                ctx.rotate(-Math.PI / 2);
-                ctx.fillText(rubyChars[ri], 0, 0);
-                ctx.restore();
-              }
-              ctx.restore();
-            }
-            x += s.measuredWidth;
-            continue;
-          }
-          // Draw the glyphs (§17.18.44). Anchor each justified piece to the
-          // WHOLE-string cumulative advance plus accumulated pitch, the SAME core
-          // helper the body uses, so contextual CJK packing (約物半角) is honoured
-          // and the painted advance equals the segment box. A non-justified
-          // segment is a single fillText.
-          // ECMA-376 §17.3.1.6 <w:bidi> (issue #929) — mirror of the BODY loop's
-          // rtlWsShiftPx fix for Word shape/text-box text (the SECOND
-          // computeLineVisualOrder consumer, explicitly scoped OUT of PR #949).
-          // An RTL segment's TRAILING inter-word space must sit on its physical
-          // LEFT under the RTL visual frame; ctx.direction='rtl' does that in
-          // Chrome but skia-canvas (server/VRT/MCP backend) strands it on the
-          // physical RIGHT, collapsing the gap to the reading-next word. Draw the
-          // whitespace-TRIMMED glyphs (`glyphText`) shifted right by the whitespace
-          // advance (`rtlWsShiftPx`) so the space always falls on the box's LEFT —
-          // backend-identical. The shift is derived from the SAME segAdvanceWidth
-          // authority the layout MEASURE pass used (§17.3.2.43 w:w scale + one
-          // §17.3.2.35 per-code-point pitch), NOT a paint-letterSpacing re-measure,
-          // so measure==paint. Shape text never uses a docGrid ⇒ gridDeltaPx = 0.
-          // Consumed by the plain branch and the kashida sub-branches (w:w /
-          // w:spacing / plain); the §17.18.44 split-piece branch is EXEMPT (see its
-          // note). LTR / whitespace-less segments keep glyphText===drawText and
-          // glyphDrawX===x (byte-identical).
-          let glyphText = drawText;
-          let glyphDrawX = x;
-          let rtlWsShiftPx = 0;
-          if (
-            visual &&
-            visual.rtl[si] === true &&
-            !effState.verticalCJK &&
-            /\s$/u.test(drawText)
-          ) {
-            const trimmed = drawText.replace(/\s+$/u, '');
-            if (trimmed.length > 0) {
-              const prevLetterSpacing = ctx.letterSpacing;
-              ctx.letterSpacing = '0px';
-              const naturalFull = ctx.measureText(drawText).width;
-              const naturalTrimmed = ctx.measureText(trimmed).width;
-              ctx.letterSpacing = prevLetterSpacing;
-              rtlWsShiftPx =
-                segAdvanceWidth({ ...s, text: drawText }, naturalFull, 0, scale) -
-                segAdvanceWidth({ ...s, text: trimmed }, naturalTrimmed, 0, scale);
-              glyphText = trimmed;
-              glyphDrawX = x + rtlWsShiftPx;
-            }
-          }
-          if (kashida) {
-            const segCharScale = s.charScale ?? 1;
-            const segCharSpacingPx = segLetterSpacingPx(s, 0, scale);
-            const prevKerning = ctx.fontKerning;
-            if (s.kerning != null) {
-              ctx.fontKerning = s.fontSize >= s.kerning ? 'normal' : 'none';
-            }
-            if (segCharScale !== 1) {
-              ctx.save();
-              ctx.translate(glyphDrawX, 0);
-              ctx.scale(segCharScale, 1);
-              const prevLetterSpacing = ctx.letterSpacing;
-              if (segCharSpacingPx !== 0) {
-                ctx.letterSpacing = `${segCharSpacingPx / segCharScale}px`;
-              }
-              ctx.fillText(glyphText, 0, baseline + yOffset);
-              ctx.letterSpacing = prevLetterSpacing;
-              ctx.restore();
-            } else if (segCharSpacingPx !== 0) {
-              const prevLetterSpacing = ctx.letterSpacing;
-              ctx.letterSpacing = `${segCharSpacingPx}px`;
-              ctx.fillText(glyphText, glyphDrawX, baseline + yOffset);
-              ctx.letterSpacing = prevLetterSpacing;
-            } else {
-              ctx.fillText(glyphText, glyphDrawX, baseline + yOffset);
-            }
-            if (s.kerning != null) ctx.fontKerning = prevKerning;
-          } else if (stretch && stretch.splitBefore.length > 0) {
-            // §17.18.44 inter-CJK justify split. EXEMPT from the RTL trailing-
-            // whitespace shift above: `splitBefore` is only non-empty when the
-            // segment carries CJK content with inter-ideograph split points,
-            // which resolves to an even (LTR) bidi level — an RTL-direction
-            // segment (visual.rtl[si]===true) cannot reach this branch outside
-            // the rtl-marked EA-punctuation corner where bidi justification is
-            // already approximate. Same argument as the body loop.
-            const cps = [...s.text];
-            if (stretch.splitBefore.length === cps.length - 1) {
-              // Fully distributed (pure-CJK): uniform pitch via letterSpacing so
-              // the contextually-shaped run keeps its packing (PR #626 analog).
-              const prevLetterSpacing = ctx.letterSpacing;
-              ctx.letterSpacing = `${distPerGap}px`;
-              ctx.fillText(s.text, x, baseline + yOffset);
-              ctx.letterSpacing = prevLetterSpacing;
-            } else {
-              const measure = (str: string): number => ctx.measureText(str).width;
-              for (const { text: piece, dx } of justifiedPiecePositions(cps, stretch.splitBefore, distPerGap, measure)) {
-                ctx.fillText(piece, x + dx, baseline + yOffset);
-              }
-            }
-          } else {
-            ctx.fillText(glyphText, glyphDrawX, baseline + yOffset);
-          }
-          if (s.ruby) {
-            const spanW = s.measuredWidth + internalStretch;
-            const rubySizePx = s.ruby.fontSizePt * scale;
-            const rubyFont = buildFont(s.bold, s.italic, rubySizePx, s.fontFamily, fontFamilyClasses, s.fontRoute);
-            ctx.save();
-            ctx.font = rubyFont;
-            const rubyW = ctx.measureText(s.ruby.text).width;
-            const rubyX = x + (spanW - rubyW) / 2;
-            const rubyBaseline = s.ruby.hpsRaisePt != null
-              ? baseline + yOffset - s.ruby.hpsRaisePt * scale
-              : baseline + yOffset - effSizePx * 0.85 - rubySizePx * 0.1;
-            ctx.fillText(s.ruby.text, rubyX, rubyBaseline);
-            ctx.restore();
-          }
-          x += s.measuredWidth + internalStretch;
-          // A trailing space this segment OWNS absorbs one inter-word gap on a
-          // justified LTR line (the widened advance belongs to this run).
-          if (distributedStretch?.trailingGap && !paraNeedsBidi && /\s$/.test(s.text)) x += distPerGap;
-        }
-        cursorY += lineH;
-      }
-      continue;
-    }
-  }
-  if (clipToBox) ctx.restore();
-  ctx.direction = 'ltr'; // reset for subsequent draws
-  // Undo the §20.1.10.83 vertical-text-box page rotation (paired with the save at
-  // the top). The `noAutofit` clip (`clipToBox`) restore above is nested inside.
-  if (vmode) ctx.restore();
-}
-
 /**
  * Resolve an anchor image's page-space box origin and dist* padding (px), shared
  * by registerAnchorFloats (wrap floats) and renderAnchorImages (wrapNone images).
@@ -12489,41 +11892,9 @@ export const __test_isPageLevelAnchorY = (
   fromPara: boolean,
 ): boolean => isPageLevelAnchorY(rf, fromPara);
 
-/** Exported for the compute-once pixel-identity test (Phase 4-1 B2 Stage 1).
- *  Toggles the stamped-line reuse in renderParagraph so the test can render the
- *  SAME page with reuse ON and OFF and assert the paint call streams are
- *  byte-identical. Returns the previous value so the test can restore it. */
-export const __test_setLineReuseEnabled = (v: boolean): boolean => {
-  const prev = lineReuseEnabled;
-  lineReuseEnabled = v;
-  return prev;
-};
-
-/** Exported for the body fragment-paint byte-identity test (PR 5). Toggles whether
- *  migrated body paragraphs paint from their stored fragment or fall back to the
- *  legacy `renderParagraph` acquisition, so the test can render the SAME page both
- *  ways and assert the paint call streams are byte-identical. Returns the previous
- *  value so the test can restore it. */
-export const __test_setFragmentPaintEnabled = (v: boolean): boolean => {
-  const prev = fragmentPaintEnabled;
-  fragmentPaintEnabled = v;
-  return prev;
-};
-
 /** Exported for focused fragment-paint migration-gate tests. */
 export const __test_tableRequiresLegacyPaint = (table: DocTable): boolean =>
   tableRequiresLegacyPaint(table);
-
-/** Exported for the M-1 double-measurement non-vacuity test. Toggles whether a
- *  non-relocated body paragraph's fragment reuses the fit-decision measurement or
- *  measures again, so the test can paginate the SAME document both ways and assert the
- *  reuse path makes fewer measureText calls with identical fragments. Returns the
- *  previous value so the test can restore it. */
-export const __test_setFitMeasureReuseEnabled = (v: boolean): boolean => {
-  const prev = fitMeasureReuseEnabled;
-  fitMeasureReuseEnabled = v;
-  return prev;
-};
 
 /** Exported for the compute-once table-layout characterization test (B2 table
  *  stage 1b). Toggles the stamped column-width/row-height reuse in
@@ -12595,9 +11966,9 @@ function physicalAnchorState(state: RenderState): RenderState {
  *  the vertical flags (no per-glyph counter-rotation, no +90° text-layer
  *  transform, `resolveShapeBox`/`resolveAnchorBox` take their horizontal path).
  *  `floats` is fresh: the live float set is in LOGICAL flow coordinates and must
- *  not leak into a physical-frame layout (and vice-versa). `deferFront` is
- *  cleared so a nested front float paints in place, inside the counter-rotated
- *  physical frame its geometry was resolved in. */
+ *  not leak into a physical-frame layout (and vice-versa). The front-paint
+ *  session is cleared so a nested front float paints in place, inside the
+ *  counter-rotated physical frame its geometry was resolved in. */
 function verticalPhysicalContentState(state: RenderState): RenderState {
   const p = state.verticalPhys;
   if (!p) return state;
@@ -12609,7 +11980,7 @@ function verticalPhysicalContentState(state: RenderState): RenderState {
     verticalAllRotated: false,
     verticalPhys: undefined,
     floats: [],
-    deferFront: null,
+    frontPaintSession: null,
   };
 }
 
@@ -13699,7 +13070,6 @@ function renderTable(table: DocTable, state: RenderState): void {
   }
 
   const y = drawTableRows(table, colWidths, tableW, rowHeights, tableX, state.y, state);
-
   state.y = y;
 }
 
@@ -13762,22 +13132,6 @@ function measureCellParagraphWindow(
       },
       paragraphMeasurementEnvironment(state),
     );
-    if (scale === 1 && !measured.markOnly && !paragraphSegsStateSensitive(para)) {
-      const indLeft = paragraphContext.physicalIndentLeftPt;
-      const indRight = paragraphContext.physicalIndentRightPt;
-      stampParagraphLines(
-        para,
-        measured.lines.map((line) => line.layout),
-        {
-          paraW: Math.max(1, availableWidthPt - indLeft - indRight),
-          firstIndent: para.indentFirst,
-          tabOriginPx: indLeft,
-          gridDeltaPx: gridCharDeltaPx(grid, 1),
-          hasFloats: false,
-          kinsoku: state.kinsoku,
-        },
-      );
-    }
     // measureParagraph works in scale-1 points (its contract). Reproduce the
     // SAME scale bridge as renderParagraph: ordinary body-table text keeps these
     // canonical line boxes and paint maps them through the Canvas viewport;
@@ -13820,6 +13174,7 @@ function measureCellParagraphWindow(
           paragraphContext.lineSpacing,
           state.resolvedLocalFonts,
           state.layoutServices?.text,
+          paragraphMarkShapeInput(para),
         ),
         totalLines,
       };
@@ -13983,10 +13338,6 @@ function renderCell(
     storyContext: enterTableCellStoryContext(
       state.storyContext ?? BODY_STORY_CONTEXT,
     ),
-    // ECMA-376 §17.6.8 numbers the MAIN document story only — table-cell lines are
-    // never numbered. Clear any inherited line-numbering config/counter.
-    lineNumbering: undefined,
-    lineNumberCounter: undefined,
     // ECMA-376 §17.3.2.6 — expose the cell fill (§17.4.33 `<w:tcPr><w:shd>`) as the
     // effective background so an automatic run color inside the cell contrasts
     // against it (sample-28 p.17: a near-black `w:fill="0C0C0C"` cell flips its
@@ -14010,7 +13361,9 @@ function renderCell(
     floatParaSeq: 0,
   };
 
-  if (cell.vAlign === 'center' || cell.vAlign === 'bottom') {
+  if (cellFragment) {
+    cellState.y = y + cellFragment.contentTranslationPt * scale;
+  } else if (cell.vAlign === 'center' || cell.vAlign === 'bottom') {
     // ECMA-376 §17.4.7 requires every <w:tc> to end with a <w:p>. When a cell's
     // visible content is a nested table, Word emits a trailing empty paragraph
     // purely as that syntactic anchor. Including it in the centering content
@@ -14026,9 +13379,7 @@ function renderCell(
     // × scale). The box is the DRAWN cell box `h` (for a vMerge restart piece
     // that is the span box on this page, which is exactly what Word centres
     // against — measured on the split-form ground truth).
-    let contentH = visibleContent.reduce(
-      (s, ce) => s + measureCellElementHeight(cellState, ce, w - ml - mr, scale), 0);
-    // ECMA-376 §17.3.1.33 + §17.4.84 (vAlign): Word collapses the FIRST
+    // ECMA-376 §17.3.1.33 + §17.4.83 (vAlign): Word collapses the FIRST
     // paragraph's space-before and the LAST paragraph's space-after against the
     // cell's content boundary when vertically aligning. Neither produces any ink
     // (nothing surrounds them inside the cell), so including them in the
@@ -14041,28 +13392,55 @@ function renderCell(
     // paragraphs inside the cell is left intact (handled by §17.3.1.33's
     // contextual / max-overlap rules inside the paint pass).
     const firstEl = visibleContent[0];
-    const lastEl = visibleContent[visibleContent.length - 1];
     const sliceOf = (el: CellElement | undefined) =>
       (el as (CellElement & { lineSlice?: { start: number; end: number } }) | undefined)?.lineSlice;
+    let contentH = 0;
+    let previousParagraph: DocParagraph | null = null;
+    let previousAfterPx = 0;
+    let haveVisibleBlock = false;
+    for (const element of visibleContent) {
+      if (element.type === 'table') {
+        if (previousParagraph) contentH += previousAfterPx;
+        contentH += measureCellElementHeight(cellState, element, w - ml - mr, scale);
+        previousParagraph = null;
+        previousAfterPx = 0;
+        haveVisibleBlock = true;
+        continue;
+      }
+      const paragraph: DocParagraph = element;
+      const slice = sliceOf(element);
+      const window = measureCellParagraphWindow(
+        cellState,
+        paragraph,
+        w - ml - mr,
+        scale,
+        slice,
+      );
+      const ownsBefore = !slice || slice.start === 0;
+      const ownsAfter = !slice || slice.end >= window.totalLines;
+      const beforePx = ownsBefore ? paragraph.spaceBefore * scale : 0;
+      const afterPx = ownsAfter ? paragraph.spaceAfter * scale : 0;
+      const lineBlockPx = window.heightPx;
+      const gapPx = previousParagraph
+        ? paragraphGapPt(
+            previousParagraph,
+            paragraph,
+            previousAfterPx / scale,
+            beforePx / scale,
+          ) * scale
+        : haveVisibleBlock ? beforePx : 0;
+      contentH += gapPx + lineBlockPx;
+      previousParagraph = paragraph;
+      previousAfterPx = afterPx;
+      haveVisibleBlock = true;
+    }
     // Leading space-before (first paragraph only). Nested table first ⇒ 0.
     // A continuation slice (start > 0) charged no space-before in the measure,
     // so there is nothing to trim (and renderParagraph suppresses it too).
     const firstSlice = sliceOf(firstEl);
-    const firstSpaceBefore =
-      firstEl && firstEl.type === 'paragraph' && (!firstSlice || firstSlice.start === 0)
+    const firstSpaceBefore = firstEl && firstEl.type === 'paragraph' && (!firstSlice || firstSlice.start === 0)
         ? (firstEl as unknown as DocParagraph).spaceBefore * scale
         : 0;
-    contentH -= firstSpaceBefore;
-    // Trailing space-after (last paragraph only). Nested table last ⇒ 0. A
-    // NON-final slice charged no space-after in the measure — nothing to trim.
-    if (lastEl && lastEl.type === 'paragraph') {
-      const lastSlice = sliceOf(lastEl);
-      const lastIsFinal = !lastSlice
-        || lastSlice.end >= measureCellParagraphWindow(
-          cellState, lastEl as unknown as DocParagraph, w - ml - mr, scale, lastSlice,
-        ).totalLines;
-      if (lastIsFinal) contentH -= (lastEl as unknown as DocParagraph).spaceAfter * scale;
-    }
     // `renderParagraph` will re-consume the first paragraph's spaceBefore (it
     // unconditionally adds `para.spaceBefore * scale` to `state.y`). Pull
     // `cellState.y` up by `firstSpaceBefore` so that addition lands the inked
@@ -14157,37 +13535,15 @@ function renderCellContent(content: CellElement[], state: RenderState): void {
   }
 }
 
-/**
- * PR 6 — the per-block twin of {@link isFragmentPaintableParagraph} for a table-cell
- * paragraph block: a cell paragraph paints from its stored fragment lines only when the
- * SAME divergence classes the PR 5 body gate excludes are absent —
- *   - a numbered paragraph paints its body at the §17.9.28 marker-aware numBodyOffset
- *     first-line indent, which differs from the measured para.indentFirst partition;
- *   - a state-sensitive paragraph (PAGE / NUMPAGES / date fields) must re-resolve its
- *     segment text against the real paint-time page context;
- *   - a non-empty cell float set (an anchor registered by a PRECEDING block in this
- *     cell — the cell's floats start empty, §17.4.57 isolation) puts the legacy paint
- *     in a wrap context the no-oracle cell measurement never saw;
- *   - a placement-width mismatch means the fragment belongs to another layout of this
- *     cell (defensive; mirrors the PR 5 placement sanity guard).
- * Excluded blocks fall back to the legacy `renderParagraph`, which recomputes exactly
- * as `renderCellContent` would — byte-identical (pinned by
- * layout-lines-reuse-identity.test.ts "table-cell paint byte-identity").
- */
+/** Retained table-cell paragraph geometry is valid only for the width domain in
+ * which it was acquired. Rejecting a different paint width here prevents a
+ * fragment from projecting line partitions produced under other constraints. */
 function isFragmentPaintableCellBlock(
-  block: ParagraphFragment,
+  block: ParagraphLayout,
   state: RenderState,
 ): boolean {
-  const para = block.source;
-  if (
-    para.numbering != null ||
-    state.floats.length !== 0 ||
-    paragraphSegsStateSensitive(para)
-  ) {
-    return false;
-  }
   const paintAvailableWidthPt = state.contentW / state.scale;
-  const recordedWidthPt = block.measured.placement.availableWidthPt;
+  const recordedWidthPt = block.flowBounds.widthPt;
   return (
     Math.abs(recordedWidthPt - paintAvailableWidthPt) <=
     1e-6 * Math.max(1, Math.abs(paintAvailableWidthPt))
@@ -14207,50 +13563,38 @@ function isFragmentPaintableCellBlock(
  * expand back to the full paragraph.
  */
 function renderCellContentFragment(cellFragment: CellFragment, state: RenderState): void {
-  let prevPara: DocParagraph | null = null;
-  let prevSpaceAfter = 0;
-  for (const block of cellFragment.blocks) {
+  const contentOriginY = state.y;
+  for (let index = 0; index < cellFragment.blocks.length; index += 1) {
+    const block = cellFragment.blocks[index]!;
+    const placement = cellFragment.blockPlacements[index];
+    if (!placement) throw new Error('Retained table-cell block placement is missing');
+    state.y = contentOriginY + placement.offsetPt * state.scale;
     if (block.kind === 'paragraph') {
-      const para = block.source;
-      // Mirror renderCellContent's slice semantics EXACTLY: a full-range block
-      // corresponds to an UNSLICED cell element, whose legacy paint passes NO
-      // lineSlice — in particular the gate-excluded fallback below re-lays the
-      // paragraph out (e.g. around an in-cell wrap float) into a partition with
-      // a DIFFERENT line count, and a spurious [0, measuredLen) window would
-      // truncate it. Only a genuine mid-row slice carries its window (plus the
-      // continuation marker for start > 0).
-      const continues = block.lineStart > 0;
-      const fullRange =
-        block.lineStart === 0 && block.lineEnd === block.measured.lines.length;
-      const lineSlice = fullRange
-        ? undefined
-        : {
-            start: block.lineStart,
-            end: block.lineEnd,
-            ...(continues ? { continues: true as const } : {}),
-          };
-      // Mirror renderCellContent's §17.3.1.9 per-side adjustment EXACTLY.
-      const adjust = contextualSpacingAdjust(
-        continues ? null : prevPara, para, prevSpaceAfter, continues ? 0 : para.spaceBefore);
-      state.y -= adjust.overlap * state.scale;
-      if (isFragmentPaintableCellBlock(block, state)) {
-        renderBodyParagraphLines(
-          para,
-          state,
-          block.measured.lines.map((line) => line.layout),
-          adjust.suppressBefore || continues,
-          lineSlice,
-          undefined,
-        );
-      } else {
-        renderParagraph(para, state, adjust.suppressBefore || continues, lineSlice);
+      if (!isFragmentPaintableCellBlock(block, state)) {
+        throw new Error('Retained table-cell paragraph width does not match its paint flow domain');
       }
-      prevPara = para;
-      prevSpaceAfter = para.spaceAfter;
+      const resources = state.retainedResourcePainter;
+      if (!resources) {
+        throw new Error('Table-cell paragraph paint requires a retained resource painter');
+      }
+      paintPlacedParagraphLayout(block, {
+        xPt: state.contentX / state.scale,
+        yPt: state.y / state.scale,
+      }, {
+        ctx: state.ctx,
+        scale: state.scale,
+        dpr: state.dpr,
+        defaultTextColor: state.defaultColor,
+        showTrackChanges: state.showTrackChanges,
+        resources,
+        pointToCss: state.pointToCss,
+        onTextRun: state.onTextRun,
+      });
     } else {
-      renderTableFragment(block, state);
-      prevPara = null;
-      prevSpaceAfter = 0;
+      if (!state.retainedTablePainter) {
+        throw new Error('Nested table paint requires a retained table painter');
+      }
+      state.retainedTablePainter(block, state);
     }
   }
 }
@@ -14589,71 +13933,6 @@ function bottomBorderExtentPt(
 
 // ===== Utilities =====
 
-/** ECMA-376 §17.3.1.7 — two paragraph-border definitions "match" (and so
- *  consecutive paragraphs carrying them merge into a single bordered box) iff
- *  ALL FIVE edges (top/bottom/left/right/between) are pairwise identical in
- *  style, color, size, and space. A `null`/absent edge equals another absent
- *  edge but differs from any present edge. Two paragraphs with NO borders are
- *  not a bordered run (we never merge unbordered paragraphs), so the caller
- *  gates on "both have a non-empty borders object" before calling this.
- *
- *  A `none`-style edge paints nothing, so for matching it is EQUIVALENT to an
- *  absent edge: an explicitly-cleared edge (`<w:bottom w:val="nil"/>`, parsed as a
- *  present `style:"none"` edge so it can override an inherited one — nil/none are
- *  normalized to "none" by parse_edge) and an omitted edge have the same effective
- *  border, and §17.3.1.7 compares effective borders. Normalize both to `null`
- *  before comparing — matching `drawEdge`/`hasAnyBorderEdge`, which also key on
- *  `style === 'none'`. */
-function sameParaEdge(a: ParaBorderEdge | null, b: ParaBorderEdge | null): boolean {
-  const eff = (e: ParaBorderEdge | null): ParaBorderEdge | null =>
-    e == null || e.style === 'none' ? null : e;
-  const ea = eff(a);
-  const eb = eff(b);
-  if (ea == null || eb == null) return ea == null && eb == null;
-  return (
-    ea.style === eb.style &&
-    ea.width === eb.width &&
-    (ea.space ?? 0) === (eb.space ?? 0) &&
-    (ea.color ?? null) === (eb.color ?? null)
-  );
-}
-
-function sameParaBorders(
-  a: ParagraphBorders | null | undefined,
-  b: ParagraphBorders | null | undefined,
-): boolean {
-  if (a == null || b == null) return false; // unbordered paragraphs never merge
-  return (
-    sameParaEdge(a.top, b.top) &&
-    sameParaEdge(a.bottom, b.bottom) &&
-    sameParaEdge(a.left, b.left) &&
-    sameParaEdge(a.right, b.right) &&
-    sameParaEdge(a.between, b.between)
-  );
-}
-
-/** True when `borders` defines at least one visible edge (so a paragraph
- *  carrying it actually paints a box). A borders object whose every edge is
- *  null/`none` is treated as "no border" for merge purposes. */
-function hasAnyBorderEdge(b: ParagraphBorders | null | undefined): boolean {
-  if (!b) return false;
-  const live = (e: ParaBorderEdge | null) => e != null && e.style !== 'none';
-  return live(b.top) || live(b.bottom) || live(b.left) || live(b.right) || live(b.between);
-}
-
-/** ECMA-376 §17.3.1.7 — two paragraphs form (part of) the same bordered box iff
- *  both carry a visible paragraph border AND their five border edges match
- *  exactly. The caller is responsible for the ADJACENCY half of the rule (same
- *  column/flow, no page/column break or non-paragraph element between); this
- *  helper covers only the "identical border definition" half. A `framePr`
- *  (out-of-flow §17.3.1.11) paragraph can never share a run. */
-function parasShareBorderBox(a: DocParagraph | null, b: DocParagraph | null): boolean {
-  if (!a || !b) return false;
-  if (a.framePr || b.framePr) return false;
-  if (!hasAnyBorderEdge(a.borders) || !hasAnyBorderEdge(b.borders)) return false;
-  return sameParaBorders(a.borders, b.borders);
-}
-
 /** ECMA-376 §17.3.2.4 — two `<w:bdr>` borders belong to the same run-border
  *  group iff their attribute sets are identical. We compare the attributes the
  *  model carries (style/sz/space/color); themeColor/themeTint/shadow/frame are
@@ -14684,22 +13963,6 @@ function markerFontFamily(num: NumberingInfo): string | null {
  *  roman, CJK bullets) pass through unchanged. */
 function markerDisplayText(num: NumberingInfo): string {
   return symbolFontToUnicode(num.text, num.fontFamily ?? null);
-}
-
-/** ECMA-376 §17.9.20 picture-bullet marker size in pt. The size comes from the
- *  `<w:numPicBullet>` drawing's own extent (parsed into
- *  `picBulletWidthPt`/`picBulletHeightPt`). The spec defines NO fallback
- *  dimension, so when the extent is absent the marker is sized to the paragraph's
- *  resolved marker font size — one source of truth shared by the collect side
- *  (WMF raster sharpness) and the draw site (the drawImage box), keeping them in
- *  lock-step. Replaces the former mismatched `?? 0` (collect) / `?? 9` (draw)
- *  defaults; `9` was a magic pt value not present in §17.9.20. */
-function picBulletSizePt(num: NumberingInfo, para: DocParagraph): { w: number; h: number } {
-  const fallback = getDefaultFontSize(para);
-  return {
-    w: num.picBulletWidthPt ?? fallback,
-    h: num.picBulletHeightPt ?? fallback,
-  };
 }
 
 /** Minimum clear side-gap (px) an EMPTY paragraph-mark line needs before it may

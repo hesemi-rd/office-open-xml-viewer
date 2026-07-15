@@ -1,0 +1,90 @@
+import { describe, expect, it } from 'vitest';
+import { layoutLines, type LayoutTextSeg } from './line-layout.js';
+import { createFontResolver } from './layout/font-service.js';
+import {
+  createTextLayoutService,
+  type TextLayoutService,
+  type TextShapeRequest,
+} from './layout/text.js';
+
+function measureContext(): CanvasRenderingContext2D {
+  let font = '10px sans-serif';
+  return {
+    get font() { return font; },
+    set font(value: string) { font = value; },
+    letterSpacing: '0px',
+    fontKerning: 'auto',
+    measureText(text: string) {
+      return {
+        width: [...text].length * 5,
+        fontBoundingBoxAscent: 8,
+        fontBoundingBoxDescent: 2,
+        actualBoundingBoxAscent: 8,
+        actualBoundingBoxDescent: 2,
+      } as TextMetrics;
+    },
+  } as unknown as CanvasRenderingContext2D;
+}
+
+describe('line layout cluster acquisition', () => {
+  it('uses aggregate shaping while wrapping and retains clusters only for final pieces', () => {
+    const requests: TextShapeRequest[] = [];
+    const base = createTextLayoutService({
+      fonts: createFontResolver([]),
+      measurer: {
+        fingerprint: 'line-layout-cluster-routing-v1',
+        measure: (request) => ({
+          advancePt: [...request.text].length * 5,
+          ascentPt: 8,
+          descentPt: 2,
+        }),
+      },
+    });
+    const textService: TextLayoutService = Object.freeze({
+      fingerprint: base.fingerprint,
+      localMetrics: base.localMetrics,
+      resolve: (request: Parameters<TextLayoutService['resolve']>[0]) => base.resolve(request),
+      shape: (request: Parameters<TextLayoutService['shape']>[0]) => {
+        requests.push(request);
+        return base.shape(request);
+      },
+    });
+    const text = 'あいうえおかきくけこ';
+    const shapeRequest: TextShapeRequest = Object.freeze({
+      text,
+      fontSizePt: 10,
+      fonts: { eastAsia: 'CJK Face' },
+      measure: false,
+    });
+    const segment: LayoutTextSeg = {
+      text,
+      bold: false,
+      italic: false,
+      underline: false,
+      strikethrough: false,
+      fontSize: 10,
+      color: null,
+      fontFamily: 'CJK Face',
+      vertAlign: null,
+      measuredWidth: 0,
+      textLayoutService: textService,
+      textShapeRequest: shapeRequest,
+    };
+
+    const lines = layoutLines(measureContext(), [segment], 16, 0, 1);
+    const finalSegments = lines.flatMap((line) => line.segments)
+      .filter((candidate): candidate is LayoutTextSeg => 'text' in candidate);
+    const aggregateRequests = requests.filter((request) => request.clusterGeometry === false);
+    const retainedRequests = requests.filter((request) => request.clusterGeometry === true);
+
+    expect(finalSegments.length).toBeGreaterThan(1);
+    expect(aggregateRequests.some((request) => request.text !== text)).toBe(true);
+    expect(retainedRequests.map((request) => request.text))
+      .toEqual(finalSegments.map((candidate) => candidate.text));
+    for (const candidate of finalSegments) {
+      expect(candidate.shapedClusters?.map((cluster) => cluster.range)).toEqual(
+        [...candidate.text].map((_character, index) => ({ start: index, end: index + 1 })),
+      );
+    }
+  });
+});

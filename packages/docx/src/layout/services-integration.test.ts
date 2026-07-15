@@ -127,6 +127,34 @@ describe('production layout service integration', () => {
     expect(ctx.fontKerning).toBe('auto');
   });
 
+  it('projects finite Canvas ink metrics for retained trim geometry', () => {
+    const ctx = {
+      ...measureContext(),
+      measureText: () => ({
+        width: 10,
+        actualBoundingBoxLeft: 2,
+        actualBoundingBoxRight: 11,
+        actualBoundingBoxAscent: 7,
+        actualBoundingBoxDescent: 3,
+        fontBoundingBoxAscent: 8,
+        fontBoundingBoxDescent: 4,
+      } as TextMetrics),
+    } as unknown as CanvasRenderingContext2D;
+    const services = createLayoutServices(model(), { measureContext: ctx });
+
+    const shaped = services.text.shape({
+      text: 'X', fontSizePt: 10, weight: 400, style: 'normal', measure: true,
+      fonts: { ascii: 'Authored Sans' },
+    });
+
+    expect(shaped).toMatchObject({
+      advancePt: 10,
+      ascentPt: 8,
+      descentPt: 4,
+      inkBounds: { xMinPt: -2, xMaxPt: 11, ascentPt: 7, descentPt: 3 },
+    });
+  });
+
   it('uses the byte-identical Canvas route in the service measurer and line probes', () => {
     const fonts: string[] = [];
     let font = '';

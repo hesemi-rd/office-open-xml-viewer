@@ -265,6 +265,8 @@ describe('layoutFlowBlocks', () => {
         const layout = {
           ...drawing('p1', rect(10, placement.cursor.yPt, 100, 12)),
           kind: 'paragraph' as const,
+          spacing: { beforePt: 0, afterPt: 0 }, contextualSpacing: false,
+          lines: [], borders: [], resources: [], drawings: [], textBoxes: [], events: [], exclusions: [],
         };
         return { layout, nextCursor: { xPt: 10, yPt: placement.cursor.yPt + 12 } };
       },
@@ -302,6 +304,8 @@ describe('layoutFlowBlocks', () => {
         const layout = {
           ...drawing('p1', rect(10, placement.cursor.yPt, 100, 12), { flowDomainId: 'other' }),
           kind: 'paragraph' as const,
+          spacing: { beforePt: 0, afterPt: 0 }, contextualSpacing: false,
+          lines: [], borders: [], resources: [], drawings: [], textBoxes: [], events: [], exclusions: [],
         };
         return { layout, nextCursor: { xPt: 10, yPt: placement.cursor.yPt + 12 } };
       },

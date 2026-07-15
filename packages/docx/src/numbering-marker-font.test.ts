@@ -2,9 +2,9 @@ import { describe, it, expect } from 'vitest';
 import {
   createLayoutServices,
   renderDocumentToCanvas,
-  renderShapeText,
   type DocxTextRunInfo,
 } from './renderer.js';
+import { acquireAndPaintShapeTextBox } from './retained-shape-textbox.test-support.js';
 import { shapeRenderState } from './line-layout.js';
 import { testFontSnapshot } from './layout/test-font-snapshot.js';
 import type {
@@ -369,7 +369,7 @@ describe('numbering marker + body eastAsia font routing (§17.3.2.26 / §17.9.6)
     const state = shapeRenderState(ctx, 1, {}, new Map());
     state.layoutServices = services;
 
-    renderShapeText(textBoxShape(num), 0, 0, 200, 100, ctx, 1, {}, new Map(), state);
+    acquireAndPaintShapeTextBox(textBoxShape(num), 0, 0, 200, 100, ctx, 1, {}, new Map(), state);
 
     const marker = fillTextCalls.filter((call) => ['第', '1', '章'].includes(call.text));
     expect(marker.map((call) => [call.text, headFamily(call.font)])).toEqual([
@@ -410,7 +410,7 @@ describe('numbering marker + body eastAsia font routing (§17.3.2.26 / §17.9.6)
     const state = shapeRenderState(ctx, 1, {}, new Map());
     state.layoutServices = services;
 
-    renderShapeText(textBoxShape(num), 0, 0, 200, 100, ctx, 1, {}, new Map(), state);
+    acquireAndPaintShapeTextBox(textBoxShape(num), 0, 0, 200, 100, ctx, 1, {}, new Map(), state);
 
     const marker = fillTextCalls.find((call) => call.text === '•');
     expect(marker).toBeDefined();

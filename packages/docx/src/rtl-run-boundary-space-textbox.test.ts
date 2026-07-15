@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { renderShapeText } from './renderer.js';
+import { acquireAndPaintShapeTextBox } from './retained-shape-textbox.test-support.js';
 import type { ShapeRun, ShapeText, ShapeTextRun } from './types.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -7,14 +7,14 @@ import type { ShapeRun, ShapeText, ShapeTextRun } from './types.js';
 // Word shape/text-box text (issue #929, text-box mirror of PR #949).
 //
 // PR #949 fixed the BODY paragraph draw loop, but explicitly scoped out the
-// second `computeLineVisualOrder` consumer inside `renderShapeText`. That loop
+// retained text-box visual-order projection. That path
 // still drew an RTL segment's WHOLE logical string, including its trailing
 // inter-word space, with one `fillText`. Chrome moves that edge whitespace to
 // the segment's physical LEFT under `ctx.direction='rtl'`; skia-canvas does not,
 // leaving the space on the physical RIGHT and collapsing the gap to the next
 // reading word on the left.
 //
-// These tests drive `renderShapeText` directly and use fixed-width mock glyphs.
+// These tests acquire and paint retained text-box geometry with fixed-width mock glyphs.
 // Since shape text has no `onTextRun` callback, all geometry comes from recorded
 // `fillText` device positions. The recording context tracks translate/scale and
 // honors `letterSpacing` in `measureText`, matching the BODY regression test's
@@ -124,7 +124,7 @@ function block(text: string, runs: ShapeTextRun[], bidi: boolean): ShapeText {
 
 function render(blocks: ShapeText[]): FillCall[] {
   const { ctx, fills } = makeRecordingCanvas();
-  renderShapeText(
+  acquireAndPaintShapeTextBox(
     shapeWith(blocks),
     SHAPE_X,
     SHAPE_Y,

@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest';
 import {
   renderDocumentToCanvas,
   __test_setTableReuseEnabled,
-  __test_setFragmentPaintEnabled,
 } from './renderer.js';
 import type {
   BodyElement,
@@ -279,10 +278,9 @@ describe('cell content height matches canonical transformed Canvas metrics', () 
   });
 
   it('auto row height fallback: reserved row height equals the painted content height', async () => {
-    // Auto height → the row height IS the measured cell content height. Disable the
-    // stamped-layout and fragment-paint paths so the legacy `renderTable` fallback
-    // must independently honor the same canonical measurement/paint contract.
-    const prevFrag = __test_setFragmentPaintEnabled(false);
+    // Auto height → the row height is the measured cell content height. A negative
+    // leading tblInd selects the explicit A4 table adapter without a global paint
+    // toggle; disabling only its table-layout cache exercises fresh adapter geometry.
     const prev = __test_setTableReuseEnabled(false);
     try {
       const t = tableOf(row(
@@ -290,6 +288,7 @@ describe('cell content height matches canonical transformed Canvas metrics', () 
         null,
         'auto',
       ));
+      (t as unknown as DocTable).tblInd = -1;
       const { fillTextCalls, fillRectCalls } = await renderAndRead(t);
       const bg = fillRectCalls.find((r) => r.fillStyle === '#abcdef');
       expect(bg).toBeDefined();
@@ -299,7 +298,6 @@ describe('cell content height matches canonical transformed Canvas metrics', () 
       expect(bg!.h).toBeCloseTo(bottom - top, 1);
     } finally {
       __test_setTableReuseEnabled(prev);
-      __test_setFragmentPaintEnabled(prevFrag);
     }
   });
 

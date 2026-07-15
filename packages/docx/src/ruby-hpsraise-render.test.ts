@@ -100,7 +100,7 @@ async function bodyRubyBaselineDistance(hpsRaisePt?: number, scale = 2): Promise
     width: 200 * scale,
   });
   const base = glyphs.find((glyph) => glyph.text === '漢');
-  const ruby = glyphs.find((glyph) => glyph.text === 'かん');
+  const ruby = glyphs.find((glyph) => /[かん]/.test(glyph.text));
   expect(base, 'base glyph drawn').toBeDefined();
   expect(ruby, 'ruby glyph drawn').toBeDefined();
   return base!.y - ruby!.y;
@@ -108,13 +108,13 @@ async function bodyRubyBaselineDistance(hpsRaisePt?: number, scale = 2): Promise
 
 describe('§17.3.3.12 w:hpsRaise ruby geometry', () => {
   it('draws horizontal body ruby hpsRaise above the base baseline', async () => {
-    expect(await bodyRubyBaselineDistance(14)).toBeCloseTo(14 * 2, 8);
+    expect(await bodyRubyBaselineDistance(14)).toBeCloseTo(14, 8);
   });
 
-  it('keeps the exact size-based horizontal body fallback when hpsRaise is absent', async () => {
-    const scale = 2;
-    expect(await bodyRubyBaselineDistance(undefined, scale))
-      .toBeCloseTo(12 * scale * 0.85 + 8 * scale * 0.1, 8);
+  it('touches retained base and guide ink when hpsRaise is absent', async () => {
+    // The injected authoritative ink is 9.6pt above the base baseline and
+    // 1.6pt below the 8pt guide baseline. Point-space geometry is scale-free.
+    expect(await bodyRubyBaselineDistance(undefined, 2)).toBeCloseTo(11.2, 8);
   });
 
   it('treats explicit hpsRaise zero as a zero reservation and zero draw offset', async () => {

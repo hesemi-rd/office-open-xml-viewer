@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import {
   layoutBidiTabStops,
-  nextTabStopRtl,
   type BidiTabItem,
 } from './line-layout.js';
+import { nextTabStopRtl } from './layout/text.js';
 import { computeLineVisualOrder } from './bidi-line.js';
 import { renderDocumentToCanvas } from './renderer.js';
 import type { DocParagraph, DocxDocumentModel, SectionProps } from './types.js';

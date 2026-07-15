@@ -19,12 +19,15 @@ import {
   type LineLayoutEnvironment,
   type WrapLayoutCtx,
 } from './line-layout.js';
+import { fieldAcquisitionContextOf } from './layout/runtime-state.js';
 import type { DocParagraph } from './types.js';
+import type { NumberingMarkerShapeInput } from './layout/types.js';
 
 export type { LineLayoutEnvironment } from './line-layout.js';
 
 export interface ParagraphMeasurementEnvironment extends LineLayoutEnvironment {
   readonly documentHasEastAsianText: boolean;
+  readonly paragraphMarkShapeInput?: NumberingMarkerShapeInput;
 }
 
 export interface WrapOracle {
@@ -218,6 +221,7 @@ export function measureParagraph(
       context.lineSpacing,
       environment.resolvedLocalFonts,
       environment.layoutServices?.text,
+      environment.paragraphMarkShapeInput,
     );
     return {
       lines: [],
@@ -237,12 +241,23 @@ export function measureParagraph(
         context.lineSpacing,
         environment.resolvedLocalFonts,
         environment.layoutServices?.text,
+        environment.paragraphMarkShapeInput,
       ),
       placement: recordedPlacement,
     };
   };
 
-  const segments = buildSegments(paragraph.runs, environment);
+  const fieldContext = environment.layoutServices
+    ? fieldAcquisitionContextOf(environment.layoutServices)
+    : undefined;
+  const measurementEnvironment = fieldContext?.resolvePageField
+    ? {
+        ...environment,
+        resolvePageFieldContext: (sourceRunIndex: number) =>
+          fieldContext.resolvePageField?.(paragraph, sourceRunIndex),
+      }
+    : environment;
+  const segments = buildSegments(paragraph.runs, measurementEnvironment);
   if (segments.length === 0) return measureMarkOnly();
 
   const wrapContext: WrapLayoutCtx | undefined = placement.wrap

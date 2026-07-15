@@ -513,7 +513,7 @@ export type ShapeGeom =
        *  `image/svg+xml` and is owned by the SVG decoder. */
       svgImagePath?: string;
       /** ECMA-376 §20.1.8.55 `<a:srcRect>` source-image crop on the leaf pic
-       *  (fractions `0..1` inward from each edge; visible region `[l, t, 1-r,
+       *  (signed fractions from each edge; visible region `[l, t, 1-r,
        *  1-b]`). Absent ⇒ the whole blip fills the leaf rect. Honored identically
        *  to the top-level {@link ImageAnchor.srcRect} (raster only). */
       srcRect?: { l: number; t: number; r: number; b: number };
@@ -588,7 +588,7 @@ export interface ImageAnchor {
    *  SVG decoder. */
   svgImagePath?: string;
   /** ECMA-376 §20.1.8.55 `<a:srcRect>` source-image crop. Each edge inset is a
-   *  fraction `0..1` of the source bitmap, measured inward, so the visible
+   *  signed fraction of the source bitmap, measured from its edge, so the visible
    *  source region is `[l, t, 1-r, 1-b]`. Absent (the common case) ⇒ the whole
    *  blip fills the anchor rect; when present, the renderer draws only the
    *  cropped sub-rectangle (raster only — a metafile is rasterized to the

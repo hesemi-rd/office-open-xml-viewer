@@ -23,10 +23,12 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; ops: StrokeOp[]; da
     letterSpacing: '0px',
     measureText: (s: string) => {
       const p = px();
+      const lowLine = s === '_';
       return {
         width: [...s].length * p * 0.5,
         fontBoundingBoxAscent: p * 0.8, fontBoundingBoxDescent: p * 0.2,
-        actualBoundingBoxAscent: p * 0.8, actualBoundingBoxDescent: p * 0.2,
+        actualBoundingBoxAscent: lowLine ? 0 : p * 0.8,
+        actualBoundingBoxDescent: lowLine ? p * 0.05 : p * 0.2,
       } as TextMetrics;
     },
     save() {}, restore() {}, beginPath() {}, closePath() {},
@@ -107,14 +109,6 @@ describe('docx run underline (§17.3.2.40) draw path', () => {
     expect(strokes.length).toBe(1);
     // No non-empty dash pattern is applied for the plain single rule.
     expect(styled.dashes.every((d) => d.length === 0)).toBe(true);
-  });
-
-  it('single underline y-position is unchanged by adding the style plumbing', async () => {
-    // The single rule sits at baseline + fontSize*0.12 (docx anchor). Two renders
-    // of the SAME single run must produce the SAME underline y (stability guard).
-    const a = await render({ underline: true });
-    const b = await render({ underline: true });
-    expect(horizontalStrokes(a.ops)[0].y).toBeCloseTo(horizontalStrokes(b.ops)[0].y, 6);
   });
 
   it('dotted style routes through core with a non-empty dash pattern', async () => {

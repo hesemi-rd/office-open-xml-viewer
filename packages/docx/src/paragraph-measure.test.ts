@@ -9,6 +9,7 @@ import {
   type TextMeasurer,
   type WrapOracle,
 } from './paragraph-measure.js';
+import { measureParagraphIntrinsicWidth } from './layout/frame.js';
 import type { ParagraphLayoutContext } from './layout-context.js';
 import type { LayoutTextSeg } from './line-layout.js';
 import type { DocParagraph, DocxTextRun, FieldRun, ImageRun } from './types.js';
@@ -116,6 +117,76 @@ const measuredTextSequence = (
   .join(''));
 
 describe('measureParagraph', () => {
+  it('measures intrinsic width against the authored anchor band without a sentinel width', () => {
+    const doc = paragraph({
+      spaceBefore: 0,
+      spaceAfter: 0,
+      runs: [{ type: 'text', ...textRun('abc def') }],
+    });
+    const context = layoutContext({ spaceBeforePt: 0, spaceAfterPt: 0 });
+
+    expect(measureParagraphIntrinsicWidth(doc, context, 200, measurer, environment())).toBe(35);
+    // A normal 25pt layout wraps at the space into 15pt lines. Intrinsic mode
+    // keeps the 35pt natural line intact, then caps the preferred width to the
+    // real 25pt anchor band.
+    expect(measureParagraphIntrinsicWidth(doc, context, 25, measurer, environment())).toBe(25);
+  });
+
+  it('includes paragraph indents, hanging numbering space, tabs, bidi, and inline resources', () => {
+    const indented = layoutContext({
+      spaceBeforePt: 0, spaceAfterPt: 0,
+      physicalIndentLeftPt: 12, physicalIndentRightPt: 2, firstIndentPt: -6,
+    });
+    const numbered = paragraph({
+      spaceBefore: 0, spaceAfter: 0,
+      numbering: { numId: 1, level: 0, format: 'decimal', text: '1.', indentLeft: 12, tab: 6, suff: 'tab' } as never,
+      runs: [{ type: 'text', ...textRun('A') }],
+    });
+    // The 6pt hanging zone remains inside the 12pt physical left indent.
+    expect(measureParagraphIntrinsicWidth(numbered, indented, 100, measurer, environment())).toBe(13);
+
+    const tabbed = paragraph({
+      spaceBefore: 0, spaceAfter: 0,
+      tabStops: [{ pos: 30, alignment: 'left', leader: 'none' }],
+      runs: [{ type: 'text', ...textRun('A\tB') }],
+    });
+    expect(measureParagraphIntrinsicWidth(
+      tabbed,
+      layoutContext({
+        spaceBeforePt: 0, spaceAfterPt: 0,
+        tabStops: [{ pos: 30, alignment: 'left', leader: 'none' }],
+      }),
+      100,
+      measurer,
+      environment(),
+    )).toBe(35);
+    expect(measureParagraphIntrinsicWidth(
+      { ...tabbed, bidi: true },
+      layoutContext({
+        spaceBeforePt: 0, spaceAfterPt: 0, baseRtl: true,
+        tabStops: [{ pos: 50, alignment: 'left', leader: 'none' }],
+      }),
+      100,
+      measurer,
+      environment(),
+    )).toBe(55);
+
+    const image: ImageRun = {
+      imagePath: 'word/media/inline.png', mimeType: 'image/png',
+      widthPt: 20, heightPt: 10, anchor: false,
+    };
+    expect(measureParagraphIntrinsicWidth(
+      paragraph({ spaceBefore: 0, spaceAfter: 0, runs: [{ type: 'image', ...image }] }),
+      layoutContext({
+        spaceBeforePt: 0, spaceAfterPt: 0,
+        physicalIndentLeftPt: 3, physicalIndentRightPt: 4,
+      }),
+      100,
+      measurer,
+      environment(),
+    )).toBe(27);
+  });
+
   it('measures a no-float paragraph and excludes trailing spacing from contentEndYPt', () => {
     const result = measureParagraph(
       paragraph({ runs: [{ type: 'text', ...textRun('hello') }] }),
@@ -285,7 +356,16 @@ describe('measureParagraph', () => {
     );
 
     expect(result.lines.length).toBeGreaterThan(1);
-    expect(new Set(result.lines.map((line) => line.advancePt))).toEqual(new Set([30]));
+    // Base ink is 8pt above/2pt below the baseline. The selected 8pt ruby face
+    // contributes its exact 1.6pt descent above that base ink, so the natural
+    // 10pt line plus the 9.6pt ruby reserve snaps once to the 10pt grid: 20pt.
+    const baseNaturalPt = 10;
+    const rubyReservePt = 8 + 1.6;
+    const gridPitchPt = 10;
+    const expectedAdvancePt = Math.ceil((baseNaturalPt + rubyReservePt) / gridPitchPt)
+      * gridPitchPt;
+    expect(new Set(result.lines.map((line) => line.advancePt)))
+      .toEqual(new Set([expectedAdvancePt]));
   });
 
   it('carries the paragraph-wide ruby advance through continuations', () => {

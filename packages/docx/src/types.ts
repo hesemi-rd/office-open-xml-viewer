@@ -1359,8 +1359,8 @@ export interface ImageRun {
   /**
    * ECMA-376 §20.1.8.55 `<a:srcRect>` — the source-rectangle crop applied to
    * the decoded bitmap before it is drawn into the display box. The four values
-   * are inset FRACTIONS 0..1 of the source bitmap measured inward from each
-   * edge (`l`/`t` from left/top, `r`/`b` from right/bottom); the visible source
+   * are signed fractions of the source bitmap measured from each edge
+   * (`l`/`t` from left/top, `r`/`b` from right/bottom); the visible source
    * region is `[l, t, 1−r, 1−b]`. The parser converts the raw ST_Percentage
    * (1000ths of a percent) to fractions, so the renderer crops in bitmap pixels
    * (`sx = l*w`, `sy = t*h`, `sw = (1−l−r)*w`, `sh = (1−t−b)*h`) without unit

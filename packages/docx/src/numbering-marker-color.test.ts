@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { renderDocumentToCanvas, renderShapeText } from './renderer.js';
+import { renderDocumentToCanvas } from './renderer.js';
+import { acquireAndPaintShapeTextBox } from './retained-shape-textbox.test-support.js';
 import type {
   BodyElement,
   DocParagraph,
@@ -217,7 +218,7 @@ describe('text-box marker color (§17.9.24)', () => {
   function textboxMarkerFill(extra: Partial<ShapeText>): string | undefined {
     const { canvas, fillTextCalls } = makeRecordingCanvas();
     const ctx = (canvas as unknown as { getContext(): CanvasRenderingContext2D }).getContext();
-    renderShapeText(shapeWith([bulletBlock(extra)]), 0, 0, 200, 200, ctx, 1, {});
+    acquireAndPaintShapeTextBox(shapeWith([bulletBlock(extra)]), 0, 0, 200, 200, ctx, 1, {});
     return fillTextCalls.find((c) => c.text === '•')?.fillStyle;
   }
 

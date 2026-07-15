@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { computePages } from './renderer.js';
+import { bodyFragmentFor, computePages } from './renderer.js';
 import type {
   BodyElement,
   DocParagraph,
@@ -153,6 +153,42 @@ describe('computePages — text-frame keep-with-anchor (§17.3.1.11)', () => {
     expect(hasAnchorText(pages[0], 'anchor')).toBe(false);
     // Page 1 keeps only the three leading lines (no float band leaked over).
     expect(pages[0].map(textOf)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('relocates every member of a frame group and registers only the destination exclusion', () => {
+    const shared = frame({ vAnchor: 'text', hRule: 'exact', h: 60, w: 50 });
+    const body = [
+      para({ text: 'a' }),
+      para({ text: 'b' }),
+      para({ text: 'c' }),
+      framePara({ ...shared }, { text: 'F1' }),
+      framePara({ ...shared }, { text: 'F2' }),
+      para({ text: 'anchor' }),
+    ];
+    const sectionProps = section();
+    const ctx = makeCtx();
+    const pages = computePages(body, sectionProps, ctx);
+
+    expect(pages).toHaveLength(2);
+    expect(pages[0].filter((element) => textOf(element).startsWith('F'))).toEqual([]);
+    const frameMembers = pages[1].filter((element) => textOf(element).startsWith('F'));
+    expect(frameMembers.map(textOf)).toEqual(['F1', 'F2']);
+    for (const member of frameMembers) {
+      expect(bodyFragmentFor(member)?.fragment.kind).toBe('paragraph');
+    }
+    for (const element of pages[0]) {
+      const placed = bodyFragmentFor(element);
+      if (placed?.fragment.kind === 'paragraph') {
+        expect(placed.fragment.exclusions.filter((item) => item.id.includes('frame'))).toHaveLength(0);
+      }
+    }
+    const anchor = pages[1].find((element) => textOf(element) === 'anchor');
+    expect(anchor).toBeDefined();
+    const anchorPlacement = bodyFragmentFor(anchor!);
+    expect(anchorPlacement?.fragment.kind).toBe('paragraph');
+    if (anchorPlacement?.fragment.kind !== 'paragraph') throw new Error('expected anchor layout');
+    expect(anchorPlacement.fragment.exclusions.filter((item) => item.id.includes('frame')))
+      .toHaveLength(1);
   });
 
   it('relocates an overflowing frame to the NEXT COLUMN (not a new page) in a multi-column section', () => {

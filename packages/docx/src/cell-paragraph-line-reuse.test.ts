@@ -3,8 +3,7 @@ import {
   renderDocumentToCanvas,
   paginateDocument,
   createLayoutServices,
-  __test_setFragmentPaintEnabled,
-  __test_setLineReuseEnabled,
+  bodyFragmentFor,
 } from './renderer.js';
 import { testFontSnapshot } from './layout/test-font-snapshot.js';
 import type { BodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, DocxDocumentModel, SectionProps, PaginatedBodyElement } from './types';
@@ -223,26 +222,19 @@ async function renderAll(model: DocxDocumentModel, pages: PaginatedBodyElement[]
   return { perPage, measures };
 }
 
-/** Paginate once, then paint with reuse OFF and ON at `width`; assert byte-identical
- *  streams and report the measure counts. */
-async function reuseVsRecompute(model: DocxDocumentModel, width = 300): Promise<{ pages: number; drawn: number; on: number; off: number; streams: Call[][] }> {
-  const prevFragmentPaint = __test_setFragmentPaintEnabled(false);
-  try {
-    const pages = paginateDocument(model, createLayoutServices(model, { localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]) }));
-    const prev = __test_setLineReuseEnabled(false);
-    let off: { perPage: Call[][]; measures: number };
-    try { off = await renderAll(model, pages, width); } finally { __test_setLineReuseEnabled(prev); }
-    const on = await renderAll(model, pages, width);
-    expect(on.perPage.length).toBe(off.perPage.length);
-    let drawn = 0;
-    for (let p = 0; p < on.perPage.length; p++) {
-      expect(on.perPage[p]).toEqual(off.perPage[p]); // exact stream identity
-      drawn += on.perPage[p].filter((c) => c.op !== 'img').length;
-    }
-    return { pages: pages.length, drawn, on: on.measures, off: off.measures, streams: on.perPage };
-  } finally {
-    __test_setFragmentPaintEnabled(prevFragmentPaint);
-  }
+async function retainedPaint(model: DocxDocumentModel, width = 300): Promise<{
+  pages: PaginatedBodyElement[][]; drawn: number; measures: number; streams: Call[][];
+}> {
+  const pages = paginateDocument(model, createLayoutServices(model, {
+    localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+  }));
+  const painted = await renderAll(model, pages, width);
+  return {
+    pages,
+    drawn: painted.perPage.flat().filter((call) => call.op !== 'img').length,
+    measures: painted.measures,
+    streams: painted.perPage,
+  };
 }
 
 function tableMeasurementGeometry() {
@@ -252,13 +244,15 @@ function tableMeasurementGeometry() {
   return {
     pageCount: pages.length,
     rowHeightsPt: tables.flatMap((table) => table.tableRowHeightsPt ?? []),
-    cellLineCounts: tables.flatMap((table) =>
-      (table as unknown as DocTable).rows.flatMap((tableRow) =>
-        tableRow.cells.flatMap((tableCell) => tableCell.content.map((element) =>
-          (element as unknown as { layoutLines?: unknown[] }).layoutLines?.length ?? null,
+    cellLineCounts: tables.flatMap((table) => {
+      const placed = bodyFragmentFor(table);
+      if (placed?.fragment.kind !== 'table') return [];
+      return placed.fragment.rows.flatMap((row) =>
+        row.cells.flatMap((cell) => cell.blocks.map((block) =>
+          block.kind === 'paragraph' ? block.lines.length : null,
         )),
-      ),
-    ),
+      );
+    }),
   };
 }
 
@@ -278,46 +272,35 @@ describe('table-cell paragraph line reuse — B2 T2', () => {
       11.4990234375,
       11.4990234375,
     ]);
-    expect(geometry.cellLineCounts).toEqual(Array.from({ length: 18 }, () => 2));
+    expect(geometry.cellLineCounts).toEqual([
+      ...Array.from({ length: 14 }, () => 2),
+      ...Array.from({ length: 4 }, () => 1),
+    ]);
   });
 
-  it('(a) cell paragraphs reuse the paginator stamp: fewer paint measures, identical stream', async () => {
-    const r = await reuseVsRecompute(doc([wrapTable(16) as unknown as BodyElement]));
-    expect(r.pages).toBeGreaterThan(1); // table split across pages
+  it('(a) retained cell paragraphs paint without measuring', async () => {
+    const r = await retainedPaint(doc([wrapTable(16) as unknown as BodyElement]));
+    expect(r.pages.length).toBeGreaterThan(1); // table split across pages
     expect(r.drawn).toBeGreaterThan(0); // really painted cell text
-    // Reuse fired for the cell paragraphs: paint skipped the scale-1 wrap-decision
-    // measureText storm it would otherwise re-run per cell.
-    expect(r.on).toBeLessThan(r.off);
+    expect(r.measures).toBe(0);
   });
 
-  it('(b) a stale-width stamp is rejected (recompute), still identical to a fresh recompute', async () => {
-    // Paginate, then CORRUPT every cell paragraph's stamped paraW so it no longer
-    // matches the paint band. The self-verifying gate must reject each stamp and
-    // recompute the partition — measures rise back to the recompute count, and the
-    // paint stream stays identical to a from-scratch recompute.
+  it('(b) retained cell acquisition never writes obsolete parser line stamps', async () => {
     const model = doc([wrapTable(16) as unknown as BodyElement]);
     const pages = paginateDocument(model, createLayoutServices(model, { localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]) }));
-
-    const poison = (pg: PaginatedBodyElement[][]) => {
-      for (const page of pg) for (const el of page) {
+    const before = await renderAll(model, pages, 300);
+    for (const page of pages) for (const el of page) {
         if ((el as { type?: string }).type !== 'table') continue;
         const tbl = el as unknown as DocTable;
         for (const rw of tbl.rows) for (const c of rw.cells) for (const ce of c.content) {
-          const st = ce as unknown as { layoutLinesInputs?: { paraW: number } };
-          if (st.layoutLinesInputs) st.layoutLinesInputs.paraW = -999; // impossible width
+          expect(ce).not.toHaveProperty('layoutLines');
+          expect(ce).not.toHaveProperty('layoutLinesInputs');
         }
-      }
-    };
-    poison(pages);
-
-    const prev = __test_setLineReuseEnabled(false);
-    let off: { perPage: Call[][]; measures: number };
-    try { off = await renderAll(model, pages, 300); } finally { __test_setLineReuseEnabled(prev); }
-    const on = await renderAll(model, pages, 300);
-
-    // Gate rejected the poisoned stamp ⇒ ON recomputed exactly like OFF.
-    expect(on.measures).toBe(off.measures);
-    for (let p = 0; p < on.perPage.length; p++) expect(on.perPage[p]).toEqual(off.perPage[p]);
+    }
+    const after = await renderAll(model, pages, 300);
+    expect(before.measures).toBe(0);
+    expect(after.measures).toBe(0);
+    expect(after.perPage).toEqual(before.perPage);
   });
 
   it('(c) wrap partition is zoom-invariant: scale 1 and scale 0.75 break each cell paragraph identically', async () => {
@@ -355,10 +338,9 @@ describe('table-cell paragraph line reuse — B2 T2', () => {
     const outer = tableOf([
       row([cellOf([inner] as unknown as DocTable[], 140), cell('side ' + Array.from({ length: 6 }, (_, i) => `z${i}`).join(' '), 140)]),
     ], [140, 140]);
-    const r = await reuseVsRecompute(doc([outer as unknown as BodyElement]));
+    const r = await retainedPaint(doc([outer as unknown as BodyElement]));
     expect(r.drawn).toBeGreaterThan(0);
-    // Reuse fired somewhere in the nested structure (inner + outer cell paragraphs).
-    expect(r.on).toBeLessThan(r.off);
+    expect(r.measures).toBe(0);
     // The inner table's text was actually drawn (nested content painted).
     const drewInner = r.streams.some((page) => page.some((c) => c.text.startsWith('inner') || c.text.startsWith('x')));
     expect(drewInner).toBe(true);

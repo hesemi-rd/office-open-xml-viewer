@@ -1,6 +1,6 @@
 import type { DeepReadonly, LayoutDiagnostic, SourceRef } from './types.js';
 import { stableFingerprint } from './fingerprint.js';
-import type { BodyElement, DocRun, DocTable, DocxDocumentModel, ShapeRun } from '../types.js';
+import type { BodyElement, DocParagraph, DocRun, DocTable, DocxDocumentModel, ShapeRun } from '../types.js';
 import type { MathNode } from '@silurus/ooxml-core';
 import { rasterExceedsBudget, sniffRasterDimensions } from '@silurus/ooxml-core';
 import { imageResourceKey, mathResourceKey } from './source-key.js';
@@ -153,7 +153,14 @@ export function createMathMetadataService(records: readonly MathLayoutResource[]
   });
 }
 
-export function documentImageMetadataRecords(doc: DocxDocumentModel): ImageMetadataRecord[] {
+export type PictureBulletSizeResolver = (
+  paragraph: DocParagraph,
+) => Readonly<{ widthPt: number; heightPt: number }>;
+
+export function documentImageMetadataRecords(
+  doc: DocxDocumentModel,
+  resolvePictureBulletSize?: PictureBulletSizeResolver,
+): ImageMetadataRecord[] {
   const records: ImageMetadataRecord[] = [];
   const add = (source: SourceRef, imagePath: string, mimeType: string, widthPt: number, heightPt: number): void => {
     records.push({ resourceKey: imageResourceKey(source, imagePath), widthPt, heightPt, mimeType });
@@ -170,7 +177,9 @@ export function documentImageMetadataRecords(doc: DocxDocumentModel): ImageMetad
       const textBoxSource: SourceRef = {
         story: 'textbox',
         storyInstance: `${source.story}:${source.storyInstance}:${source.path.join('.')}`,
-        path: [index],
+        // The compatibility block becomes one retained paragraph whose image is
+        // run 0; metadata and paint must address that same structural occurrence.
+        path: [index, 0],
       };
       add(textBoxSource, block.imagePath, block.mimeType, block.imageWidthPt, block.imageHeightPt);
     });
@@ -185,15 +194,19 @@ export function documentImageMetadataRecords(doc: DocxDocumentModel): ImageMetad
       const path = [...prefix, elementIndex];
       if (element.type === 'paragraph') {
         const numbering = element.numbering;
-        if (numbering?.picBulletImagePath && numbering.picBulletMimeType
-          && numbering.picBulletWidthPt != null && numbering.picBulletHeightPt != null) {
-          add(
-            { story, storyInstance, path },
-            numbering.picBulletImagePath,
-            numbering.picBulletMimeType,
-            numbering.picBulletWidthPt,
-            numbering.picBulletHeightPt,
-          );
+        if (numbering?.picBulletImagePath && numbering.picBulletMimeType) {
+          const resolvedSize = resolvePictureBulletSize?.(element);
+          const widthPt = numbering.picBulletWidthPt ?? resolvedSize?.widthPt;
+          const heightPt = numbering.picBulletHeightPt ?? resolvedSize?.heightPt;
+          if (widthPt != null && heightPt != null) {
+            add(
+              { story, storyInstance, path },
+              numbering.picBulletImagePath,
+              numbering.picBulletMimeType,
+              widthPt,
+              heightPt,
+            );
+          }
         }
         element.runs.forEach((run, runIndex) => visitRun(run, { story, storyInstance, path: [...path, runIndex] }));
       } else if (element.type === 'table') {

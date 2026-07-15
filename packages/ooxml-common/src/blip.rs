@@ -95,12 +95,12 @@ pub fn mime_from_ext(path: &str) -> &'static str {
 }
 
 /// ECMA-376 §20.1.8.55 `<a:srcRect>` source-image crop (DrawingML
-/// `CT_RelativeRect`). Each edge inset is a fraction `0..1` of the *source*
-/// bitmap, measured inward from that edge, so the visible source region is
+/// `CT_RelativeRect`). Each edge inset is a signed fraction of the *source*
+/// bitmap, measured from that edge, so the visible source region is
 /// `[l, t, 1−r, 1−b]`. The raw attributes are `ST_Percentage` in 1000ths of a
 /// percent; the parser divides by 100000 to a fraction so renderers need no unit
-/// knowledge. Absent edges default to `0`. Shared by the docx, pptx and xlsx
-/// parsers so the three formats crop identically.
+/// knowledge. `ST_Percentage` has no fixed range; absent edges default to `0`.
+/// Shared by the docx, pptx and xlsx parsers so the three formats crop identically.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SrcRect {

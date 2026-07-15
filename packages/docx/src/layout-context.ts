@@ -2,12 +2,13 @@ import {
   resolveKinsokuRules,
   type KinsokuRules,
 } from '@silurus/ooxml-core';
+import { EAST_ASIAN_RE } from './layout/text.js';
 import {
-  EAST_ASIAN_RE,
   resolveDefaultTabPt,
   type DocGridCtx,
 } from './line-layout.js';
 import { jcIsFullyJustified, jcStretchesLastLine } from './bidi-line.js';
+import { prepareBodyFrameMetadata } from './layout/frame.js';
 import type {
   BodyElement,
   ColumnGeom,
@@ -101,6 +102,8 @@ export interface ParagraphLayoutContext {
   readonly hasEastAsianText: boolean;
   readonly kinsoku: KinsokuRules;
   readonly defaultTabPt: number;
+  /** ECMA-376 §22.1.2.30 document-wide display-math justification. */
+  readonly mathDefJc?: string;
 }
 
 export interface RunLayoutContext {
@@ -138,6 +141,10 @@ export function documentHasEastAsianText(body: readonly BodyElement[]): boolean 
 export function resolveDocumentLayoutSettings(
   document: DocxDocumentModel,
 ): DocumentLayoutSettings {
+  // This document-level resolver is the session boundary shared by production
+  // and direct computePages callers. Preparing source/frame adjacency here keeps
+  // the frozen pagination kernel free of migration setup and caller preconditions.
+  prepareBodyFrameMetadata(document.body);
   return {
     kinsoku: resolveKinsokuRules(document.settings),
     defaultTabPt: resolveDefaultTabPt(document.settings),
@@ -313,6 +320,7 @@ export function resolveParagraphLayoutContext(
     hasEastAsianText: paragraphHasEastAsianText(paragraph),
     kinsoku: settings.kinsoku,
     defaultTabPt: settings.defaultTabPt,
+    mathDefJc: settings.mathDefJc,
   };
 }
 

@@ -1,7 +1,6 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { layoutDocument } from './document-layout.js';
-import { __test_setFitMeasureReuseEnabled } from './renderer.js';
-import type { ParagraphFragment } from './layout-fragments.js';
+import type { ParagraphLayout } from './layout/types.js';
 import type { BodyElement, DocParagraph, DocxDocumentModel, SectionProps } from './types';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -11,10 +10,8 @@ import type { BodyElement, DocParagraph, DocxDocumentModel, SectionProps } from 
 // (measureBodyParagraphAtCursor) and, before M-1, measured it AGAIN at its final
 // placement to build the fragment. When a paragraph is not relocated after the
 // estimate its final placement is identical, so the fragment now REUSES the fit
-// measurement. This suite pins non-vacuity — pagination makes strictly fewer
-// measureText calls with the reuse ON than OFF — and equivalence: the fragment line
-// partitions and placements are identical either way (keyed on placement equality,
-// so correctness never depends on the optimization).
+// measurement. This suite pins the production result directly: acquisition is
+// deterministic and a relocated paragraph owns geometry for its final placement.
 // ─────────────────────────────────────────────────────────────────────────────
 
 let measureCount = 0;
@@ -91,22 +88,22 @@ function doc(body: BodyElement[], pageHeight = 400): DocxDocumentModel {
 function projection(model: DocxDocumentModel) {
   return layoutDocument(model).pages.map((page) =>
     page.fragments.map((placed) => {
-      const f = placed.fragment as ParagraphFragment;
+      const f = placed.fragment as ParagraphLayout;
       return {
-        lineStart: f.lineStart,
-        lineEnd: f.lineEnd,
-        lines: f.measured.lines.length,
-        availW: f.measured.placement.availableWidthPt,
-        startY: f.measured.placement.startYPt,
+        continuation: f.continuation,
+        sourcePath: f.source.path,
+        lines: f.lines.length,
+        availW: f.flowBounds.widthPt,
+        startY: f.flowBounds.yPt,
         heightPt: placed.heightPt,
-        advances: f.measured.lines.map((l) => l.advancePt),
+        advances: f.lines.map((l) => l.advancePt),
       };
     }),
   );
 }
 
 describe('M-1 fit-check measurement reuse for non-split body fragments', () => {
-  it('reuses the fit measurement (fewer measureText calls) and produces the identical layout', () => {
+  it('reuses the fit measurement and produces a deterministic retained layout', () => {
     // Several short, non-splitting, float-free paragraphs on a tall page — each is
     // measured for the fit decision and then attached at the SAME placement, so the
     // reuse fires for every one of them.
@@ -117,43 +114,31 @@ describe('M-1 fit-check measurement reuse for non-split body fragments', () => {
       para('the quick brown fox jumps over') as unknown as BodyElement,
     ]);
 
-    __test_setFitMeasureReuseEnabled(true);
     measureCount = 0;
-    const onProjection = projection(model);
-    const onCount = measureCount;
-
-    __test_setFitMeasureReuseEnabled(false);
+    const firstProjection = projection(model);
+    const firstCount = measureCount;
     measureCount = 0;
-    const offProjection = projection(model);
-    const offCount = measureCount;
+    const secondProjection = projection(model);
+    const secondCount = measureCount;
 
-    __test_setFitMeasureReuseEnabled(true); // restore production default
-
-    // Non-vacuity: the reuse genuinely avoided a second measurement of every
-    // non-relocated paragraph, so pagination measured strictly less text.
-    expect(onCount).toBeGreaterThan(0);
-    expect(onCount).toBeLessThan(offCount);
-
-    // Equivalence: reusing the fit measurement yields the byte-same fragment layout as
-    // measuring twice — correctness does not depend on the optimization.
-    expect(onProjection).toEqual(offProjection);
+    expect(firstCount).toBeGreaterThan(0);
+    expect(secondCount).toBe(firstCount);
+    expect(secondProjection).toEqual(firstProjection);
   });
 
   it('does not affect a RELOCATED paragraph (placement changed → remeasured, layout still correct)', () => {
     // A tall paragraph with keepLines that must move to a fresh page: its fit estimate
     // is taken at a mid-page cursor, then the paragraph relocates, so the placement no
-    // longer matches and the fragment remeasures. Toggling the reuse must not change
-    // the resulting layout.
-    const filler = para(Array.from({ length: 20 }, () => 'w').join(' '));
+    // longer matches and the retained node must be acquired at the destination-page
+    // origin rather than keeping the rejected cursor geometry.
+    const filler = para('filler');
     const keep = para(Array.from({ length: 20 }, () => 'w').join(' '), { keepLines: true });
-    const model = doc([filler as unknown as BodyElement, keep as unknown as BodyElement], 80);
+    const model = doc([filler as unknown as BodyElement, keep as unknown as BodyElement], 40);
 
-    __test_setFitMeasureReuseEnabled(true);
-    const on = projection(model);
-    __test_setFitMeasureReuseEnabled(false);
-    const off = projection(model);
-    __test_setFitMeasureReuseEnabled(true);
-
-    expect(on).toEqual(off);
+    const retained = projection(model);
+    expect(retained).toHaveLength(2);
+    expect(retained[1]).toEqual([
+      expect.objectContaining({ sourcePath: [1], startY: 10 }),
+    ]);
   });
 });

@@ -5,6 +5,7 @@ import {
 } from './renderer.js';
 import { createLayoutServices } from './renderer.js';
 import { paragraphMarkBelowBaselinePt, paragraphMarkLineHeight } from './line-layout.js';
+import { paragraphMarkShapeInput } from './parser-model.js';
 import { canvasFontString } from '@silurus/ooxml-core';
 import type {
   BodyElement,
@@ -335,7 +336,7 @@ describe('empty paragraph mark line height (§17.3.1.29 / §17.3.1.33)', () => {
       service: typeof main.text,
     ) => paragraphMarkLineHeight(
       p, 1, { type: null, linePitchPt: null }, false, false,
-      ctx, {}, null, service.localMetrics, service,
+      ctx, {}, null, service.localMetrics, service, paragraphMarkShapeInput(p),
     );
 
     expect(main.text.fingerprint).toBe(worker.text.fingerprint);

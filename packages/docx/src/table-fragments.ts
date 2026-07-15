@@ -30,6 +30,8 @@ import type {
   TableFragment,
 } from './layout-fragments.js';
 import { rowGridBefore } from './table-geometry.js';
+import { resolveRetainedCellBlockPlacement } from './layout/table-cell-blocks.js';
+import { deepFreezePlainData } from './layout/plain-data.js';
 
 /**
  * Build the recursive content fragments of one cell laid out at `cellTotalWidthPt`
@@ -38,10 +40,14 @@ import { rowGridBefore } from './table-geometry.js';
  * `<w:p>`, a nested-table fragment per `<w:tbl>`. Supplied by the renderer, which owns
  * cell-paragraph measurement and nested-table geometry. A `vMerge=continue` cell is
  * never passed here (it renders no content); the builder gives it an empty block list.
+ * `sourceRowIndex` names the row in the original table, because a continuation slice's
+ * local row index cannot resolve a retained paragraph back to its source story.
  */
 export type BuildCellBlocks = (
   cell: DocTableCell,
   cellTotalWidthPt: number,
+  sourceRowIndex: number,
+  cellIndex: number,
 ) => readonly FlowFragment[];
 
 export interface BuildTableFragmentInput {
@@ -81,12 +87,8 @@ function verticalMergeRole(cell: DocTableCell): CellFragment['verticalMerge'] {
 
 /**
  * Produce the immutable {@link TableFragment} for one placed table (whole table or one
- * page slice). STRUCTURALLY freezes the fragment and its nested row/cell/column arrays
- * (M-3): every wrapper object and array this module creates is frozen, so the layout
- * result's shape cannot be mutated. The freeze is structural, not deep — the referenced
- * parsed model objects and the measured paragraph internals (`MeasuredParagraph.lines`
- * and its line objects) stay shared and unfrozen, exactly as the PR 5 body fragments
- * document.
+ * page slice). The table/row/cell source tree is snapshotted and deeply frozen before
+ * retention, so later parser-model mutation cannot change paint or fingerprints.
  */
 export function buildTableFragment(input: BuildTableFragmentInput): TableFragment {
   const {
@@ -100,10 +102,14 @@ export function buildTableFragment(input: BuildTableFragmentInput): TableFragmen
   } = input;
   const sourceRowIndexOf = input.sourceRowIndexOf ?? ((i: number) => i);
   const columns = Object.freeze([...columnWidthsPt]) as readonly number[];
+  const retainedSource = deepFreezePlainData(structuredClone(table)) as DocTable;
 
   const rows: RowFragment[] = table.rows.map((sourceRow, ri) => {
+    const sourceRowIndex = sourceRowIndexOf(ri);
+    const retainedRow = retainedSource.rows[ri]!;
     let ci = rowGridBefore(sourceRow, columns.length);
-    const cells: CellFragment[] = sourceRow.cells.map((sourceCell) => {
+    const cells: CellFragment[] = sourceRow.cells.map((sourceCell, cellIndex) => {
+      const retainedCell = retainedRow.cells[cellIndex]!;
       const span = Math.min(sourceCell.colSpan, columns.length - ci);
       let cellTotalWidthPt = 0;
       for (let cj = ci; cj < ci + span; cj++) cellTotalWidthPt += columns[cj] ?? 0;
@@ -114,17 +120,26 @@ export function buildTableFragment(input: BuildTableFragmentInput): TableFragmen
       const blocks =
         role === 'continue'
           ? (Object.freeze([]) as readonly FlowFragment[])
-          : (Object.freeze([...buildCellBlocks(sourceCell, cellTotalWidthPt)]) as readonly FlowFragment[]);
-      return Object.freeze({
-        source: sourceCell,
+          : (Object.freeze([
+              ...buildCellBlocks(sourceCell, cellTotalWidthPt, sourceRowIndex, cellIndex),
+            ]) as readonly FlowFragment[]);
+      const placement = resolveRetainedCellBlockPlacement(
+        sourceCell,
+        table,
         blocks,
+        rowHeightsPt[ri] ?? 0,
+      );
+      return Object.freeze({
+        source: retainedCell,
+        blocks,
+        ...placement,
         verticalMerge: role,
         boxHeightPt: rowHeightsPt[ri] ?? 0,
       }) as CellFragment;
     });
     return Object.freeze({
-      source: sourceRow,
-      sourceRowIndex: sourceRowIndexOf(ri),
+      source: retainedRow,
+      sourceRowIndex,
       heightPt: rowHeightsPt[ri] ?? 0,
       cells: Object.freeze(cells) as readonly CellFragment[],
       repeatedHeader: ri < repeatedHeaderRowCount,
@@ -133,7 +148,7 @@ export function buildTableFragment(input: BuildTableFragmentInput): TableFragmen
 
   return Object.freeze({
     kind: 'table',
-    source: table,
+    source: retainedSource,
     columnWidthsPt: columns,
     rows: Object.freeze(rows) as readonly RowFragment[],
     continuesFromPreviousPage,

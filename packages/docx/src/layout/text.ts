@@ -11,6 +11,170 @@ import type {
 } from './font-service.js';
 import type { CanvasFontRoute } from '@silurus/ooxml-core';
 import { stableFingerprint } from './fingerprint.js';
+import type {
+  DocParagraph,
+  DocRun,
+  DocxTextRun,
+  FieldRun,
+  ShapeTextRun,
+  TabStop,
+} from '../types.js';
+import type {
+  NumberingMarkerShapeInput,
+  SourceRef,
+  VmlTextPathAcquisitionInput,
+} from './types.js';
+import type { NormalizedTextBoxParagraphInput } from './textbox-input.js';
+import type { AnchorAcquisitionInput } from './anchor-input.js';
+
+/** The subset of a measured text segment needed to resolve its effective size. */
+export interface EffectiveFontSegment {
+  readonly fontSize: number;
+  readonly smallCaps?: boolean;
+  readonly vertAlign?: 'super' | 'sub' | null;
+}
+
+export type ResolvedTabStop = Readonly<{
+  pos: number;
+  alignment: TabStop['alignment'];
+  leader?: TabStop['leader'];
+}>;
+
+/** Internal line-acquisition flags layered onto the stable public text-run model. */
+export type ShapeTextDocRun = Extract<DocRun, { type: 'text' }> & Readonly<{
+  textBoxLineFloor: true;
+  textBoxVertical: boolean;
+}>;
+
+/** ECMA-376 §17.3.2.33 effective size in the caller's scaled coordinate space. */
+export function calcEffectiveFontPx(segment: EffectiveFontSegment, scale: number): number {
+  const fontSizePt = segment.smallCaps ? Math.max(segment.fontSize - 2, 1) : segment.fontSize;
+  let size = fontSizePt * scale;
+  if (segment.vertAlign) size *= 0.65;
+  return size;
+}
+
+/** East Asian content predicate used by both legacy and retained line acquisition. */
+export const EAST_ASIAN_RE =
+  /[ᄀ-ᇿ⺀-⿟　-〿぀-ヿ㄰-㆏㐀-䶿一-鿿ꥠ-꥿가-퟿豈-﫿＀-￯]/u;
+
+/** ECMA-376 §17.3.1.37 and §17.15.1.25 tab-stop resolution. */
+export function nextTabStop(
+  curMarginPx: number,
+  customStopsPx: readonly ResolvedTabStop[],
+  intervalPx: number,
+): ResolvedTabStop | null {
+  let custom: ResolvedTabStop | null = null;
+  let maxCustomPx = 0;
+  for (const stop of customStopsPx) {
+    if (stop.pos > maxCustomPx) maxCustomPx = stop.pos;
+    if (stop.pos > curMarginPx && (custom === null || stop.pos < custom.pos)) custom = stop;
+  }
+
+  let automatic: ResolvedTabStop | null = null;
+  if (intervalPx > 0) {
+    const epsilon = 1e-6;
+    const from = Math.max(curMarginPx, maxCustomPx);
+    let pos = Math.ceil((from + epsilon) / intervalPx) * intervalPx;
+    if (pos <= curMarginPx) pos += intervalPx;
+    automatic = { pos, alignment: 'left' };
+  }
+
+  if (custom && automatic) return custom.pos <= automatic.pos ? custom : automatic;
+  return custom ?? automatic;
+}
+
+/** RTL tab coordinates use the same distance-from-leading-edge stop grid. */
+export function nextTabStopRtl(
+  curMarginPx: number,
+  customStopsPx: readonly ResolvedTabStop[],
+  intervalPx: number,
+): ResolvedTabStop | null {
+  return nextTabStop(curMarginPx, customStopsPx, intervalPx);
+}
+
+/** Adapt public shape text to the neutral body-run contract before line acquisition. */
+export function shapeRunToDocRun(
+  run: ShapeTextRun,
+  textVert?: string | null,
+): ShapeTextDocRun {
+  const textBoxVertical = textVert === 'vert' || textVert === 'vert270'
+    || textVert === 'eaVert' || textVert === 'mongolianVert';
+  return {
+    type: 'text',
+    text: run.text,
+    bold: run.bold ?? false,
+    italic: run.italic ?? false,
+    underline: false,
+    strikethrough: false,
+    fontSize: run.fontSizePt,
+    color: run.color ?? null,
+    fontFamily: run.fontFamily ?? null,
+    fontFamilyEastAsia: run.fontFamilyEastAsia ?? null,
+    isLink: false,
+    background: null,
+    vertAlign: null,
+    hyperlink: null,
+    ruby: run.ruby ?? undefined,
+    textBoxLineFloor: true,
+    textBoxVertical,
+  };
+}
+
+/** Plain parser-boundary snapshot used by retained line acquisition. Private
+ * parser extensions are copied into named immutable fields exactly once. */
+export type ParagraphTextBearingRun = (DocxTextRun | (FieldRun & Partial<DocxTextRun>)) & Readonly<{
+  fontFamilyHighAnsi?: string | null;
+  fontFamilyEastAsia?: string | null;
+  fontHint?: 'default' | 'eastAsia' | 'cs';
+  rtl?: boolean;
+  cs?: boolean;
+  fontFamilyCs?: string | null;
+  fontSizeCs?: number;
+  boldCs?: boolean;
+  italicCs?: boolean;
+  langBidi?: string;
+  langEastAsia?: string;
+  fontSlots?: Readonly<{
+    direct: TextFontSlots;
+    theme: TextFontSlots;
+    themePresent: TextFontSlotPresence;
+  }>;
+}>;
+
+export type ParagraphMathRun = Extract<DocRun, { type: 'math' }> & Readonly<{
+  source: SourceRef;
+  resourceKey: string;
+}>;
+
+export type ParagraphShapeRun = Extract<DocRun, { type: 'shape' }> & Readonly<{
+  vmlTextPathInput?: VmlTextPathAcquisitionInput;
+  textBoxInput?: readonly NormalizedTextBoxParagraphInput[];
+  anchorAcquisitionInput?: AnchorAcquisitionInput;
+}>;
+
+type ParagraphAnchorPayloadRun = Extract<DocRun, { type: 'image' | 'chart' }> & Readonly<{
+  anchorAcquisitionInput?: AnchorAcquisitionInput;
+}>;
+
+type ParagraphAnchorHostRun = Extract<DocRun, { type: 'anchorHost' }> & Readonly<{
+  anchorOccurrenceId?: string;
+}>;
+
+export type ParagraphAcquisitionRun =
+  | (Extract<DocRun, { type: 'text' }> & ParagraphTextBearingRun)
+  | (Extract<DocRun, { type: 'field' }> & ParagraphTextBearingRun)
+  | Exclude<DocRun, { type: 'text' } | { type: 'field' } | { type: 'math' } | { type: 'shape' } | { type: 'image' } | { type: 'chart' } | { type: 'anchorHost' }>
+  | ParagraphAnchorPayloadRun
+  | ParagraphAnchorHostRun
+  | ParagraphShapeRun
+  | ParagraphMathRun;
+
+export type ParagraphAcquisitionInput = Omit<DocParagraph, 'runs'> & Readonly<{
+  runs: ParagraphAcquisitionRun[];
+  numberingMarkerShapeInput?: NumberingMarkerShapeInput;
+  paragraphMarkShapeInput?: NumberingMarkerShapeInput;
+}>;
 
 export type FontScriptSlot = 'ascii' | 'highAnsi' | 'eastAsia' | 'complexScript';
 
@@ -50,6 +214,9 @@ export interface TextShapeRequest {
   readonly kerning?: boolean;
   /** Resolve script slots and faces without touching the measurement adapter. */
   readonly measure?: boolean;
+  /** Aggregate-only acquisition may omit per-grapheme contextual advances.
+   * Script spans and aggregate metrics remain authoritative. */
+  readonly clusterGeometry?: boolean;
 }
 
 export interface TextFontResolveRequest {
@@ -76,6 +243,17 @@ export interface GlyphMeasurement {
   readonly advancePt: number;
   readonly ascentPt: number;
   readonly descentPt: number;
+  /** Tight glyph ink relative to the run origin and alphabetic baseline.
+   * Unlike advance/ascent/descent, this can describe ink from a zero-advance
+   * combining mark and excludes the font's reserved ascender/descender space. */
+  readonly inkBounds?: GlyphInkBounds;
+}
+
+export interface GlyphInkBounds {
+  readonly xMinPt: number;
+  readonly xMaxPt: number;
+  readonly ascentPt: number;
+  readonly descentPt: number;
 }
 
 export interface GlyphMeasurer {
@@ -98,6 +276,12 @@ export interface TextShapeResult extends GlyphMeasurement {
   readonly spans: readonly TextShapeSpan[];
   /** UTF-16 offsets at which line splitting may legally separate graphemes. */
   readonly graphemeBoundaries: readonly number[];
+  /** Contextually measured source clusters, relative to the shaped request. */
+  readonly clusters?: readonly Readonly<{
+    range: Readonly<{ start: number; end: number }>;
+    offsetPt: number;
+    advancePt: number;
+  }>[];
   readonly diagnostics: readonly LayoutDiagnostic[];
 }
 
@@ -372,12 +556,77 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
         });
       });
       const diagnostics = spans.flatMap((span) => span.font.diagnostics);
+      const inkBounds = spans.length > 0 && spans.every((span) => span.inkBounds !== undefined)
+        ? (() => {
+            let originPt = 0;
+            let xMinPt = Number.POSITIVE_INFINITY;
+            let xMaxPt = Number.NEGATIVE_INFINITY;
+            let ascentPt = 0;
+            let descentPt = 0;
+            for (const span of spans) {
+              const ink = span.inkBounds as GlyphInkBounds;
+              xMinPt = Math.min(xMinPt, originPt + ink.xMinPt);
+              xMaxPt = Math.max(xMaxPt, originPt + ink.xMaxPt);
+              ascentPt = Math.max(ascentPt, ink.ascentPt);
+              descentPt = Math.max(descentPt, ink.descentPt);
+              originPt += span.advancePt;
+            }
+            return Object.freeze({ xMinPt, xMaxPt, ascentPt, descentPt });
+          })()
+        : undefined;
+      const totalAdvancePt = spans.reduce((sum, span) => sum + span.advancePt, 0);
+      const clusters = request.clusterGeometry === false
+        ? undefined
+        : (() => {
+            const prefixAdvances = new Map<number, number>([
+              [0, 0],
+              [request.text.length, totalAdvancePt],
+            ]);
+            const prefixAdvance = (boundary: number): number => {
+              if (request.measure === false || boundary <= 0) return 0;
+              const retained = prefixAdvances.get(boundary);
+              if (retained !== undefined) return retained;
+              let advancePt = 0;
+              for (const span of spans) {
+                if (boundary >= span.end) {
+                  advancePt += span.advancePt;
+                  continue;
+                }
+                if (boundary <= span.start) break;
+                advancePt += input.measurer.measure({
+                  text: span.text.slice(0, boundary - span.start),
+                  fontRoute: span.fontRoute,
+                  fontSizePt: request.fontSizePt,
+                  weight: span.font.weight,
+                  style: span.font.style,
+                  letterSpacingPt: request.letterSpacingPt ?? 0,
+                  kerning: request.kerning,
+                }).advancePt;
+                break;
+              }
+              // One boundary is the trailing edge of one cluster and the leading
+              // edge of the next. Keep one contextual fact for this shape call.
+              prefixAdvances.set(boundary, advancePt);
+              return advancePt;
+            };
+            return Object.freeze(graphemeBoundaries.slice(0, -1).map((start, index) => {
+              const end = graphemeBoundaries[index + 1] ?? start;
+              const offsetPt = prefixAdvance(start);
+              return Object.freeze({
+                range: Object.freeze({ start, end }),
+                offsetPt,
+                advancePt: prefixAdvance(end) - offsetPt,
+              });
+            }));
+          })();
       return Object.freeze({
-        advancePt: spans.reduce((sum, span) => sum + span.advancePt, 0),
+        advancePt: totalAdvancePt,
         ascentPt: Math.max(0, ...spans.map((span) => span.ascentPt)),
         descentPt: Math.max(0, ...spans.map((span) => span.descentPt)),
+        ...(inkBounds ? { inkBounds } : {}),
         spans: Object.freeze(spans),
         graphemeBoundaries,
+        ...(clusters ? { clusters } : {}),
         diagnostics: Object.freeze(diagnostics),
       });
     },

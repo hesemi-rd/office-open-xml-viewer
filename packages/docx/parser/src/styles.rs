@@ -30,6 +30,10 @@ pub struct RunFmt {
     /// ECMA-376 §17.3.2.40 `<w:u w:color>` — an underline-only colour (hex 6, or
     /// the literal `auto`). `None` means the underline follows the glyph colour.
     pub underline_color: Option<String>,
+    /// Complete private `<w:u>` facts. The public bool/style/color projection is
+    /// retained for API compatibility; layout acquisition consumes this lexical
+    /// value/status representation so invalid enums are not normalized away.
+    pub(crate) underline_typography: Option<crate::types::UnderlineTypographyWire>,
     pub strikethrough: Option<bool>,
     pub font_size: Option<f64>, // pt
     pub color: Option<String>,  // hex 6
@@ -87,6 +91,9 @@ pub struct RunFmt {
     /// ECMA-376 §17.3.2.4 `<w:bdr>` — a run-level border drawn as a box around
     /// the run's text. Reuses `EdgeBorder` (width pt, color, style, space pt).
     pub border: Option<EdgeBorder>,
+    /// Full CT_Border (§17.3.4) attributes, including theme/shadow/frame facts
+    /// omitted by the stable public EdgeBorder projection.
+    pub(crate) border_typography: Option<crate::types::CtBorderTypographyWire>,
     /// ECMA-376 §17.3.2.30 w:rtl — this run contains complex-script (RTL)
     /// content. Resolved through the style chain onto the run model, where the
     /// renderer uses it to force complex-script shaping and feed the UAX#9
@@ -183,6 +190,10 @@ pub struct RunFmt {
     /// PARSED for completeness; the two-lines-in-one draw is a follow-up. `None` =
     /// no brackets.
     pub east_asian_combine_brackets: Option<String>,
+    pub(crate) vertical_align_typography: Option<crate::types::TypographyValueWire<String>>,
+    pub(crate) position_typography: Option<crate::types::TypographyValueWire<f64>>,
+    pub(crate) emphasis_typography: Option<crate::types::TypographyValueWire<String>>,
+    pub(crate) combine_brackets_typography: Option<crate::types::TypographyValueWire<String>>,
 }
 
 /// Resolved paragraph formatting.
@@ -223,6 +234,7 @@ pub struct ParaFmt {
     pub widow_control: Option<bool>,
     /// Paragraph border edges (w:pBdr)
     pub para_borders: Option<crate::types::ParagraphBorders>,
+    pub(crate) paragraph_typography: Option<crate::types::ParagraphTypographyWire>,
     /// Heading outline level (w:outlineLvl, 0–8) when set. Word's built-in
     /// heading styles (Heading 1–9) are rendered with an implicit
     /// `w:keepNext` even when not spelled out in styles.xml; downstream
@@ -876,6 +888,31 @@ pub(crate) fn apply_para(dst: &mut ParaFmt, src: &ParaFmt) {
             dst_b.between = src_b.between.clone();
         }
     }
+    if let Some(src_typography) = &src.paragraph_typography {
+        let dst_typography = dst
+            .paragraph_typography
+            .get_or_insert_with(Default::default);
+        let src_borders = &src_typography.borders;
+        let dst_borders = &mut dst_typography.borders;
+        if src_borders.top.is_some() {
+            dst_borders.top = src_borders.top.clone();
+        }
+        if src_borders.right.is_some() {
+            dst_borders.right = src_borders.right.clone();
+        }
+        if src_borders.bottom.is_some() {
+            dst_borders.bottom = src_borders.bottom.clone();
+        }
+        if src_borders.left.is_some() {
+            dst_borders.left = src_borders.left.clone();
+        }
+        if src_borders.between.is_some() {
+            dst_borders.between = src_borders.between.clone();
+        }
+        if src_borders.bar.is_some() {
+            dst_borders.bar = src_borders.bar.clone();
+        }
+    }
     if src.bidi.is_some() {
         dst.bidi = src.bidi;
     }
@@ -918,6 +955,25 @@ pub(crate) fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     }
     if src.underline_color.is_some() {
         dst.underline_color = src.underline_color.clone();
+    }
+    if let Some(src_u) = &src.underline_typography {
+        let dst_u = dst
+            .underline_typography
+            .get_or_insert_with(Default::default);
+        // [MS-OI29500] §2.1.100: omitted underline attributes continue through
+        // the style hierarchy. Invalid authored values still override so the
+        // retained layer can emit a diagnostic instead of silently inheriting.
+        let merge = |dst: &mut crate::types::TypographyValueWire<String>,
+                     src: &crate::types::TypographyValueWire<String>| {
+            if src.status != crate::types::TypographyValueStatusWire::Missing {
+                *dst = src.clone();
+            }
+        };
+        merge(&mut dst_u.val, &src_u.val);
+        merge(&mut dst_u.color, &src_u.color);
+        merge(&mut dst_u.theme_color, &src_u.theme_color);
+        merge(&mut dst_u.theme_tint, &src_u.theme_tint);
+        merge(&mut dst_u.theme_shade, &src_u.theme_shade);
     }
     if src.strikethrough.is_some() {
         dst.strikethrough = src.strikethrough;
@@ -966,6 +1022,9 @@ pub(crate) fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     if src.vert_align.is_some() {
         dst.vert_align = src.vert_align.clone();
     }
+    if src.vertical_align_typography.is_some() {
+        dst.vertical_align_typography = src.vertical_align_typography.clone();
+    }
     if src.all_caps.is_some() {
         dst.all_caps = src.all_caps;
     }
@@ -988,8 +1047,14 @@ pub(crate) fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     if src.emphasis_mark.is_some() {
         dst.emphasis_mark = src.emphasis_mark.clone();
     }
+    if src.emphasis_typography.is_some() {
+        dst.emphasis_typography = src.emphasis_typography.clone();
+    }
     if src.border.is_some() {
         dst.border = src.border.clone();
+    }
+    if src.border_typography.is_some() {
+        dst.border_typography = src.border_typography.clone();
     }
     if src.rtl.is_some() {
         dst.rtl = src.rtl;
@@ -1038,6 +1103,9 @@ pub(crate) fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     if src.position.is_some() {
         dst.position = src.position;
     }
+    if src.position_typography.is_some() {
+        dst.position_typography = src.position_typography.clone();
+    }
     if src.kerning.is_some() {
         dst.kerning = src.kerning;
     }
@@ -1055,6 +1123,9 @@ pub(crate) fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     }
     if src.east_asian_combine_brackets.is_some() {
         dst.east_asian_combine_brackets = src.east_asian_combine_brackets.clone();
+    }
+    if src.combine_brackets_typography.is_some() {
+        dst.combine_brackets_typography = src.combine_brackets_typography.clone();
     }
 
     // Complex-script font size resolution (ECMA-376 §17.3.2.18). Word treats a
@@ -1292,6 +1363,16 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
             right: parse_edge("right"),
             between: parse_edge("between"),
         };
+        let typography_borders = crate::types::ParagraphTypographyBordersWire {
+            top: child_w(pbdr, "top").map(parse_ct_border_typography),
+            right: child_w(pbdr, "right").map(parse_ct_border_typography),
+            bottom: child_w(pbdr, "bottom").map(parse_ct_border_typography),
+            left: child_w(pbdr, "left").map(parse_ct_border_typography),
+            between: child_w(pbdr, "between").map(parse_ct_border_typography),
+            // CT_PBdr includes `bar` even though the stable public ParagraphBorders
+            // predates it. Keep it private rather than widening that API.
+            bar: child_w(pbdr, "bar").map(parse_ct_border_typography),
+        };
         // §17.3.1.7: a `between` border (the rule drawn between two adjacent
         // paragraphs sharing an identical border set) is a first-class edge — a
         // paragraph may declare ONLY `between` (internal rules, no outer box), so
@@ -1306,6 +1387,17 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
         {
             fmt.para_borders = Some(borders);
         }
+        if typography_borders.top.is_some()
+            || typography_borders.right.is_some()
+            || typography_borders.bottom.is_some()
+            || typography_borders.left.is_some()
+            || typography_borders.between.is_some()
+            || typography_borders.bar.is_some()
+        {
+            fmt.paragraph_typography = Some(crate::types::ParagraphTypographyWire {
+                borders: typography_borders,
+            });
+        }
     }
 
     // Text frame / drop cap (ECMA-376 §17.3.1.11 w:framePr). Presence makes the
@@ -1315,6 +1407,9 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
         use crate::types::FramePr;
         let twips = |name: &str| attr_w(fp, name).map(|s| twips_to_pt(&s));
         fmt.frame_pr = Some(Box::new(FramePr {
+            // CT_FramePr identity includes anchorLock. Retain it on the private
+            // wire without widening the stable public FramePr projection.
+            anchor_lock: on_off_attr(fp, "anchorLock").unwrap_or(false),
             // ST_DropCap default "none" (§17.18.20).
             drop_cap: attr_w(fp, "dropCap").unwrap_or_else(|| "none".to_string()),
             // §17.3.1.11 lines default 1.
@@ -1346,6 +1441,324 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
     fmt
 }
 
+fn typography_value<T>(
+    raw: Option<String>,
+    value: Option<T>,
+) -> crate::types::TypographyValueWire<T> {
+    use crate::types::{TypographyValueStatusWire, TypographyValueWire};
+    let status = match (&raw, value.is_some()) {
+        (None, _) => TypographyValueStatusWire::Missing,
+        (Some(_), true) => TypographyValueStatusWire::Valid,
+        (Some(_), false) => TypographyValueStatusWire::Invalid,
+    };
+    TypographyValueWire { status, raw, value }
+}
+
+fn normalized_string_attr(
+    node: roxmltree::Node,
+    name: &str,
+    normalize: impl FnOnce(&str) -> Option<String>,
+) -> crate::types::TypographyValueWire<String> {
+    let raw = attr_w(node, name);
+    let value = raw.as_deref().and_then(normalize);
+    typography_value(raw, value)
+}
+
+fn on_off_value(node: roxmltree::Node, name: &str) -> crate::types::TypographyValueWire<bool> {
+    let raw = attr_w(node, name);
+    let value = raw.as_deref().and_then(|value| match value {
+        "1" | "true" | "on" => Some(true),
+        "0" | "false" | "off" => Some(false),
+        _ => None,
+    });
+    typography_value(raw, value)
+}
+
+fn is_st_border_value(value: &str) -> bool {
+    // ST_Border is intentionally validated at acquisition time. Keeping an
+    // unknown lexical value as a valid border would erase the distinction
+    // between conforming OOXML and a producer extension before layout can
+    // diagnose it (ECMA-376-1 Strict, §17.18.2).
+    const VALUES: &[&str] = &[
+        "nil",
+        "none",
+        "single",
+        "thick",
+        "double",
+        "dotted",
+        "dashed",
+        "dotDash",
+        "dotDotDash",
+        "triple",
+        "thinThickSmallGap",
+        "thickThinSmallGap",
+        "thinThickThinSmallGap",
+        "thinThickMediumGap",
+        "thickThinMediumGap",
+        "thinThickThinMediumGap",
+        "thinThickLargeGap",
+        "thickThinLargeGap",
+        "thinThickThinLargeGap",
+        "wave",
+        "doubleWave",
+        "dashSmallGap",
+        "dashDotStroked",
+        "threeDEmboss",
+        "threeDEngrave",
+        "outset",
+        "inset",
+        "apples",
+        "archedScallops",
+        "babyPacifier",
+        "babyRattle",
+        "balloons3Colors",
+        "balloonsHotAir",
+        "basicBlackDashes",
+        "basicBlackDots",
+        "basicBlackSquares",
+        "basicThinLines",
+        "basicWhiteDashes",
+        "basicWhiteDots",
+        "basicWhiteSquares",
+        "basicWideInline",
+        "basicWideMidline",
+        "basicWideOutline",
+        "bats",
+        "birds",
+        "birdsFlight",
+        "cabins",
+        "cakeSlice",
+        "candyCorn",
+        "celticKnotwork",
+        "certificateBanner",
+        "chainLink",
+        "champagneBottle",
+        "checkedBarBlack",
+        "checkedBarColor",
+        "checkered",
+        "christmasTree",
+        "circlesLines",
+        "circlesRectangles",
+        "classicalWave",
+        "clocks",
+        "compass",
+        "confetti",
+        "confettiGrays",
+        "confettiOutline",
+        "confettiStreamers",
+        "confettiWhite",
+        "cornerTriangles",
+        "couponCutoutDashes",
+        "couponCutoutDots",
+        "crazyMaze",
+        "creaturesButterfly",
+        "creaturesFish",
+        "creaturesInsects",
+        "creaturesLadyBug",
+        "crossStitch",
+        "cup",
+        "decoArch",
+        "decoArchColor",
+        "decoBlocks",
+        "diamondsGray",
+        "doubleD",
+        "doubleDiamonds",
+        "earth1",
+        "earth2",
+        "earth3",
+        "eclipsingSquares1",
+        "eclipsingSquares2",
+        "eggsBlack",
+        "fans",
+        "film",
+        "firecrackers",
+        "flowersBlockPrint",
+        "flowersDaisies",
+        "flowersModern1",
+        "flowersModern2",
+        "flowersPansy",
+        "flowersRedRose",
+        "flowersRoses",
+        "flowersTeacup",
+        "flowersTiny",
+        "gems",
+        "gingerbreadMan",
+        "gradient",
+        "handmade1",
+        "handmade2",
+        "heartBalloon",
+        "heartGray",
+        "hearts",
+        "heebieJeebies",
+        "holly",
+        "houseFunky",
+        "hypnotic",
+        "iceCreamCones",
+        "lightBulb",
+        "lightning1",
+        "lightning2",
+        "mapPins",
+        "mapleLeaf",
+        "mapleMuffins",
+        "marquee",
+        "marqueeToothed",
+        "moons",
+        "mosaic",
+        "musicNotes",
+        "northwest",
+        "ovals",
+        "packages",
+        "palmsBlack",
+        "palmsColor",
+        "paperClips",
+        "papyrus",
+        "partyFavor",
+        "partyGlass",
+        "pencils",
+        "people",
+        "peopleWaving",
+        "peopleHats",
+        "poinsettias",
+        "postageStamp",
+        "pumpkin1",
+        "pushPinNote2",
+        "pushPinNote1",
+        "pyramids",
+        "pyramidsAbove",
+        "quadrants",
+        "rings",
+        "safari",
+        "sawtooth",
+        "sawtoothGray",
+        "scaredCat",
+        "seattle",
+        "shadowedSquares",
+        "sharksTeeth",
+        "shorebirdTracks",
+        "skyrocket",
+        "snowflakeFancy",
+        "snowflakes",
+        "sombrero",
+        "southwest",
+        "stars",
+        "starsTop",
+        "stars3d",
+        "starsBlack",
+        "starsShadowed",
+        "sun",
+        "swirligig",
+        "tornPaper",
+        "tornPaperBlack",
+        "trees",
+        "triangleParty",
+        "triangles",
+        "triangle1",
+        "triangle2",
+        "triangleCircle1",
+        "triangleCircle2",
+        "shapes1",
+        "shapes2",
+        "twistedLines1",
+        "twistedLines2",
+        "vine",
+        "waveline",
+        "weavingAngles",
+        "weavingBraid",
+        "weavingRibbon",
+        "weavingStrips",
+        "whiteFlowers",
+        "woodwork",
+        "xIllusions",
+        "zanyTriangles",
+        "zigZag",
+        "zigZagStitch",
+        "custom",
+    ];
+    VALUES.contains(&value)
+}
+
+fn is_st_theme_color_value(value: &str) -> bool {
+    matches!(
+        value,
+        "dark1"
+            | "light1"
+            | "dark2"
+            | "light2"
+            | "accent1"
+            | "accent2"
+            | "accent3"
+            | "accent4"
+            | "accent5"
+            | "accent6"
+            | "hyperlink"
+            | "followedHyperlink"
+            | "none"
+            | "background1"
+            | "text1"
+            | "background2"
+            | "text2"
+    )
+}
+
+fn parse_ct_border_typography(node: roxmltree::Node) -> crate::types::CtBorderTypographyWire {
+    use crate::types::CtBorderTypographyWire;
+    let lower = |value: &str| (!value.trim().is_empty()).then(|| value.to_lowercase());
+    let hex_byte = |value: &str| {
+        (value.len() == 2 && value.chars().all(|c| c.is_ascii_hexdigit()))
+            .then(|| value.to_ascii_uppercase())
+    };
+    let number = |name: &str, divisor: f64| {
+        let raw = attr_w(node, name);
+        let value = raw
+            .as_deref()
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .map(|value| value / divisor);
+        typography_value(raw, value)
+    };
+    CtBorderTypographyWire {
+        // CT_Border/@val is required (§17.3.4). Keep a missing/empty lexical
+        // value as such; the stable legacy border can still use its old fallback.
+        val: normalized_string_attr(node, "val", |value| {
+            is_st_border_value(value).then(|| value.to_string())
+        }),
+        color: normalized_string_attr(node, "color", lower),
+        theme_color: normalized_string_attr(node, "themeColor", |value| {
+            is_st_theme_color_value(value).then(|| value.to_string())
+        }),
+        theme_tint: normalized_string_attr(node, "themeTint", hex_byte),
+        theme_shade: normalized_string_attr(node, "themeShade", hex_byte),
+        size_pt: number("sz", 8.0),
+        space_pt: number("space", 1.0),
+        shadow: on_off_value(node, "shadow"),
+        frame: on_off_value(node, "frame"),
+    }
+}
+
+fn is_underline_value(value: &str) -> bool {
+    matches!(
+        value,
+        "none"
+            | "words"
+            | "single"
+            | "thick"
+            | "double"
+            | "dotted"
+            | "dottedHeavy"
+            | "dash"
+            | "dashedHeavy"
+            | "dashLong"
+            | "dashLongHeavy"
+            | "dotDash"
+            | "dashDotHeavy"
+            | "dotDotDash"
+            | "dashDotDotHeavy"
+            | "wave"
+            | "wavyHeavy"
+            | "wavyDouble"
+    )
+}
+
 pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
     let mut fmt = RunFmt {
         bold: bool_prop(rpr, "b"),
@@ -1374,6 +1787,21 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
             // "Auto" must still be normalized to the lowercase sentinel here.
             fmt.underline_color = Some(color.to_lowercase());
         }
+        let lower = |value: &str| (!value.trim().is_empty()).then(|| value.to_lowercase());
+        let identity = |value: &str| (!value.trim().is_empty()).then(|| value.to_string());
+        let hex_byte = |value: &str| {
+            (value.len() == 2 && value.chars().all(|c| c.is_ascii_hexdigit()))
+                .then(|| value.to_ascii_uppercase())
+        };
+        fmt.underline_typography = Some(crate::types::UnderlineTypographyWire {
+            val: normalized_string_attr(u, "val", |value| {
+                is_underline_value(value).then(|| value.to_string())
+            }),
+            color: normalized_string_attr(u, "color", lower),
+            theme_color: normalized_string_attr(u, "themeColor", identity),
+            theme_tint: normalized_string_attr(u, "themeTint", hex_byte),
+            theme_shade: normalized_string_attr(u, "themeShade", hex_byte),
+        });
     }
 
     // Font size — w:sz (§17.3.2.38) governs Latin and East Asian (CJK) text
@@ -1497,13 +1925,14 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
 
     // Vertical alignment (superscript / subscript)
     if let Some(va) = child_w(rpr, "vertAlign") {
-        if let Some(val) = attr_w(va, "val") {
-            fmt.vert_align = match val.as_str() {
-                "superscript" => Some("super".to_string()),
-                "subscript" => Some("sub".to_string()),
-                _ => None,
-            };
-        }
+        let raw = attr_w(va, "val");
+        let value = raw.as_deref().and_then(|value| match value {
+            "superscript" => Some("super".to_string()),
+            "subscript" => Some("sub".to_string()),
+            _ => None,
+        });
+        fmt.vert_align = value.clone();
+        fmt.vertical_align_typography = Some(typography_value(raw, value));
     }
 
     // All caps / small caps
@@ -1532,12 +1961,17 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
     // it filters to `None` exactly like `highlight`.
     if let Some(em) = child_w(rpr, "em") {
         fmt.emphasis_mark = attr_w(em, "val").filter(|v| v != "none");
+        fmt.emphasis_typography = Some(normalized_string_attr(em, "val", |value| {
+            matches!(value, "none" | "dot" | "comma" | "circle" | "underDot")
+                .then(|| value.to_string())
+        }));
     }
 
     // Run border (ECMA-376 §17.3.2.4 w:bdr) — drawn as a box around the run.
     // val="none"/"nil" means no border, so we drop it rather than carrying a
     // zero-style EdgeBorder.
     if let Some(bdr) = child_w(rpr, "bdr") {
+        fmt.border_typography = Some(parse_ct_border_typography(bdr));
         let edge = parse_edge_border(bdr);
         if edge.style != "none" && edge.style != "nil" {
             fmt.border = Some(edge);
@@ -1606,9 +2040,15 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
     // baseline, negative = lowered. Converted to points here; the renderer adds
     // it as a baseline y-offset without changing the font size or line box.
     if let Some(pos) = child_w(rpr, "position") {
-        if let Some(v) = attr_w(pos, "val") {
-            fmt.position = Some(half_pt_to_pt(&v));
-        }
+        let raw = attr_w(pos, "val");
+        let value = raw
+            .as_deref()
+            .and_then(|value| value.parse::<f64>().ok())
+            .map(|value| value / 2.0);
+        // Keep the stable public projection byte-for-byte compatible while the
+        // private value carries invalid status for the replacement layout path.
+        fmt.position = raw.as_deref().map(half_pt_to_pt);
+        fmt.position_typography = Some(typography_value(raw, value));
     }
 
     // Font kerning threshold (ECMA-376 §17.3.2.19 `<w:kern w:val>`). ST_HpsMeasure
@@ -1634,6 +2074,11 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
         fmt.east_asian_vert_compress = on_off_attr(eal, "vertCompress");
         fmt.east_asian_combine = on_off_attr(eal, "combine");
         fmt.east_asian_combine_brackets = attr_w(eal, "combineBrackets").filter(|v| v != "none");
+        fmt.combine_brackets_typography =
+            Some(normalized_string_attr(eal, "combineBrackets", |value| {
+                matches!(value, "none" | "round" | "square" | "angle" | "curly")
+                    .then(|| value.to_string())
+            }));
     }
 
     fmt
@@ -1964,6 +2409,28 @@ mod tests {
         );
         let doc = XmlDoc::parse(&xml).unwrap();
         parse_para_fmt(doc.root_element())
+    }
+
+    #[test]
+    fn frame_pr_preserves_anchor_lock_on_the_private_wire() {
+        // ECMA-376 §17.3.1.11: anchorLock participates in the effective
+        // CT_FramePr identity used to group adjacent framed paragraphs. Keep it
+        // off the stable public FramePr projection while preserving the fact for
+        // layout acquisition under an explicitly private wire name.
+        let locked = para_fmt_from(r#"<w:framePr w:anchorLock="on"/>"#)
+            .frame_pr
+            .expect("framePr parses");
+        assert!(locked.anchor_lock);
+        let locked_wire = serde_json::to_value(&locked).expect("framePr serializes");
+        assert_eq!(locked_wire["__anchorLock"], serde_json::json!(true));
+        assert!(locked_wire.get("anchorLock").is_none());
+
+        let unlocked = para_fmt_from(r#"<w:framePr/>"#)
+            .frame_pr
+            .expect("framePr parses");
+        assert!(!unlocked.anchor_lock);
+        let unlocked_wire = serde_json::to_value(&unlocked).expect("framePr serializes");
+        assert!(unlocked_wire.get("__anchorLock").is_none());
     }
 
     // ── RB2 neutralization: a pathologically deep styles.xml is rejected by the

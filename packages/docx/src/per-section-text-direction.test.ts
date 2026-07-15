@@ -261,6 +261,82 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; rotations: number[]
   return { canvas: canvas as unknown as HTMLCanvasElement, rotations };
 }
 
+function makeBorderRecordingCanvas(): {
+  canvas: HTMLCanvasElement;
+  strokes: Array<{ color: string; points: Array<readonly [number, number]>; deviceWidth: number }>;
+} {
+  type Matrix = { a: number; b: number; c: number; d: number; e: number; f: number };
+  let matrix: Matrix = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+  const stack: Matrix[] = [];
+  let font = '10px serif';
+  let path: Array<readonly [number, number]> = [];
+  let strokeStyle = '#000';
+  let lineWidth = 1;
+  const strokes: Array<{ color: string; points: Array<readonly [number, number]>; deviceWidth: number }> = [];
+  const point = (x: number, y: number): readonly [number, number] => [
+    matrix.a * x + matrix.c * y + matrix.e,
+    matrix.b * x + matrix.d * y + matrix.f,
+  ];
+  const ctx = {
+    get font() { return font; }, set font(v: string) { font = v; },
+    get strokeStyle() { return strokeStyle; }, set strokeStyle(v: string) { strokeStyle = v; },
+    get lineWidth() { return lineWidth; }, set lineWidth(v: number) { lineWidth = v; },
+    letterSpacing: '0px', fontKerning: 'auto',
+    measureText: (s: string) => {
+      const p = parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
+      return {
+        width: [...s].length * p * 0.5,
+        fontBoundingBoxAscent: p * 0.8, fontBoundingBoxDescent: p * 0.2,
+        actualBoundingBoxAscent: p * 0.8, actualBoundingBoxDescent: p * 0.2,
+      } as TextMetrics;
+    },
+    save() { stack.push({ ...matrix }); },
+    restore() { matrix = stack.pop()!; },
+    scale(x: number, y: number) {
+      matrix = { ...matrix, a: matrix.a * x, b: matrix.b * x, c: matrix.c * y, d: matrix.d * y };
+    },
+    translate(x: number, y: number) {
+      matrix = {
+        ...matrix,
+        e: matrix.e + matrix.a * x + matrix.c * y,
+        f: matrix.f + matrix.b * x + matrix.d * y,
+      };
+    },
+    rotate(angle: number) {
+      const cos = Math.cos(angle), sin = Math.sin(angle);
+      matrix = {
+        ...matrix,
+        a: matrix.a * cos + matrix.c * sin,
+        b: matrix.b * cos + matrix.d * sin,
+        c: -matrix.a * sin + matrix.c * cos,
+        d: -matrix.b * sin + matrix.d * cos,
+      };
+    },
+    setTransform(a: number, b: number, c: number, d: number, e: number, f: number) {
+      matrix = { a, b, c, d, e, f };
+    },
+    beginPath() { path = []; },
+    moveTo(x: number, y: number) { path.push(point(x, y)); },
+    lineTo(x: number, y: number) { path.push(point(x, y)); },
+    stroke() {
+      const normalScale = path.length >= 2 && Math.abs(path[0]![0] - path[1]![0]) < 1e-8
+        ? Math.hypot(matrix.a, matrix.b)
+        : Math.hypot(matrix.c, matrix.d);
+      strokes.push({ color: strokeStyle, points: [...path], deviceWidth: lineWidth * normalScale });
+    },
+    closePath() {}, fill() {}, fillRect() {}, strokeRect() {}, clip() {}, rect() {},
+    setLineDash() {}, clearRect() {}, arc() {}, quadraticCurveTo() {}, bezierCurveTo() {},
+    createLinearGradient() { return { addColorStop() {} }; },
+    drawImage() {}, fillText() {}, strokeText() {},
+    fillStyle: '#000', textAlign: 'left' as CanvasTextAlign,
+    textBaseline: 'alphabetic' as CanvasTextBaseline,
+    direction: 'ltr' as CanvasDirection, globalAlpha: 1,
+    lineCap: 'butt' as CanvasLineCap, lineJoin: 'miter' as CanvasLineJoin,
+  };
+  const canvas = { width: 0, height: 0, style: {} as Record<string, string>, getContext: () => ctx };
+  return { canvas: canvas as unknown as HTMLCanvasElement, strokes };
+}
+
 describe('per-section text direction (§17.6.20, issue #1000) — renderer', () => {
   it('rotates ONLY the vertical page +90°; the horizontal page stays unrotated', async () => {
     const doc = mixedDoc();
@@ -286,6 +362,36 @@ describe('per-section text direction (§17.6.20, issue #1000) — renderer', () 
     expect(c1.width / c1.height).toBeCloseTo(400 / 500, 2);
     expect(runs1.length).toBeGreaterThan(0);
     expect(runs1[0].transform).toBeUndefined();
+  });
+
+  it.each([
+    { width: 137.3, dpr: 1 },
+    { width: 205.1, dpr: 2 },
+  ])('snaps retained borders after the production vertical-page transform at width=$width dpr=$dpr', async ({ width, dpr }) => {
+    const section = {
+      pageWidth: 100.3, pageHeight: 200.7,
+      marginTop: 10.2, marginRight: 11.3, marginBottom: 12.4, marginLeft: 13.1,
+      headerDistance: 0, footerDistance: 0, titlePage: false, evenAndOddHeaders: false,
+      textDirection: 'tbRl',
+    } as SectionProps;
+    const bordered = para('B', 10) as DocParagraph & BodyElement;
+    bordered.borders = {
+      top: { style: 'single', color: '123456', width: 1, space: 0 },
+      bottom: null, left: null, right: null, between: null,
+    };
+    const doc = {
+      section, body: [bordered], headers: EMPTY_HF, footers: EMPTY_HF, fontFamilyClasses: {},
+    } as unknown as DocxDocumentModel;
+    const { canvas, strokes } = makeBorderRecordingCanvas();
+
+    await renderDocumentToCanvas(doc, canvas, 0, { width, dpr });
+
+    const border = strokes.find((stroke) => stroke.color.toLowerCase() === '#123456');
+    expect(border?.points).toHaveLength(2);
+    const xDevice = border!.points[0]![0];
+    expect(border!.points[1]![0]).toBeCloseTo(xDevice, 8);
+    const target = Math.round(border!.deviceWidth) % 2 === 1 ? .5 : 0;
+    expect(xDevice - target).toBeCloseTo(Math.round(xDevice - target), 8);
   });
 });
 

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { measureShapeTextAutoFitHeight, renderShapeText } from './renderer';
+import { measureShapeTextAutoFitHeight } from './renderer';
+import { acquireAndPaintShapeTextBox } from './retained-shape-textbox.test-support.js';
 import type { ShapeRun, ShapeText, ShapeTextRun } from './types';
 
 // ECMA-376 §20.1.10.83 ST_TextVerticalType — a DrawingML text-box body direction
@@ -155,7 +156,7 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
 
   it('horz (absent vert): no rotation — glyphs upright, CTM identity (legacy path)', () => {
     const { ctx, glyphs } = makeMatrixCtx();
-    renderShapeText(richTextbox([run(CJK + LAT)]), 0, 0, 200, 100, ctx, 1, {});
+    acquireAndPaintShapeTextBox(richTextbox([run(CJK + LAT)]), 0, 0, 200, 100, ctx, 1, {});
     const drawn = glyphs.filter((g) => g.text.includes(CJK) || g.text.includes(LAT) || /経|A/.test(g.text));
     expect(drawn.length).toBeGreaterThan(0);
     for (const g of drawn) expect(NEAR(norm(g.angleDeg), 0)).toBe(true);
@@ -163,21 +164,21 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
 
   it('vert: every glyph rotated +90° CW (all-rotate; CJK included)', () => {
     const { ctx, glyphs } = makeMatrixCtx();
-    renderShapeText(richTextbox([run(CJK + LAT)], 'vert'), 0, 0, 200, 100, ctx, 1, {});
+    acquireAndPaintShapeTextBox(richTextbox([run(CJK + LAT)], 'vert'), 0, 0, 200, 100, ctx, 1, {});
     expect(glyphs.length).toBeGreaterThan(0);
     for (const g of glyphs) expect(NEAR(norm(g.angleDeg), 90), `${g.text}@${g.angleDeg}`).toBe(true);
   });
 
   it('vert270: every glyph rotated −90° (270° CW)', () => {
     const { ctx, glyphs } = makeMatrixCtx();
-    renderShapeText(richTextbox([run(CJK + LAT)], 'vert270'), 0, 0, 200, 100, ctx, 1, {});
+    acquireAndPaintShapeTextBox(richTextbox([run(CJK + LAT)], 'vert270'), 0, 0, 200, 100, ctx, 1, {});
     expect(glyphs.length).toBeGreaterThan(0);
     for (const g of glyphs) expect(NEAR(norm(g.angleDeg), -90), `${g.text}@${g.angleDeg}`).toBe(true);
   });
 
   it('eaVert: CJK stands UPRIGHT (net 0°) while Latin stays sideways (net +90°)', () => {
     const { ctx, glyphs } = makeMatrixCtx();
-    renderShapeText(richTextbox([run(CJK), run(LAT)], 'eaVert'), 0, 0, 200, 100, ctx, 1, {});
+    acquireAndPaintShapeTextBox(richTextbox([run(CJK), run(LAT)], 'eaVert'), 0, 0, 200, 100, ctx, 1, {});
     const cjk = glyphs.find((g) => g.text.includes(CJK));
     const lat = glyphs.find((g) => g.text.includes(LAT));
     expect(cjk, 'CJK glyph drawn').toBeDefined();
@@ -190,7 +191,7 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
     // A vert box of physical 200×100: after the +90° rotation about the centre,
     // every drawn glyph's device origin must still fall within the physical box.
     const { ctx, glyphs } = makeMatrixCtx();
-    renderShapeText(richTextbox([run(CJK + CJK + LAT)], 'vert'), 0, 0, 200, 100, ctx, 1, {});
+    acquireAndPaintShapeTextBox(richTextbox([run(CJK + CJK + LAT)], 'vert'), 0, 0, 200, 100, ctx, 1, {});
     expect(glyphs.length).toBeGreaterThan(0);
     for (const g of glyphs) {
       expect(g.devX, `${g.text} devX in [0,200]`).toBeGreaterThanOrEqual(-1);
@@ -224,7 +225,7 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
     } as unknown as ShapeRun;
     // Box 200×100 → logical column length 100 → 10 cells of the 10px font. The
     // first column holds 経経済済 (4 cells); ABCDEFGHIJ (10 cells) wraps whole.
-    renderShapeText(shape, 0, 0, 200, 100, ctx, 1, {});
+    acquireAndPaintShapeTextBox(shape, 0, 0, 200, 100, ctx, 1, {});
     const cjk = glyphs.filter((g) => /[経済]/.test(g.text) && [...g.text].length === 1);
     expect(cjk.length, 'four upright CJK cells on the justified first column').toBe(4);
     // The along-column axis is device +y (the +90° frame maps local +x → +y).
@@ -245,7 +246,7 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
       const block2: ShapeText = { text: CJK, fontSizePt: 10, alignment: 'left', runs: [run(CJK)] };
       const shape = richTextbox([run(CJK)], v);
       (shape as unknown as { textBlocks: ShapeText[] }).textBlocks.push(block2);
-      renderShapeText(shape, 0, 0, 200, 100, ctx, 1, {});
+      acquireAndPaintShapeTextBox(shape, 0, 0, 200, 100, ctx, 1, {});
       return glyphs;
     };
     const gv = two('vert');
@@ -262,7 +263,7 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
   // MIRROR of eaVert — columns advance LEFT→RIGHT instead of right→left.
   it('mongolianVert: CJK upright (0°) while Latin stays sideways (+90°) — same as eaVert', () => {
     const { ctx, glyphs } = makeMatrixCtx();
-    renderShapeText(richTextbox([run(CJK), run(LAT)], 'mongolianVert'), 0, 0, 200, 100, ctx, 1, {});
+    acquireAndPaintShapeTextBox(richTextbox([run(CJK), run(LAT)], 'mongolianVert'), 0, 0, 200, 100, ctx, 1, {});
     const cjk = glyphs.find((g) => g.text.includes(CJK));
     const lat = glyphs.find((g) => g.text.includes(LAT));
     expect(cjk, 'CJK glyph drawn').toBeDefined();
@@ -280,7 +281,7 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
       const block2: ShapeText = { text: CJK, fontSizePt: 10, alignment: 'left', runs: [run(CJK)] };
       const shape = richTextbox([run(CJK)], v);
       (shape as unknown as { textBlocks: ShapeText[] }).textBlocks.push(block2);
-      renderShapeText(shape, 0, 0, 200, 100, ctx, 1, {});
+      acquireAndPaintShapeTextBox(shape, 0, 0, 200, 100, ctx, 1, {});
       return glyphs;
     };
     const ea = twoCols('eaVert');
@@ -302,7 +303,7 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
       fontFamily: 'NotInMetrics',
       ruby: { text: 'かんじ', fontSizePt: 5 },
     };
-    renderShapeText(richTextbox([baseRun], 'eaVert'), 0, 0, 200, 100, ctx, 1, {});
+    acquireAndPaintShapeTextBox(richTextbox([baseRun], 'eaVert'), 0, 0, 200, 100, ctx, 1, {});
     const base = glyphs.filter((g) => /[漢字]/.test(g.text));
     const ruby = glyphs.filter((g) => /[かんじ]/.test(g.text));
     expect(base.length, 'base glyphs drawn').toBeGreaterThan(0);
@@ -313,15 +314,12 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
     const baseMaxX = Math.max(...base.map((g) => g.devX));
     const rubyMinX = Math.min(...ruby.map((g) => g.devX));
     expect(rubyMinX, `ruby minX ${rubyMinX} > base maxX ${baseMaxX}`).toBeGreaterThan(baseMaxX);
-    // Exact cross offset: base fontSize 10 (cell centred on the column baseline),
-    // ruby fontSize 5 ⇒ ruby column centre = baseline − (effSize/2 + rubySize) =
-    // baseline − 10, which maps to device +10 (the physical right). Base and ruby
-    // sit on constant device-x per column, so the mean difference isolates the
-    // cross offset.
+    // Exact cross offset comes from retained selected-face ink: base ascent 8pt
+    // plus guide descent 1pt = 9pt. No em-ratio placement is reconstructed.
     const meanBaseX = base.reduce((s, g) => s + g.devX, 0) / base.length;
     const meanRubyX = ruby.reduce((s, g) => s + g.devX, 0) / ruby.length;
-    expect(meanRubyX - meanBaseX, `cross offset ${meanRubyX - meanBaseX} ≈ effSize/2+rubySize=10`)
-      .toBeCloseTo(10, 0);
+    expect(meanRubyX - meanBaseX, `cross offset ${meanRubyX - meanBaseX} = base ascent + guide descent`)
+      .toBeCloseTo(9, 5);
   });
 
   // ── (c) vert + inline image: image stays UPRIGHT ─────────────────────────
@@ -337,7 +335,7 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
     (shape as unknown as { textBlocks: ShapeText[] }).textBlocks.push(imgBlock);
     const fakeBmp = { width: 24, height: 36 } as unknown as ImageBitmap;
     const imgs = new Map<string, ImageBitmap>([['word/media/image1.png', fakeBmp]]);
-    renderShapeText(shape, 0, 0, 200, 100, ctx, 1, {}, imgs as never);
+    acquireAndPaintShapeTextBox(shape, 0, 0, 200, 100, ctx, 1, {}, imgs as never);
     expect(images.length, 'one image drawn').toBe(1);
     // Upright: the net rotation cancels the +90° page frame → 0°.
     expect(NEAR(norm(images[0].angleDeg), 0), `image @${images[0].angleDeg}`).toBe(true);
@@ -360,7 +358,7 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
     (shape as unknown as { textBlocks: ShapeText[] }).textBlocks.push(imgBlock);
     const fakeBmp = { width: 24, height: 36 } as unknown as ImageBitmap;
     const imgs = new Map<string, ImageBitmap>([['word/media/image1.png', fakeBmp]]);
-    renderShapeText(shape, 0, 0, 200, 100, ctx, 1, {}, imgs as never);
+    acquireAndPaintShapeTextBox(shape, 0, 0, 200, 100, ctx, 1, {}, imgs as never);
     expect(images.length).toBe(1);
     expect(NEAR(norm(images[0].angleDeg), 0), `vert270 image @${images[0].angleDeg}`).toBe(true);
   });
@@ -382,7 +380,7 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
     tb.textBlocks.push({ text: CJK, fontSizePt: 10, alignment: 'left', runs: [run(CJK)] } as ShapeText);
     const fakeBmp = { width: 10, height: 90 } as unknown as ImageBitmap;
     const imgs = new Map<string, ImageBitmap>([['word/media/image1.png', fakeBmp]]);
-    renderShapeText(shape, 0, 0, 200, 100, ctx, 1, {}, imgs as never);
+    acquireAndPaintShapeTextBox(shape, 0, 0, 200, 100, ctx, 1, {}, imgs as never);
     const cjk = glyphs.filter((g) => g.text.includes(CJK));
     const firstCol = cjk[0].devX;
     const lastCol = cjk[cjk.length - 1].devX;
@@ -395,8 +393,7 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
 
   // ── cross-axis spacing (sample-53 class regressions) ─────────────────────
   // GT (Word PDF): a ruby-bearing line's COLUMN is widened by the ruby
-  // reservation (the same `ruby.fontSizePt × 1.5` ascent bump layoutLines()
-  // already computes for the section body), so the base column clears the
+  // selected-face ink reservation acquired by layoutLines(), so the base column clears the
   // previous column instead of the furigana overprinting it.
   it('eaVert ruby line widens its column advance by the ruby reservation (§17.3.3.25)', () => {
     const advance = (withRuby: boolean): number => {
@@ -412,7 +409,7 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
       const baseBlock: ShapeText = { text: '漢', fontSizePt: 10, alignment: 'left', runs: [baseRun] };
       const shape = richTextbox([{ text: CJK, fontSizePt: 10, fontFamily: 'NotInMetrics' }], 'eaVert');
       (shape as unknown as { textBlocks: ShapeText[] }).textBlocks = [labelBlock, baseBlock];
-      renderShapeText(shape, 0, 0, 200, 100, ctx, 1, {});
+      acquireAndPaintShapeTextBox(shape, 0, 0, 200, 100, ctx, 1, {});
       const label = glyphs.find((g) => g.text.includes(CJK));
       const base = glyphs.find((g) => g.text.includes('漢'));
       expect(label, 'label glyph drawn').toBeDefined();
@@ -422,9 +419,8 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
     };
     const plain = advance(false);
     const withRuby = advance(true);
-    // layoutLines() reserves ruby.fontSizePt × 1.5 = 7.5 of extra ascent; the
-    // ruby-bearing column must advance by exactly that much more.
-    expect(withRuby - plain, `ruby advance ${withRuby} vs plain ${plain}`).toBeCloseTo(7.5, 5);
+    // Base ascent 8pt + guide descent 1pt = 9pt of exact retained reserve.
+    expect(withRuby - plain, `ruby advance ${withRuby} vs plain ${plain}`).toBeCloseTo(9, 5);
   });
 
   // GT (Word PDF): mongolianVert's first column is the exact MIRROR of the
@@ -442,7 +438,7 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
       // non-mirrored centerline (natural == lineH would accidentally pass).
       (block as unknown as { lineSpacingRule: string; lineSpacingVal: number }).lineSpacingRule = 'exact';
       (block as unknown as { lineSpacingRule: string; lineSpacingVal: number }).lineSpacingVal = 20;
-      renderShapeText(shape, 0, 0, 200, 100, ctx, 1, {});
+      acquireAndPaintShapeTextBox(shape, 0, 0, 200, 100, ctx, 1, {});
       const glyph = glyphs.find((g) => g.text.includes(CJK));
       expect(glyph, 'first-column glyph drawn').toBeDefined();
       // Upright CJK cells draw centred on the column centerline, so devX IS the
@@ -478,7 +474,7 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
       };
       const shape = richTextbox([{ text: '漢', fontSizePt: 10, fontFamily: 'NotInMetrics' }], 'mongolianVert');
       (shape as unknown as { textBlocks: ShapeText[] }).textBlocks = [rubyBlock, nextBlock];
-      renderShapeText(shape, 0, 0, 200, 100, ctx, 1, {});
+      acquireAndPaintShapeTextBox(shape, 0, 0, 200, 100, ctx, 1, {});
       const base = glyphs.find((g) => g.text.includes('漢'));
       const next = glyphs.find((g) => g.text.includes(CJK));
       const ruby = glyphs.filter((g) => /[かん]/.test(g.text));
@@ -493,7 +489,7 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
     // (band interior), not the flow-start edge.
     expect(withRuby.baseX, `base ${withRuby.baseX} unmoved from ${plain.baseX}`).toBeCloseTo(plain.baseX, 5);
     // The NEXT column (to the right, L→R) advances by the ruby reservation.
-    expect(withRuby.nextX - plain.nextX, 'next column pushed by the reservation').toBeCloseTo(7.5, 5);
+    expect(withRuby.nextX - plain.nextX, 'next column pushed by the reservation').toBeCloseTo(9, 5);
     // The furigana sits BETWEEN its base column and the next column — physical
     // right of the base (orientation preserved), clear of the next column.
     for (const rx of withRuby.rubyXs) {
@@ -521,7 +517,7 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
       };
       const shape = richTextbox([baseRun], 'mongolianVert');
       (shape as unknown as { textBlocks: ShapeText[] }).textBlocks = [rubyBlock, nextBlock];
-      renderShapeText(shape, 0, 0, 200, 100, ctx, 1, {});
+      acquireAndPaintShapeTextBox(shape, 0, 0, 200, 100, ctx, 1, {});
       const base = glyphs.find((g) => g.text.includes('漢'));
       const next = glyphs.find((g) => g.text.includes(CJK));
       const rubyGlyphs = glyphs.filter((g) => /[かん]/.test(g.text));
@@ -542,22 +538,24 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
     const raised = render({ hpsRaisePt: 15 });
     expect(
       fallback.columnAdvance - plain.columnAdvance,
-      'the absent-hpsRaise column reserves 1.5 × 7.5pt',
-    ).toBeCloseTo(11.25, 5);
+      'absent hpsRaise reserves selected-face base ascent + guide descent',
+    ).toBeCloseTo(13.5, 5);
     expect(
       raised.columnAdvance - fallback.columnAdvance,
-      'the explicit reservation grows from 11.25pt to 15pt',
-    ).toBeCloseTo(3.75, 5);
+      'the authored 15pt raise grows from the 13.5pt ink-touching fallback',
+    ).toBeCloseTo(1.5, 5);
     expect(zero.columnAdvance, 'zero hpsRaise adds no column reservation')
       .toBeCloseTo(plain.columnAdvance, 5);
     expect(zero.rubyCrossOffset, 'zero hpsRaise draws ruby on the base centerline').toBeCloseTo(0, 5);
     expect(
       raised.rubyCrossOffset,
-      '15pt hpsRaise equals the established effSize/2 + rubySize draw offset',
-    ).toBeCloseTo(fallback.rubyCrossOffset, 5);
+      'authored hpsRaise remains the exact cross-axis displacement',
+    ).toBeCloseTo(15, 5);
+    expect(fallback.rubyCrossOffset, 'fallback touches retained base and guide ink')
+      .toBeCloseTo(13.5, 5);
   });
 
-  it('mongolianVert without hpsRaise keeps the ruby-size-times-1.5 column reservation', () => {
+  it('mongolianVert without hpsRaise keeps the selected-face ink reservation', () => {
     const columnAdvance = (withRuby: boolean): number => {
       const { ctx, glyphs } = makeMatrixCtx();
       const baseRun: ShapeTextRun = {
@@ -574,7 +572,7 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
       };
       const shape = richTextbox([baseRun], 'mongolianVert');
       (shape as unknown as { textBlocks: ShapeText[] }).textBlocks = [rubyBlock, nextBlock];
-      renderShapeText(shape, 0, 0, 200, 100, ctx, 1, {});
+      acquireAndPaintShapeTextBox(shape, 0, 0, 200, 100, ctx, 1, {});
       const base = glyphs.find((g) => g.text.includes('漢'));
       const next = glyphs.find((g) => g.text.includes(CJK));
       expect(base, 'base glyph drawn').toBeDefined();
@@ -582,7 +580,7 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
       return next!.devX - base!.devX;
     };
 
-    expect(columnAdvance(true) - columnAdvance(false)).toBeCloseTo(11.25, 5);
+    expect(columnAdvance(true) - columnAdvance(false)).toBeCloseTo(13.5, 5);
   });
 
   // Autofit (spAutoFit) shares the same line resolver: a ruby-bearing vertical
@@ -597,7 +595,7 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
       }], 'eaVert');
       return measureShapeTextAutoFitHeight(shape, 200, ctx, 1, {});
     };
-    expect(measure(true) - measure(false), 'fitted extent grows by ruby.fontSizePt × 1.5').toBeCloseTo(7.5, 5);
+    expect(measure(true) - measure(false), 'fitted extent grows by retained base/guide ink').toBeCloseTo(9, 5);
   });
 
   // GT (Word PDF): §21.1.2.1.1 names the insets by PHYSICAL bounding-box edge
@@ -615,7 +613,7 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
       s.textInsetT = 3;
       s.textInsetR = 7;
       s.textInsetB = bIns;
-      renderShapeText(shape, 0, 0, 200, 100, ctx, 1, {});
+      acquireAndPaintShapeTextBox(shape, 0, 0, 200, 100, ctx, 1, {});
       const g = glyphs.find((gl) => gl.text.includes(CJK));
       expect(g, 'glyph drawn').toBeDefined();
       return g!.devX;

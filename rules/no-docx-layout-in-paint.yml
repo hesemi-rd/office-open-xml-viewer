@@ -18,7 +18,7 @@ rule:
               - regex: "^import\\s*\\{\\s*orderedPagePaintNodes\\s*\\}\\s*from\\s*['\"]\\.\\./layout/page-graph(?:\\.js)?['\"]\\s*;?$"
     - all:
         - kind: import_statement
-        - regex: "from\\s+['\"]\\.\\./(types|renderer|fragment-paint|layout-context|line-layout|paragraph-measure|table-geometry|table-fragments|layout-fragments)(\\.js)?['\"]"
+        - regex: "from\\s+['\"]\\.\\./(types|renderer|layout-context|line-layout|paragraph-measure|table-geometry|table-fragments|layout-fragments)(\\.js)?['\"]"
     - pattern: $OBJ.measureText($$$ARGS)
     - pattern: $OBJ['measureText']($$$ARGS)
     - pattern: measureText($$$ARGS)

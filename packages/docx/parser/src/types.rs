@@ -459,6 +459,19 @@ pub struct ColSpec {
     pub space_pt: f64,
 }
 
+/** Parser-private section placement facts. This wire is deliberately emitted
+ * under `__sectionPlacement` on SectionBreak and projected into an internal TS
+ * sidecar; it is not part of the stable public BodyElement declaration. */
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SectionPlacementWire {
+    pub section_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub v_align: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_numbering: Option<LineNumbering>,
+}
+
 #[derive(Serialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum BodyElement {
@@ -556,6 +569,12 @@ pub enum BodyElement {
         /// direction. `None` ⇒ horizontal (lrTb).
         #[serde(skip_serializing_if = "Option::is_none")]
         text_direction: Option<String>,
+        /// Internal A3 placement projection. Kept off the stable TS public
+        /// BodyElement contract and consumed only by parser-model normalization.
+        /// Boxed because this private diagnostic payload would otherwise set the
+        /// allocation size of every body element; Serde keeps the wire unchanged.
+        #[serde(rename = "__sectionPlacement")]
+        section_placement: Box<SectionPlacementWire>,
     },
 }
 
@@ -686,6 +705,11 @@ pub struct DocParagraph {
     /// (clippy::large_enum_variant); serde flattens the Box, so JSON is unchanged.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frame_pr: Option<Box<FramePr>>,
+    #[serde(
+        rename = "__paragraphTypographyAcquisition",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) paragraph_typography_acquisition: Option<ParagraphTypographyWire>,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
@@ -771,6 +795,11 @@ pub struct LineSpacing {
 #[derive(Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct FramePr {
+    /// ECMA-376 §17.3.1.11 `anchorLock`. This is retained only for effective
+    /// CT_FramePr identity during layout acquisition: exposing it as a normal
+    /// camelCase member would widen the stable public TypeScript FramePr API.
+    #[serde(rename = "__anchorLock", skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) anchor_lock: bool,
     /// ST_DropCap (§17.18.20): "none" | "drop" | "margin". Absent ⇒ "none".
     pub drop_cap: String,
     /// §17.3.1.11 `lines` — drop-cap vertical height in anchor lines. Default 1.
@@ -894,7 +923,9 @@ pub enum DocRun {
     /// because the same `<wp:anchor>` can contain a picture, chart, shape, or
     /// group, while the host character participates in line sizing exactly once.
     AnchorHost(AnchorHostMetrics),
-    Image(ImageRun),
+    // Boxed with Field because these rich payloads otherwise make every run
+    // reserve image/field-sized storage; Serde keeps the wire unchanged.
+    Image(Box<ImageRun>),
     /// ECMA-376 §21.2 DrawingML chart embedded in a `<w:drawing>` whose
     /// `<a:graphicData uri=".../chart">` carries a `<c:chart r:id>`. The chart
     /// model is the shared [`ooxml_common::chart::ChartModel`] (the same
@@ -909,7 +940,7 @@ pub enum DocRun {
     Break {
         break_type: BreakType,
     },
-    Field(FieldRun),
+    Field(Box<FieldRun>),
     // Boxed: ShapeRun is by far the largest Run variant; boxing keeps the
     // enum compact (clippy::large_enum_variant). Serde flattens the Box, so
     // the JSON tag/shape is unchanged.
@@ -991,6 +1022,243 @@ pub struct AnchorHostMetrics {
     pub bold: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub italic: bool,
+    /// Parser-private identity of the `wp:anchor` occurrence hosted by this
+    /// zero-advance character. Kept off the stable TypeScript model.
+    #[serde(
+        rename = "__anchorOccurrenceId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) anchor_occurrence_id: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnchorEdgesWire {
+    pub(crate) top_pt: Option<f64>,
+    pub(crate) top_status: AnchorValueStatusWire,
+    pub(crate) right_pt: Option<f64>,
+    pub(crate) right_status: AnchorValueStatusWire,
+    pub(crate) bottom_pt: Option<f64>,
+    pub(crate) bottom_status: AnchorValueStatusWire,
+    pub(crate) left_pt: Option<f64>,
+    pub(crate) left_status: AnchorValueStatusWire,
+}
+
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum AnchorValueStatusWire {
+    #[default]
+    Missing,
+    Invalid,
+    Valid,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub(crate) enum AnchorAxisChoiceWire {
+    #[default]
+    Missing,
+    Invalid,
+    Align {
+        value: String,
+    },
+    Offset {
+        #[serde(rename = "valuePt")]
+        value_pt: f64,
+    },
+    Percent {
+        fraction: f64,
+    },
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnchorAxisWire {
+    pub(crate) relative_from: Option<String>,
+    pub(crate) relative_from_status: AnchorValueStatusWire,
+    pub(crate) choice: AnchorAxisChoiceWire,
+}
+
+impl Default for AnchorAxisWire {
+    fn default() -> Self {
+        Self {
+            relative_from: None,
+            relative_from_status: AnchorValueStatusWire::Missing,
+            choice: AnchorAxisChoiceWire::Missing,
+        }
+    }
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnchorSimplePositionWire {
+    pub(crate) enabled: Option<bool>,
+    pub(crate) status: AnchorValueStatusWire,
+    pub(crate) x_pt: Option<f64>,
+    pub(crate) x_status: AnchorValueStatusWire,
+    pub(crate) y_pt: Option<f64>,
+    pub(crate) y_status: AnchorValueStatusWire,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnchorExtentWire {
+    pub(crate) width_pt: Option<f64>,
+    pub(crate) height_pt: Option<f64>,
+    pub(crate) width_status: AnchorValueStatusWire,
+    pub(crate) height_status: AnchorValueStatusWire,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnchorRelativeSizeAxisWire {
+    pub(crate) relative_from: Option<String>,
+    pub(crate) relative_from_status: AnchorValueStatusWire,
+    pub(crate) fraction: Option<f64>,
+    pub(crate) fraction_status: AnchorValueStatusWire,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnchorRelativeSizeWire {
+    pub(crate) horizontal: Option<AnchorRelativeSizeAxisWire>,
+    pub(crate) vertical: Option<AnchorRelativeSizeAxisWire>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnchorPointWire {
+    pub(crate) x: Option<i64>,
+    pub(crate) y: Option<i64>,
+    pub(crate) raw_x: Option<String>,
+    pub(crate) raw_y: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnchorPolygonWire {
+    pub(crate) edited: bool,
+    pub(crate) coordinate_space: AnchorPolygonSpaceWire,
+    pub(crate) points: Vec<AnchorPointWire>,
+    pub(crate) invalid_point_count: usize,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnchorPolygonSpaceWire {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+}
+
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum AnchorWrapKindWire {
+    #[default]
+    Missing,
+    Invalid,
+    None,
+    Square,
+    Tight,
+    Through,
+    TopAndBottom,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnchorWrapWire {
+    pub(crate) kind: AnchorWrapKindWire,
+    pub(crate) authored_kinds: Vec<String>,
+    pub(crate) side: Option<String>,
+    pub(crate) distances: AnchorEdgesWire,
+    pub(crate) effect_extent: Option<AnchorEdgesWire>,
+    pub(crate) polygon: Option<AnchorPolygonWire>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnchorBehaviorWire {
+    pub(crate) behind_doc: Option<bool>,
+    pub(crate) behind_doc_status: AnchorValueStatusWire,
+    pub(crate) relative_height: Option<u32>,
+    pub(crate) relative_height_status: AnchorValueStatusWire,
+    pub(crate) locked: Option<bool>,
+    pub(crate) locked_status: AnchorValueStatusWire,
+    pub(crate) allow_overlap: Option<bool>,
+    pub(crate) allow_overlap_status: AnchorValueStatusWire,
+    pub(crate) layout_in_cell: Option<bool>,
+    pub(crate) layout_in_cell_status: AnchorValueStatusWire,
+}
+
+impl Default for AnchorBehaviorWire {
+    fn default() -> Self {
+        Self {
+            behind_doc: None,
+            behind_doc_status: AnchorValueStatusWire::Missing,
+            relative_height: None,
+            relative_height_status: AnchorValueStatusWire::Missing,
+            locked: None,
+            locked_status: AnchorValueStatusWire::Missing,
+            allow_overlap: None,
+            allow_overlap_status: AnchorValueStatusWire::Missing,
+            layout_in_cell: None,
+            layout_in_cell_status: AnchorValueStatusWire::Missing,
+        }
+    }
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnchorRawTransformWire {
+    pub(crate) offset_x_emu: Option<f64>,
+    pub(crate) offset_y_emu: Option<f64>,
+    pub(crate) extent_width_emu: Option<f64>,
+    pub(crate) extent_height_emu: Option<f64>,
+    pub(crate) child_offset_x_emu: Option<f64>,
+    pub(crate) child_offset_y_emu: Option<f64>,
+    pub(crate) child_extent_width_emu: Option<f64>,
+    pub(crate) child_extent_height_emu: Option<f64>,
+    pub(crate) rotation_units: Option<f64>,
+    pub(crate) flip_h: Option<bool>,
+    pub(crate) flip_v: Option<bool>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnchorResolvedChildFrameWire {
+    pub(crate) offset_x_pt: f64,
+    pub(crate) offset_y_pt: f64,
+    pub(crate) width_pt: f64,
+    pub(crate) height_pt: f64,
+    pub(crate) rotation_deg: f64,
+    pub(crate) flip_h: bool,
+    pub(crate) flip_v: bool,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnchorGroupWire {
+    pub(crate) child_source_id: String,
+    pub(crate) source_index: usize,
+    pub(crate) source_count: usize,
+    pub(crate) transform_chain: Vec<AnchorRawTransformWire>,
+    pub(crate) child_transform: Option<AnchorRawTransformWire>,
+    pub(crate) resolved_child_frame: AnchorResolvedChildFrameWire,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnchorAcquisitionWire {
+    pub(crate) occurrence_id: String,
+    pub(crate) simple_position: AnchorSimplePositionWire,
+    pub(crate) horizontal: AnchorAxisWire,
+    pub(crate) vertical: AnchorAxisWire,
+    pub(crate) extent: AnchorExtentWire,
+    pub(crate) parent_effect_extent: AnchorEdgesWire,
+    pub(crate) anchor_distances: AnchorEdgesWire,
+    pub(crate) relative_size: AnchorRelativeSizeWire,
+    pub(crate) wrap: AnchorWrapWire,
+    pub(crate) behavior: AnchorBehaviorWire,
+    pub(crate) group: Option<AnchorGroupWire>,
 }
 
 /// A drawn shape (wps:wsp inside wp:anchor). Positioned like an anchor image
@@ -1178,11 +1446,10 @@ pub struct ShapeRun {
     /// | "largest". Defaults to "bothSides" when absent. Mirrors ImageRun.wrap_side.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wrap_side: Option<String>,
-    /// ECMA-376 Part 4 §19.1.2.23 `<v:textpath>` — WordArt text laid along the
-    /// shape's path (a text watermark). When set the renderer draws this string,
-    /// scaled to fill the shape box (`fitshape`), rotated by `rotation`, and
-    /// filled with `fill`/`fill_opacity`, INSTEAD of a fill/stroke panel + body
-    /// text. `None` for an ordinary VML shape.
+    /// ECMA-376 Part 4 §19.1.2.23 `<v:textpath>` — WordArt text plus its
+    /// resolved CT_Path / CT_TextPath controls. `textpathok` and `on` govern
+    /// display; `fitshape` / `fitpath` govern fitting. Rotation and paint remain
+    /// shape facts. `None` for an ordinary VML shape.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_path: Option<TextPath>,
     /// ECMA-376 Part 4 §19.1.2.5 `<v:fill opacity>` — the fill's alpha in
@@ -1190,13 +1457,17 @@ pub struct ShapeRun {
     /// watermark semi-transparently. `None` ⇒ fully opaque.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fill_opacity: Option<f64>,
+    #[serde(
+        rename = "__anchorAcquisition",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) anchor_acquisition: Option<AnchorAcquisitionWire>,
 }
 
-/// ECMA-376 Part 4 §19.1.2.23 `<v:textpath>` — a WordArt vector text path. Word
-/// emits this for text watermarks (the `PowerPlusWaterMarkObject` shape). The
-/// text is stretched to fit the shape's bounding box (`fitshape`, the WordArt
-/// `#_x0000_t136` shapetype default), so the on-screen size derives from the
-/// shape geometry rather than the nominal `font-size` in the textpath style.
+/// ECMA-376 Part 4 §19.1.2.23 `<v:textpath>` — a WordArt vector text path.
+/// The authored font properties are preserved together with resolved controls;
+/// downstream acquisition applies display and fitting only when those controls
+/// request it.
 #[derive(Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct TextPath {
@@ -1212,6 +1483,35 @@ pub struct TextPath {
     /// `font-style:italic` (or the `italic` keyword in the `font` shorthand).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub italic: bool,
+    /// Resolved transitional VML control facts. These are parser/layout
+    /// implementation detail: serde flattens them into the wire object so the
+    /// internal TypeScript parser-model can acquire WordArt deterministically,
+    /// while the stable public `TextPath` declaration remains unchanged.
+    #[serde(flatten)]
+    pub(crate) vml: VmlTextPathFacts,
+}
+
+/// Private resolved facts from CT_Path / CT_TextPath. Parser construction fills
+/// every boolean with `Some`, including the specified false defaults. `None` is
+/// reserved for a non-parser/default Rust value and therefore remains distinct
+/// from explicit parser provenance on the serialized wire object.
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct VmlTextPathFacts {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) text_path_ok: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) on: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) fit_shape: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) fit_path: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) trim: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) x_scale: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) font_size_pt: Option<f64>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -1355,6 +1655,156 @@ pub struct RunFontFacts {
     pub kerning: Option<f64>,
 }
 
+#[derive(Serialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum TypographyValueStatusWire {
+    #[default]
+    Missing,
+    Invalid,
+    Valid,
+}
+
+/// Parser-private lexical + normalized value. Keeping the lexical form is the
+/// diagnostic seam: required/enum values that are absent or malformed remain
+/// distinguishable from valid zero/false values instead of being guessed.
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TypographyValueWire<T> {
+    pub status: TypographyValueStatusWire,
+    pub raw: Option<String>,
+    pub value: Option<T>,
+}
+
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CtBorderTypographyWire {
+    pub val: TypographyValueWire<String>,
+    pub color: TypographyValueWire<String>,
+    pub theme_color: TypographyValueWire<String>,
+    pub theme_tint: TypographyValueWire<String>,
+    pub theme_shade: TypographyValueWire<String>,
+    pub size_pt: TypographyValueWire<f64>,
+    pub space_pt: TypographyValueWire<f64>,
+    pub shadow: TypographyValueWire<bool>,
+    pub frame: TypographyValueWire<bool>,
+}
+
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UnderlineTypographyWire {
+    pub val: TypographyValueWire<String>,
+    pub color: TypographyValueWire<String>,
+    pub theme_color: TypographyValueWire<String>,
+    pub theme_tint: TypographyValueWire<String>,
+    pub theme_shade: TypographyValueWire<String>,
+}
+
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TypographyLanguagesWire {
+    pub east_asia: Option<String>,
+    pub bidi: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EastAsianLayoutTypographyWire {
+    pub vert: Option<bool>,
+    pub vert_compress: Option<bool>,
+    pub combine: Option<bool>,
+    pub combine_brackets: TypographyValueWire<String>,
+}
+
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RubyGuideRunTypographyWire {
+    pub text: String,
+    pub font_family: Option<String>,
+    pub font_size_pt: Option<f64>,
+    pub bold: bool,
+    pub italic: bool,
+    pub color: Option<String>,
+    pub language: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RubyTypographyWire {
+    pub align: TypographyValueWire<String>,
+    pub base_font_size_pt: TypographyValueWire<f64>,
+    pub raise_pt: TypographyValueWire<f64>,
+    pub language: TypographyValueWire<String>,
+    pub guide_runs: Vec<RubyGuideRunTypographyWire>,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RevisionTypographyWire {
+    pub kind: String,
+    pub id: TypographyValueWire<String>,
+    pub author: Option<String>,
+    pub date: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RunTypographyWire {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub underline: Option<UnderlineTypographyWire>,
+    pub strike: bool,
+    pub double_strike: bool,
+    pub caps: bool,
+    pub small_caps: bool,
+    pub color_auto: bool,
+    pub vertical_align: TypographyValueWire<String>,
+    pub position_pt: TypographyValueWire<f64>,
+    pub snap_to_grid: Option<bool>,
+    pub character_spacing_pt: Option<f64>,
+    pub character_scale: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fit_text: Option<FitTextSpecWire>,
+    pub kerning_threshold_pt: Option<f64>,
+    pub emphasis: TypographyValueWire<String>,
+    pub languages: TypographyLanguagesWire,
+    pub east_asian_layout: EastAsianLayoutTypographyWire,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border: Option<CtBorderTypographyWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ruby: Option<RubyTypographyWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<RevisionTypographyWire>,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FitTextSpecWire {
+    pub val_twips: f64,
+    pub id: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ParagraphTypographyBordersWire {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top: Option<CtBorderTypographyWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub right: Option<CtBorderTypographyWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bottom: Option<CtBorderTypographyWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub left: Option<CtBorderTypographyWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub between: Option<CtBorderTypographyWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bar: Option<CtBorderTypographyWire>,
+}
+
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ParagraphTypographyWire {
+    pub borders: ParagraphTypographyBordersWire,
+}
+
 #[derive(Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct FieldRun {
@@ -1413,6 +1863,11 @@ pub struct FieldRun {
     /// or fallback text) draws through the same per-glyph stamp as a plain run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub emphasis_mark: Option<String>,
+    #[serde(
+        rename = "__typographyAcquisition",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) typography_acquisition: Option<RunTypographyWire>,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
@@ -1612,6 +2067,11 @@ pub struct TextRun {
     /// the note's 1-based position, not the raw id). `None` for ordinary runs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note_ref: Option<NoteRef>,
+    #[serde(
+        rename = "__typographyAcquisition",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) typography_acquisition: Option<RunTypographyWire>,
 }
 
 /// A footnote / endnote reference marker. The displayed number is resolved by
@@ -1638,6 +2098,10 @@ pub struct RunRevision {
     /// `<w:ins w:date>` / `<w:del w:date>` ISO-8601 timestamp.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub date: Option<String>,
+    /// ECMA-376 §17.13.5 requires `w:id`. It stays off the stable public
+    /// revision shape and is projected through the private typography wire.
+    #[serde(skip)]
+    pub(crate) typography_id: TypographyValueWire<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -1650,6 +2114,10 @@ pub struct RubyAnnotation {
     /// in pt (ECMA-376 §17.3.3.12).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hps_raise_pt: Option<f64>,
+    /// Rich rubyPr/rt facts are parser acquisition data, not a public model
+    /// expansion. The owning TextRun projects them through its private wire.
+    #[serde(skip)]
+    pub(crate) typography: Option<RubyTypographyWire>,
 }
 
 /// One formatting run (`<w:r>`) inside a shape-text paragraph. Mirrors the
@@ -1897,8 +2365,9 @@ pub struct ImageRun {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wrap_side: Option<String>,
     /// ECMA-376 §20.4.2.3 `wp:anchor/@allowOverlap` — whether this floating
-    /// object may overlap other floats. Spec default is true (attribute optional);
-    /// `false` mandates the renderer reposition the object to prevent any overlap.
+    /// object may overlap other floats. CT_Anchor requires the attribute;
+    /// parser-originated missing/invalid status is retained on the private wire.
+    /// This public boolean keeps the historical hand-built-model fallback.
     /// Inline images carry true (the no-constraint value).
     pub allow_overlap: bool,
     /// ECMA-376 §20.4.3.1 wp:align (positionH/wp:align). When present the
@@ -1928,6 +2397,11 @@ pub struct ImageRun {
     pub anchor_x_relative_from: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anchor_y_relative_from: Option<String>,
+    #[serde(
+        rename = "__anchorAcquisition",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) anchor_acquisition: Option<AnchorAcquisitionWire>,
 }
 
 fn is_zero_f64(v: &f64) -> bool {
@@ -2000,8 +2474,9 @@ pub struct ChartRun {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wrap_side: Option<String>,
     /// ECMA-376 §20.4.2.3 `wp:anchor/@allowOverlap` — whether this floating
-    /// object may overlap other floats. Spec default is true (attribute optional);
-    /// `false` mandates the renderer reposition the object to prevent any overlap.
+    /// object may overlap other floats. CT_Anchor requires the attribute;
+    /// parser-originated missing/invalid status is retained on the private wire.
+    /// This public boolean keeps the historical hand-built-model fallback.
     /// Inline charts carry true (the no-constraint value), which is omitted from
     /// JSON; the TypeScript side reads an absent value with `?? true`.
     #[serde(skip_serializing_if = "is_true")]
@@ -2031,6 +2506,11 @@ pub struct ChartRun {
     pub anchor_x_relative_from: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anchor_y_relative_from: Option<String>,
+    #[serde(
+        rename = "__anchorAcquisition",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) anchor_acquisition: Option<AnchorAcquisitionWire>,
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]

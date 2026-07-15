@@ -1,9 +1,82 @@
-import type { TextLayoutService, TextShapeResult } from './text.js';
+import { symbolFontToUnicode } from '@silurus/ooxml-core';
+import type { NumberingInfo, TabStop } from '../types.js';
+import { nextTabStop, type TextLayoutService, type TextShapeResult } from './text.js';
 import type { NumberingMarkerShapeInput } from './types.js';
 
 export interface NumberingMarkerTextLayout {
   readonly shape: TextShapeResult;
   readonly fontSizePx: number;
+}
+
+export interface NumberingMarkerGeometry {
+  readonly bodyOffsetPt: number;
+  readonly markerText: string;
+  readonly markerWidthPt: number;
+  readonly markerShiftPt: number;
+  readonly shape: TextShapeResult | null;
+}
+
+/** Marker interval in the paragraph's logical-leading coordinate system. */
+export function numberingMarkerLogicalInterval(input: Readonly<{
+  leadingIndentPt: number;
+  authoredFirstIndentPt: number;
+  markerShiftPt: number;
+  markerWidthPt: number;
+}>): Readonly<{ startPt: number; endPt: number }> {
+  const startPt = input.leadingIndentPt
+    + input.authoredFirstIndentPt
+    + input.markerShiftPt;
+  return { startPt, endPt: startPt + input.markerWidthPt };
+}
+
+/** Convert the same logical-leading marker interval to physical page X. Keeping
+ * this conversion beside intrinsic marker geometry prevents RTL auto-width
+ * acquisition and final retained placement from choosing different origins. */
+export function numberingMarkerPhysicalLeft(input: Readonly<{
+  baseRtl: boolean;
+  paragraphXPt: number;
+  availableWidthPt: number;
+  authoredFirstIndentPt: number;
+  markerShiftPt: number;
+  markerWidthPt: number;
+}>): number {
+  const logicalStartPt = input.authoredFirstIndentPt + input.markerShiftPt;
+  return input.baseRtl
+    ? input.paragraphXPt + input.availableWidthPt - logicalStartPt - input.markerWidthPt
+    : input.paragraphXPt + logicalStartPt;
+}
+
+/** Apply retained marker geometry to an otherwise parser-independent paragraph context. */
+export function applyNumberingBodyOffset<Context extends Readonly<{
+  baseRtl: boolean;
+  firstIndentPt: number;
+  physicalIndentLeftPt: number;
+  defaultTabPt: number;
+}>>(
+  context: Context,
+  input: Readonly<{
+    numbering: NumberingInfo | null;
+    markerInput?: NumberingMarkerShapeInput;
+    authoredFirstIndentPt: number;
+    tabStops: readonly TabStop[];
+    defaultTabPt?: number;
+    service?: TextLayoutService;
+  }>,
+): Context {
+  const { numbering, markerInput, service } = input;
+  const hasMarker = numbering != null
+    && (numbering.text !== '' || numbering.picBulletImagePath != null);
+  const usesResolvedBodyOffset = hasMarker
+    && (!context.baseRtl
+      || ((numbering?.suff || 'tab') === 'tab' && input.authoredFirstIndentPt < 0));
+  if (!numbering || !markerInput || !service || !usesResolvedBodyOffset) return context;
+  const geometry = resolveNumberingMarkerGeometry(numbering, markerInput, {
+    authoredFirstIndentPt: input.authoredFirstIndentPt,
+    physicalIndentLeftPt: context.physicalIndentLeftPt,
+    tabStops: input.tabStops,
+    defaultTabPt: input.defaultTabPt ?? context.defaultTabPt,
+  }, service);
+  return { ...context, firstIndentPt: geometry.bodyOffsetPt };
 }
 
 /** Shape numbering text through the document's one font authority. ECMA-376
@@ -34,4 +107,56 @@ export function shapeNumberingMarkerText(
     measure: true,
   });
   return { shape, fontSizePx: input.fontSizePt * scale };
+}
+
+/** Resolve the marker and suffix once in document points. The body offset is a
+ * measurement input, not paint-time decoration: line breaking and retained
+ * placement must consume this same value or a hanging list acquires a different
+ * first-line partition from the one it paints. */
+export function resolveNumberingMarkerGeometry(
+  numbering: NumberingInfo,
+  markerInput: NumberingMarkerShapeInput,
+  input: Readonly<{
+    authoredFirstIndentPt: number;
+    physicalIndentLeftPt: number;
+    tabStops: readonly TabStop[];
+    defaultTabPt: number;
+  }>,
+  service: TextLayoutService,
+): NumberingMarkerGeometry {
+  const markerText = numbering.picBulletImagePath
+    ? ''
+    : symbolFontToUnicode(numbering.text, numbering.fontFamily ?? null);
+  const markerShape = markerText
+    ? shapeNumberingMarkerText(markerInput, markerText, 1, service)?.shape ?? null
+    : null;
+  const markerWidthPt = numbering.picBulletImagePath
+    ? numbering.picBulletWidthPt ?? markerInput.fontSizePt
+    : markerShape?.advancePt ?? 0;
+  const markerShiftPt = numbering.jc === 'right'
+    ? -markerWidthPt
+    : numbering.jc === 'center' ? -markerWidthPt / 2 : 0;
+  const markerEndPt = input.authoredFirstIndentPt + markerShiftPt + markerWidthPt;
+  const suffix = numbering.suff || 'tab';
+  let bodyOffsetPt = markerEndPt;
+  if (suffix === 'space') {
+    bodyOffsetPt += shapeNumberingMarkerText(markerInput, ' ', 1, service)?.shape.advancePt ?? 0;
+  } else if (suffix === 'tab') {
+    bodyOffsetPt = 0;
+    if (markerEndPt > 0) {
+      const stop = nextTabStop(
+        input.physicalIndentLeftPt + markerEndPt,
+        [...input.tabStops],
+        input.defaultTabPt,
+      );
+      bodyOffsetPt = stop ? stop.pos - input.physicalIndentLeftPt : markerEndPt;
+    }
+  }
+  return {
+    bodyOffsetPt,
+    markerText,
+    markerWidthPt,
+    markerShiftPt,
+    shape: markerShape,
+  };
 }

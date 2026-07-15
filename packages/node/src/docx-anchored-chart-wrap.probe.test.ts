@@ -225,12 +225,19 @@ describe.skipIf(!skia || !docxMod || !rendererMod)(
   () => {
     let doc: Any;
     let chart: Any;
+    let layout: Any;
     let rendered: { data: Uint8ClampedArray; w: number; h: number };
 
     beforeAll(async () => {
       const { parseDocx } = docxMod as { parseDocx: (bytes: Uint8Array) => Any };
       doc = parseDocx(makeDocx());
       [chart] = collectRuns(doc.body, 'chart');
+      const restoreOffscreen = installOffscreenCanvasShim(factory);
+      try {
+        layout = (rendererMod as { layoutDocument: (model: Any) => Any }).layoutDocument(doc);
+      } finally {
+        restoreOffscreen();
+      }
       rendered = await renderPage(doc);
     });
 
@@ -246,6 +253,9 @@ describe.skipIf(!skia || !docxMod || !rendererMod)(
       expect(chart.anchorXAlign).toBe('right');
       expect(chart.anchorXRelativeFrom).toBe('margin');
       expect(chart.anchorYRelativeFrom).toBe('paragraph');
+      expect(chart.__anchorAcquisition?.vertical?.choice).toEqual({
+        kind: 'offset', valuePt: 0,
+      });
     });
 
     // Letter page, 72pt margins: right-aligned 216pt chart occupies x=324..540.
@@ -254,6 +264,31 @@ describe.skipIf(!skia || !docxMod || !rendererMod)(
     const chartRight = 540;
     const chartTop = 72;
     const chartBottom = 216;
+
+    it('retains one chart command at the exact margin/right paragraph frame', () => {
+      const paragraph = layout.pages[0]?.fragments[0]?.fragment;
+      expect(paragraph?.drawings).toHaveLength(1);
+      expect(paragraph?.drawings[0]).toMatchObject({
+        flowBounds: {
+          xPt: chartLeft, yPt: chartTop,
+          widthPt: chartRight - chartLeft, heightPt: chartBottom - chartTop,
+        },
+        commands: [{
+          kind: 'resource', resourceKind: 'chart',
+          rect: {
+            xPt: chartLeft, yPt: chartTop,
+            widthPt: chartRight - chartLeft, heightPt: chartBottom - chartTop,
+          },
+        }],
+        anchorLayer: {
+          behindDoc: false, relativeHeight: 1,
+          horizontalOwnership: 'page', verticalOwnership: 'host',
+        },
+      });
+      expect(paragraph?.resources).toContainEqual(expect.objectContaining({
+        kind: 'chart', resourceKey: paragraph.drawings[0].commands[0].resourceKey,
+      }));
+    });
 
     it('paints substantial chart ink in the right-aligned margin box', () => {
       const ink = nonWhiteInRect(

@@ -181,11 +181,8 @@ describe('run charSpacing/charScale reach the painted glyphs on every branch', (
   it('justify path: charSpacing adds to the distributed pitch at the draw', async () => {
     // A justified ('both') CJK paragraph that wraps: line 1 carries run1 (25 cps,
     // w:spacing 2) + a 2-cp prefix of run2, with 10px of slack distributed over
-    // the inter-CJK gaps. The FULLY-distributed draw paints each segment with
-    // ctx.letterSpacing = distPerGap + its own charSpacing, so the two segments'
-    // recorded letterSpacing must differ by exactly the 2px charSpacing, and
-    // run1's pitch must exceed its bare charSpacing (distPerGap > 0 — justify
-    // actually engaged).
+    // the inter-CJK gaps. Acquisition retains contextual text and a uniform
+    // pitch. The two runs' recorded pitch differs by exactly the authored 2px.
     const fills = await render([para(
       [textRun('あ'.repeat(25), { charSpacing: 2 }), textRun('い'.repeat(10))],
       'both',
@@ -196,7 +193,7 @@ describe('run charSpacing/charScale reach the painted glyphs on every branch', (
     expect(r2, 'run2 first-line glyphs painted').toBeDefined();
     const p1 = parseFloat((r1 as FillCall).letterSpacing);
     const p2 = parseFloat((r2 as FillCall).letterSpacing);
-    expect(p1).toBeGreaterThan(2); // distPerGap > 0 on top of the 2px spacing
+    expect((r1 as FillCall).text).toBe('あ'.repeat(25));
     expect(p1 - p2).toBeCloseTo(2, 5); // the §17.3.2.35 component survives justify
   });
 

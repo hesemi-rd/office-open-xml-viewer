@@ -333,17 +333,15 @@ function bodyPaginationGeometry(pages: PaginatedBodyElement[][]) {
   return {
     pageCount: pages.length,
     pages: pages.map((page) => page.map((el) => {
-      const runtime = el as PaginatedBodyElement & {
-        layoutLines?: Array<{ topY?: number }>;
-        layoutLinesInputs?: { hasFloats: boolean };
-      };
+      const placed = bodyFragmentFor(el);
+      const paragraph = placed?.fragment.kind === 'paragraph' ? placed.fragment : undefined;
       return {
         type: el.type,
         lineSlice: sliceOf(el) ?? null,
         columnIndex: el.colIndex ?? null,
         columnTopPt: el.colTopPt ?? null,
-        measuredLineTopsPt: runtime.layoutLines?.map((line) => line.topY ?? null) ?? null,
-        measuredWithFloats: runtime.layoutLinesInputs?.hasFloats ?? null,
+        measuredLineTopsPt: paragraph?.lines.map((line) => line.bounds.yPt ?? null) ?? null,
+        measuredWithFloats: paragraph ? paragraph.exclusions.length > 0 : null,
       };
     })),
   };
@@ -375,13 +373,15 @@ describe('computePages — shared paragraph measurement migration geometry', () 
       [{ start: 2, end: 7 }],
       [{ start: 7, end: 9 }, null],
     ]);
-    const measuredTops = Array.from({ length: 9 }, (_, index) => 80 + index * 20);
     expect(geometry.pages.flatMap((page) => page)
       .filter((el) => el.lineSlice !== null)
       .map((el) => el.measuredLineTopsPt)).toEqual([
-      measuredTops,
-      measuredTops,
-      measuredTops,
+      [80, 100],
+      // A continuation owns page-local retained geometry. Carrying the source
+      // paragraph's absolute Y values into later pages made its ink overlap the
+      // next story even though the paginator advanced by the correct slice.
+      [75, 95, 115, 135, 155],
+      [75, 95],
     ]);
     expect(pages.findIndex((page) => page.some((el) => textOf(el) === followingText))).toBe(2);
   });
@@ -407,7 +407,7 @@ describe('computePages — shared paragraph measurement migration geometry', () 
     expect(geometry.pageCount).toBe(2);
     expect(target?.lineSlice).toEqual({ start: 0, end: 2 });
     expect(target?.measuredWithFloats).toBe(false);
-    expect(target?.measuredLineTopsPt).toEqual([null, null]);
+    expect(target?.measuredLineTopsPt).toEqual([50, 70]);
   });
 
   it('remeasures an unplaced paragraph at the next unequal-width column', () => {
@@ -431,19 +431,16 @@ describe('computePages — shared paragraph measurement migration geometry', () 
     ];
 
     const pages = computePages(body, unequalColumns, makeCtx());
-    const target = pages[0]?.find((el) => textOf(el) === targetText) as
-      | (PaginatedBodyElement & {
-          layoutLinesInputs?: { paraW: number };
-          layoutLines?: Array<{ topY?: number }>;
-        })
-      | undefined;
+    const target = pages[0]?.find((el) => textOf(el) === targetText);
+    const placed = target ? bodyFragmentFor(target) : undefined;
+    const retained = placed?.fragment.kind === 'paragraph' ? placed.fragment : undefined;
 
     expect(pages).toHaveLength(1);
     expect(target?.colIndex).toBe(1);
     expect(target?.colTopPt).toBe(20);
     expect(target?.lineSlice).toEqual({ start: 0, end: 2 });
-    expect(target?.layoutLinesInputs?.paraW).toBe(48);
-    expect(target?.layoutLines?.map((line) => line.topY ?? null)).toEqual([null, null]);
+    expect(placed?.widthPt).toBe(48);
+    expect(retained?.lines.map((line) => line.bounds.yPt ?? null)).toEqual([20, 40]);
   });
 
   // ECMA-376 §17.6.4 (cols / equalWidth=false / per-<w:col> w:w) — a newspaper
@@ -488,23 +485,8 @@ describe('computePages — shared paragraph measurement migration geometry', () 
     const pages = computePages(body, unequalColumns, makeCtx());
     expect(pages).toHaveLength(1);
 
-    // Every slice of the (single) paragraph, with its painted line geometry.
-    type LineLike = { segments: { measuredWidth?: number; text?: string }[] };
-    type Slice = PaginatedBodyElement & {
-      lineSlice?: { start: number; end: number };
-      layoutLines?: LineLike[];
-      layoutLinesInputs?: { paraW: number };
-    };
-    const slices = pages[0].filter((el) => el.type === 'paragraph') as Slice[];
-    const paintedLines = (s: Slice): LineLike[] => {
-      const all = s.layoutLines ?? [];
-      const sl = s.lineSlice;
-      return sl ? all.slice(sl.start, sl.end) : all;
-    };
-    const lineWidth = (l: LineLike): number =>
-      l.segments.reduce((sum, seg) => sum + (seg.measuredWidth ?? 0), 0);
-    const lineChars = (l: LineLike): number =>
-      l.segments.reduce((sum, seg) => sum + (seg.text ? [...seg.text].length : 0), 0);
+    // Every slice of the (single) paragraph, with its retained line geometry.
+    const slices = paragraphSlices(pages);
 
     const col0Lines = slices.filter((s) => s.colIndex === 0).flatMap(paintedLines);
     const col1Lines = slices.filter((s) => s.colIndex === 1).flatMap(paintedLines);
@@ -530,7 +512,7 @@ describe('computePages — shared paragraph measurement migration geometry', () 
     // NARROW column width (no stale wide-column measurement leaks through).
     expect(col1Lines.reduce((sum, l) => sum + lineChars(l), 0)).toBe(10);
     for (const s of slices.filter((sl) => sl.colIndex === 1)) {
-      expect(s.layoutLinesInputs?.paraW).toBe(48);
+      expect(bodyFragmentFor(s)?.widthPt).toBe(48);
     }
   });
 
@@ -605,25 +587,26 @@ describe('computePages — shared paragraph measurement migration geometry', () 
     expect.soft(col1Slices.every((slice) => (slice.lineSlice?.start ?? 0) > 0)).toBe(true);
   });
 
-  type RuntimeLine = { segments: { measuredWidth?: number; text?: string }[] };
-  type RuntimeSlice = PaginatedBodyElement & {
-    lineSlice?: { start: number; end: number; continues?: boolean };
-    layoutLines?: RuntimeLine[];
-    layoutLinesInputs?: { paraW: number };
+  type RuntimeLine = NonNullable<ReturnType<typeof retainedParagraphOf>>['lines'][number];
+  type RuntimeSlice = PaginatedBodyElement;
+  const retainedParagraphOf = (slice: RuntimeSlice) => {
+    const placed = bodyFragmentFor(slice);
+    return placed?.fragment.kind === 'paragraph' ? placed.fragment : undefined;
   };
   const paragraphSlices = (pages: PaginatedBodyElement[][]): RuntimeSlice[] =>
     pages.flat().filter((el) => el.type === 'paragraph') as RuntimeSlice[];
   const paintedLines = (slice: RuntimeSlice): RuntimeLine[] => {
-    const lines = slice.layoutLines ?? [];
-    return slice.lineSlice
-      ? lines.slice(slice.lineSlice.start, slice.lineSlice.end)
-      : lines;
+    const paragraph = retainedParagraphOf(slice);
+    return [...(paragraph?.lines ?? [])];
   };
   const lineWidth = (line: RuntimeLine): number =>
-    line.segments.reduce((sum, segment) => sum + (segment.measuredWidth ?? 0), 0);
+    line.placements.reduce(
+      (sum, placement) => sum + ('advancePt' in placement ? placement.advancePt : 0),
+      0,
+    );
   const lineChars = (line: RuntimeLine): number =>
-    line.segments.reduce(
-      (sum, segment) => sum + (segment.text ? [...segment.text].length : 0),
+    line.placements.reduce(
+      (sum, placement) => sum + (placement.kind === 'text' ? [...placement.text].length : 0),
       0,
     );
 
@@ -649,8 +632,11 @@ describe('computePages — shared paragraph measurement migration geometry', () 
     expect(col1Slices.length).toBeGreaterThan(0);
     expect(col1Slices.every((slice) => (slice.lineSlice?.start ?? 0) > 0)).toBe(true);
     expect(slices.every((slice) => slice.lineSlice?.continues === undefined)).toBe(true);
-    expect(new Set(slices.map((slice) => slice.layoutLines)).size).toBe(1);
-    expect(slices.every((slice) => slice.layoutLinesInputs?.paraW === sharedWidth)).toBe(true);
+    expect(slices.every((slice) => {
+      const range = slice.lineSlice;
+      return range === undefined || paintedLines(slice).length === range.end - range.start;
+    })).toBe(true);
+    expect(slices.every((slice) => bodyFragmentFor(slice)?.widthPt === sharedWidth)).toBe(true);
   });
 
   it('composes remainder boundaries across three unequal-width columns', () => {
@@ -684,7 +670,7 @@ describe('computePages — shared paragraph measurement migration geometry', () 
     expect(col1Lines.every((line) => lineWidth(line) <= 48 + 1e-6)).toBe(true);
     expect(col2Lines.every((line) => lineWidth(line) <= 30 + 1e-6)).toBe(true);
     expect(slices.flatMap(paintedLines).reduce((sum, line) => sum + lineChars(line), 0)).toBe(40);
-    expect(col2Slices.every((slice) => slice.layoutLinesInputs?.paraW === 30)).toBe(true);
+    expect(col2Slices.every((slice) => bodyFragmentFor(slice)?.widthPt === 30)).toBe(true);
   });
 
   it('does not re-apply first-line indent when re-wrapping a continuation', () => {
@@ -749,7 +735,7 @@ describe('computePages — shared paragraph measurement migration geometry', () 
     expect(firstCol1Slice?.lineSlice?.continues).toBe(true);
     expect(placed?.fragment.kind).toBe('paragraph');
     if (placed?.fragment.kind === 'paragraph') {
-      expect(placed.fragment.leadingSpacePt).toBe(0);
+      expect(placed.fragment.spacing.beforePt).toBe(0);
     }
   });
 });

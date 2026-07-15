@@ -452,7 +452,7 @@ export function normalizeTextBoxInput(shape: ShapeRun): readonly ParagraphLayout
 export function paintParagraphLayout(node: ParagraphLayout, context: CanvasPaintContext): void;
 ```
 
-- [ ] **Step 1: Add failing behavior tests**
+- [x] **Step 1: Add failing behavior tests**
 
 Add synthetic tests for numbered paragraphs, bidi runs, vertical text, tab
 leaders, floating-wrap exclusions, continuation slices, contextual spacing,
@@ -476,7 +476,7 @@ Add one matrix-driven test covering every `DocRun` arm and associated resource:
 | `ptab` | positioned tab placement | paragraph |
 | picture bullet | image resource key and marker bounds | paragraph/resources |
 
-- [ ] **Step 2: Run tests to verify Red**
+- [x] **Step 2: Run tests to verify Red**
 
 Run:
 
@@ -487,7 +487,7 @@ pnpm vitest run packages/docx/src/layout/paragraph.test.ts packages/docx/src/pai
 Expected: new contract tests fail because paint still delegates to
 `renderBodyParagraphLines` and scale-2 paint remeasures.
 
-- [ ] **Step 3: Move line acquisition and glyph geometry into layout**
+- [x] **Step 3: Move line acquisition and glyph geometry into layout**
 
 Adapt existing `buildSegments`, bidi/tab resolution, `layoutLines`, numbering,
 field resolution, and paragraph decoration calculations into `layout/text.ts`
@@ -518,7 +518,7 @@ Delete `fitMeasureReuseEnabled`, `fragmentPaintEnabled`,
 `stampParagraphLines`. Remove `source: DocParagraph` and `MeasuredParagraph` from
 paint-facing fragments; retain only `SourceRef` and self-contained paint data.
 
-- [ ] **Step 4: Verify Green and prove deletion**
+- [x] **Step 4: Verify Green and prove deletion**
 
 Run:
 
@@ -669,7 +669,12 @@ export function splitTableLayout(table: TableLayout, availableHeightPt: number):
 
 Cover repeated header rows, `cantSplit`, mid-cell paragraph continuation,
 vertical merge continuation, nested table continuation, negative table indent,
-floating table wrapping, and a float that must move to the next page. Assert
+floating table wrapping, and a float that must move to the next page. Include a
+`PAGE` field in a repeated header and assert every emitted header occurrence is
+acquired with its own physical/display page context. Also place `PAGE` in a
+non-leading cell block that continues onto another page and assert its retained
+source uses the original `BlockContinuationRange.blockIndex`, not the slice-local
+block index. Assert
 logical rows may have several disjoint fragments, per-cell content ranges are
 disjoint and exhaustive, repeated headers use `repeated-header` ownership and do
 not claim source content twice, fragments reuse the same resolved columns, and
