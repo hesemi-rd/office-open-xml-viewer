@@ -149,6 +149,48 @@ function contains(outer: LayoutRect, inner: LayoutRect): boolean {
     && inner.yPt + inner.heightPt <= outer.yPt + outer.heightPt;
 }
 
+function retainUniqueNodeId(
+  id: string,
+  pageIds: Set<string>,
+  documentIds: Set<string>,
+): void {
+  if (documentIds.has(id)) {
+    throw new LayoutInvariantError('INVALID_REFERENCE', `duplicate retained node id ${id}`);
+  }
+  documentIds.add(id);
+  pageIds.add(id);
+}
+
+function collectRetainedNodeIds(
+  node: PaintNode,
+  pageIds: Set<string>,
+  documentIds: Set<string>,
+): void {
+  retainUniqueNodeId(node.id, pageIds, documentIds);
+  if (node.kind === 'paragraph') {
+    node.drawings.forEach((drawing) =>
+      collectRetainedNodeIds(drawing, pageIds, documentIds));
+    node.textBoxes.forEach((textBox) =>
+      collectRetainedNodeIds(textBox, pageIds, documentIds));
+    return;
+  }
+  if (node.kind === 'table') {
+    node.rows.forEach((row) => {
+      retainUniqueNodeId(row.id, pageIds, documentIds);
+      row.cells.forEach((cell) => {
+        retainUniqueNodeId(cell.id, pageIds, documentIds);
+        cell.blocks.forEach((block) =>
+          collectRetainedNodeIds(block.layout, pageIds, documentIds));
+      });
+    });
+    return;
+  }
+  if (node.kind === 'textbox') {
+    node.paragraphs.forEach((paragraph) =>
+      collectRetainedNodeIds(paragraph, pageIds, documentIds));
+  }
+}
+
 function requireDrawingGeometry(node: DrawingLayout, path: string): void {
   if (node.transform) {
     for (const key of ['a', 'b', 'c', 'd', 'e', 'f'] as const) {
@@ -200,10 +242,27 @@ function requireDrawingGeometry(node: DrawingLayout, path: string): void {
 
 export function assertDocumentLayout(layout: DocumentLayout): void {
   assertPlainData(layout, 'layout');
+  const documentRetainedNodeIds = new Set<string>();
   layout.pages.forEach((page, pageIndex) => {
+    if (!Number.isInteger(page.pageIndex) || page.pageIndex !== pageIndex) {
+      throw new LayoutInvariantError(
+        'INVALID_REFERENCE',
+        `pages[${pageIndex}] has invalid page index ${page.pageIndex}`,
+      );
+    }
     requireRect(page.geometry, `pages[${pageIndex}].geometry`);
     requireFinite(page.geometry.contentTopPt, `pages[${pageIndex}].geometry.contentTopPt`);
     requireFinite(page.geometry.contentBottomPt, `pages[${pageIndex}].geometry.contentBottomPt`);
+    if (
+      page.geometry.contentTopPt < 0
+      || page.geometry.contentTopPt > page.geometry.contentBottomPt
+      || page.geometry.contentBottomPt > page.geometry.heightPt
+    ) {
+      throw new LayoutInvariantError(
+        'INVALID_GEOMETRY',
+        `pages[${pageIndex}] has invalid effective page edges`,
+      );
+    }
 
     const domains = new Map<string, FlowDomain>();
     page.flowDomains.forEach((domain, domainIndex) => {
@@ -213,6 +272,88 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
       }
       domains.set(domain.id, domain);
     });
+
+    if (page.parityBlank && (
+      page.flowDomains.length > 0
+      || (page.sectionRegions?.length ?? 0) > 0
+      || pageLayerNodes(page).length > 0
+      || page.layers.paintOrder.length > 0
+      || page.readingOrder.length > 0
+      || (page.bookmarkStarts?.length ?? 0) > 0
+    )) {
+      throw new LayoutInvariantError(
+        'INVALID_REFERENCE',
+        `pages[${pageIndex}] parity blank retains page content`,
+      );
+    }
+
+    const sectionOccurrenceIds = new Set<string>();
+    if (page.sectionOccurrenceId !== undefined) {
+      if (page.sectionOccurrenceId.length === 0) {
+        throw new LayoutInvariantError(
+          'INVALID_REFERENCE',
+          `pages[${pageIndex}] has an empty section occurrence id`,
+        );
+      }
+      sectionOccurrenceIds.add(page.sectionOccurrenceId);
+    }
+
+    if (page.sectionRegions) {
+      const regionIds = new Set<string>();
+      const bodyOwnership = new Map<string, number>();
+      page.sectionRegions.forEach((region, regionIndex) => {
+        const path = `pages[${pageIndex}].sectionRegions[${regionIndex}]`;
+        if (region.id.length === 0 || regionIds.has(region.id)) {
+          throw new LayoutInvariantError('INVALID_REFERENCE', `${path} has an invalid region id`);
+        }
+        regionIds.add(region.id);
+        if (region.sectionOccurrenceId.length === 0) {
+          throw new LayoutInvariantError(
+            'INVALID_REFERENCE',
+            `${path} has an empty section occurrence id`,
+          );
+        }
+        sectionOccurrenceIds.add(region.sectionOccurrenceId);
+        requireFinite(region.blockStartPt, `${path}.blockStartPt`);
+        requireFinite(region.blockEndPt, `${path}.blockEndPt`);
+        if (region.blockEndPt < region.blockStartPt) {
+          throw new LayoutInvariantError('INVALID_GEOMETRY', `${path} has a negative block extent`);
+        }
+        region.flowDomainIds.forEach((domainId) => {
+          if (!domains.has(domainId)) {
+            throw new LayoutInvariantError('INVALID_REFERENCE', `${path} references missing flow domain ${domainId}`);
+          }
+          bodyOwnership.set(domainId, (bodyOwnership.get(domainId) ?? 0) + 1);
+        });
+      });
+      page.flowDomains.filter((domain) => domain.kind === 'body').forEach((domain) => {
+        if (bodyOwnership.get(domain.id) !== 1) {
+          throw new LayoutInvariantError(
+            'INVALID_REFERENCE',
+            `${domain.id} has invalid section region ownership`,
+          );
+        }
+      });
+    }
+
+    if (page.pageNumber) {
+      requireFinite(page.pageNumber.displayNumber, `pages[${pageIndex}].pageNumber.displayNumber`);
+      if (!Number.isInteger(page.pageNumber.displayNumber)) {
+        throw new LayoutInvariantError(
+          'INVALID_GEOMETRY',
+          `pages[${pageIndex}] page number is not an integer`,
+        );
+      }
+      if (
+        page.pageNumber.format.length === 0
+        || !sectionOccurrenceIds.has(page.pageNumber.sectionOccurrenceId)
+      ) {
+        throw new LayoutInvariantError(
+          'INVALID_REFERENCE',
+          `pages[${pageIndex}] has an invalid page number section owner`,
+        );
+      }
+    }
 
     const ordinary: PaintNode[] = [];
     try {
@@ -224,9 +365,11 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
       throw error;
     }
     const nodes = new Map<string, PaintNode>();
+    const retainedNodeIds = new Set<string>();
     pageLayerNodes(page).forEach(({ node }, nodeIndex) => {
       const path = `pages[${pageIndex}].nodes[${nodeIndex}]`;
       nodes.set(node.id, node);
+      collectRetainedNodeIds(node, retainedNodeIds, documentRetainedNodeIds);
       requireRect(node.flowBounds, `${path}.flowBounds`);
       requireRect(node.inkBounds, `${path}.inkBounds`);
       if (node.clipBounds) requireRect(node.clipBounds, `${path}.clipBounds`);
@@ -253,6 +396,27 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
         throw new LayoutInvariantError('INVALID_REFERENCE', `invalid reading-order reference ${nodeId}`);
       }
       read.add(nodeId);
+    });
+
+    const bookmarkNames = new Set<string>();
+    page.bookmarkStarts?.forEach((bookmark) => {
+      if (
+        bookmark.name.length === 0
+        || bookmarkNames.has(bookmark.name)
+        || !retainedNodeIds.has(bookmark.nodeId)
+      ) {
+        throw new LayoutInvariantError(
+          'INVALID_REFERENCE',
+          `invalid bookmark node ${bookmark.nodeId}`,
+        );
+      }
+      if (!sectionOccurrenceIds.has(bookmark.sectionOccurrenceId)) {
+        throw new LayoutInvariantError(
+          'INVALID_REFERENCE',
+          `bookmark ${bookmark.name} has an invalid section owner`,
+        );
+      }
+      bookmarkNames.add(bookmark.name);
     });
 
     for (let index = 0; index < ordinary.length; index += 1) {

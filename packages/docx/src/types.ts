@@ -1432,9 +1432,10 @@ export interface ImageRun {
 // ===== Table =====
 
 /**
- * ECMA-376 §17.4.57 `<w:tblpPr>` — floating-table positioning. Present in
- * `<w:tblPr>` ⇒ the table FLOATS (out of the main text flow, absolutely
- * positioned by its top-left corner). All fields are optional in the source.
+ * ECMA-376 §17.4.57 `<w:tblpPr>` — authored floating-table positioning.
+ * Word can ignore this payload under [MS-OI29500] §2.1.162(b-e), so lexical
+ * presence alone does not determine whether the table leaves ordinary flow.
+ * All fields are optional in the source.
  */
 export interface TblpPr {
   /** §17.4.57 minimum distance to wrapping text (dist padding), pt. Default 0. */
@@ -1498,8 +1499,10 @@ export interface DocTable {
    * is placed rightmost, and flips per-cell left/right borders accordingly.
    */
   bidiVisual?: boolean;
-  /** ECMA-376 §17.4.57 `<w:tblpPr>` — when present the table is FLOATING
-   *  (absolutely positioned, out of the main text flow). Absent ⇒ block table. */
+  /** ECMA-376 §17.4.57 `<w:tblpPr>` authored positioning payload. Word can
+   *  ignore it under [MS-OI29500] §2.1.162, but the lexical payload remains
+   *  available for compatibility; presence alone is therefore not an
+   *  effective-floating test. */
   tblpPr?: TblpPr;
   /** ECMA-376 §17.4.56 `<w:tblOverlap w:val>` — 'never' | 'overlap'. 'never' ⇒
    *  the floating table must be repositioned to avoid overlapping other floats.

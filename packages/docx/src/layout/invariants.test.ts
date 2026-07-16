@@ -249,6 +249,63 @@ describe('assertDocumentLayout', () => {
 
     expect(() => assertDocumentLayout(layout)).toThrow(/INVALID_GEOMETRY/);
   });
+
+  it('requires non-negative sequential page identity', () => {
+    const base = documentWith([]);
+    const negative: DocumentLayout = {
+      ...base,
+      pages: [{ ...base.pages[0]!, pageIndex: -1 }],
+    };
+    const skipped: DocumentLayout = {
+      ...base,
+      pages: [{ ...base.pages[0]!, pageIndex: 2 }],
+    };
+    const duplicate: DocumentLayout = {
+      ...base,
+      pages: [base.pages[0]!, { ...base.pages[0]! }],
+    };
+
+    expect(() => assertDocumentLayout(negative)).toThrow(/page index/);
+    expect(() => assertDocumentLayout(skipped)).toThrow(/page index/);
+    expect(() => assertDocumentLayout(duplicate)).toThrow(/page index/);
+  });
+
+  it('requires ordered effective page edges within the physical page and permits equality', () => {
+    const base = documentWith([]);
+    const withEdges = (contentTopPt: number, contentBottomPt: number): DocumentLayout => ({
+      ...base,
+      pages: [{
+        ...base.pages[0]!,
+        geometry: { ...base.pages[0]!.geometry, contentTopPt, contentBottomPt },
+      }],
+    });
+
+    expect(() => assertDocumentLayout(withEdges(-1, 720))).toThrow(/effective page edges/);
+    expect(() => assertDocumentLayout(withEdges(72, 793))).toThrow(/effective page edges/);
+    expect(() => assertDocumentLayout(withEdges(721, 720))).toThrow(/effective page edges/);
+    expect(() => assertDocumentLayout(withEdges(0, 0))).not.toThrow();
+    expect(() => assertDocumentLayout(withEdges(792, 792))).not.toThrow();
+  });
+
+  it('requires every body flow domain to belong to exactly one page-local section region', () => {
+    const base = documentWith([drawing('n1', rect(72, 100, 200, 30))]);
+    const layout = {
+      ...base,
+      pages: [{
+        ...base.pages[0]!,
+        sectionRegions: [{
+          id: 'section-region:0',
+          sectionOccurrenceId: 'section:0',
+          blockStartPt: 72,
+          blockEndPt: 720,
+          flowDomainIds: [],
+          section: base.pages[0]!.section,
+        }],
+      }],
+    } as DocumentLayout;
+
+    expect(() => assertDocumentLayout(layout)).toThrow(/section region ownership/);
+  });
 });
 
 describe('layoutFingerprint', () => {

@@ -210,16 +210,24 @@ import {
 } from './layout/text.js';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts.js';
 import {
+  effectiveTablePositioning,
   internalDocumentModel,
   numberingMarkerShapeInput,
   paragraphAcquisitionInput,
   paragraphMarkShapeInput,
+  tableParticipatesInOrdinaryFlow,
   textBoxAcquisitionInput,
 } from './parser-model.js';
 import {
   normalizeInternalDocumentModel,
   sectionPlacementInputFromBody,
 } from './parser-model.js';
+import {
+  logicalSectionGeometry as logicalGeomOf,
+  physicalSectionGeometry as physicalGeomOf,
+  sectionBodyInsetPt as bodyMarginInsetPt,
+  sectionGeometry as sectionGeomOf,
+} from './layout/context.js';
 import {
   applyNumberingBodyOffset,
   resolveNumberingMarkerGeometry,
@@ -1637,40 +1645,6 @@ function physicalLayoutSection(logical: SectionProps): SectionProps {
   };
 }
 
-/** The geometry projection of {@link verticalLayoutSection} on a bare
- *  {@link SectionGeom}: physical → SWAPPED LOGICAL (quarter-turn; margins rotate
- *  L←T, T←R, R←B, B←L; header/footer distances preserved). Used by the paginator
- *  to lay a vertical MID-BODY section out in its own logical frame (issue #1000)
- *  — the body-level section keeps going through `verticalLayoutDoc`. */
-function logicalGeomOf(phys: SectionGeom): SectionGeom {
-  return {
-    pageWidth: phys.pageHeight,
-    pageHeight: phys.pageWidth,
-    marginLeft: phys.marginTop,
-    marginTop: phys.marginRight,
-    marginRight: phys.marginBottom,
-    marginBottom: phys.marginLeft,
-    headerDistance: phys.headerDistance,
-    footerDistance: phys.footerDistance,
-  };
-}
-
-/** Inverse of {@link logicalGeomOf} — the geometry projection of
- *  {@link physicalLayoutSection}: SWAPPED LOGICAL → physical (margins rotate
- *  T←L, R←T, B←R, L←B). `physicalGeomOf(logicalGeomOf(g)) === g`. */
-function physicalGeomOf(logical: SectionGeom): SectionGeom {
-  return {
-    pageWidth: logical.pageHeight,
-    pageHeight: logical.pageWidth,
-    marginTop: logical.marginLeft,
-    marginRight: logical.marginTop,
-    marginBottom: logical.marginRight,
-    marginLeft: logical.marginBottom,
-    headerDistance: logical.headerDistance,
-    footerDistance: logical.footerDistance,
-  };
-}
-
 /** Per-PAGE frame metadata the paginator records for every physical page it
  *  opens (keyed by the page's element-array identity, so prebuilt pages carry it
  *  into the paint pass without any API change — mirrors the `bodyFlowFragments`
@@ -2215,7 +2189,7 @@ async function renderDocumentToCanvasLeased(
       paintParagraph: (paragraph, state, suppressBefore, borderMerge) =>
         renderParagraph(paragraph, state, suppressBefore, undefined, false, borderMerge),
       paintTable: renderTable,
-      tableResetsParagraphFlow: (table: DocTable) => !table.tblpPr,
+      tableResetsParagraphFlow: tableParticipatesInOrdinaryFlow,
     });
 
   // ECMA-376 §17.10.1 — per-section header/footer selection. resolvePageHeader and
@@ -3325,7 +3299,7 @@ export function computePages(
         prevP = p;
       } else if (e.type === 'table') {
         const t = e as unknown as DocTable;
-        if (t.tblpPr) continue; // floating table: out of flow
+        if (!tableParticipatesInOrdinaryFlow(t)) continue;
         total += computeTableRowHeights(ms, t, colWPt, j).reduce((s, x) => s + x, 0);
         prevAfter = 0;
         prevP = null;
@@ -4161,7 +4135,8 @@ export function computePages(
       // vertAnchor↔§17.3.1.11 vAnchor, tblpY↔y). Was PR #691's whole-table
       // relocation, replaced here after the Word-PDF ground truth showed row
       // splitting (issue #674).
-      if (tbl.tblpPr) {
+      const tp = effectiveTablePositioning(tbl);
+      if (tp) {
         // #513: re-point measureState.contentX/contentW at the CURRENT newspaper
         // column for the duration of the placement so the paginator estimates the
         // wrap band against the SAME column band the paint pass paints into
@@ -4181,7 +4156,6 @@ export function computePages(
         // fit, paint-reuse stamp, and FloatRect; cell content is never re-measured). `tp` is
         // the tblpPr under which the FIRST slice is placed (at the in-flow anchor);
         // continuation slices clone it with tblpY=0 so their box sits at body top.
-        const tp = tbl.tblpPr;
         const measureFloat = () =>
           withColumnBand(() => {
             const cW = colW() * measureState.scale;
@@ -4730,29 +4704,6 @@ function headerOverflowPt(headerH: number, marginTop: number, headerDistance: nu
  *  the page edge while overlapping the running head/foot (those functions then reserve
  *  0). Either way the body's inset from the page edge is |margin|. Math.abs is identity
  *  for the non-negative common case, so this only changes negative-margin documents. */
-function bodyMarginInsetPt(margin: number): number {
-  return Math.abs(margin);
-}
-
-/** ECMA-376 §17.6.13 (pgSz) + §17.6.11 (pgMar) — project a {@link SectionProps}
- *  onto the smaller {@link SectionGeom} view (page size + margins + header/footer
- *  distances, dropping the section's title-page/columns/etc.). Used to seed the
- *  body-level fallback geometry in `computePages` (bodySectionGeom); a private
- *  module helper so the boundary-promotion path can reuse the SAME 8-field
- *  projection when comparing an incoming section's geometry to the ending one. */
-function sectionGeomOf(s: SectionProps): SectionGeom {
-  return {
-    pageWidth: s.pageWidth,
-    pageHeight: s.pageHeight,
-    marginTop: s.marginTop,
-    marginRight: s.marginRight,
-    marginBottom: s.marginBottom,
-    marginLeft: s.marginLeft,
-    headerDistance: s.headerDistance,
-    footerDistance: s.footerDistance,
-  };
-}
-
 /** Resolve the footer that applies to `pageIndex` with the §17.10.1/§17.10.6
  *  first/even/default precedence (resolvePageSection + pickHeaderFooter), or null if
  *  none. One selection shared by the reserve pass, the footer paint, and the footnote
@@ -6127,7 +6078,7 @@ function prepareFittingOuterFragment(
       const physicalPageIndex = finalState.pageIndex;
       const displayPageNumber = finalState.displayPageNumber ?? physicalPageIndex + 1;
       const occurrenceId = `${retained.acquisition.input.id}:fitting-outer:${physicalPageIndex}`;
-      const anchoredToPhysicalPage = table.tblpPr?.vertAnchor === 'page';
+      const anchoredToPhysicalPage = effectiveTablePositioning(table)?.vertAnchor === 'page';
       const containerBottomPt = anchoredToPhysicalPage
         ? pageHeightPt
         : pageHeightPt - finalState.marginBottom;
@@ -7058,7 +7009,9 @@ export function resolveColumnWidths(table: DocTable, contentWPt: number, state: 
         },
       });
     },
-    table.tblpPr ? Math.max(contentWPt, state.pageWidth) : contentWPt,
+    tableParticipatesInOrdinaryFlow(table)
+      ? contentWPt
+      : Math.max(contentWPt, state.pageWidth),
   ))];
 }
 
@@ -7161,11 +7114,12 @@ function stampTableLayout(
   }>,
 ): void {
   const table = el as unknown as DocTable;
+  const effectivePositioning = effectiveTablePositioning(table);
   let layout: TableLayout | TableFragmentLayout = retained.acquisition.layout;
   const tableWidthPt = layout.columnWidthsPt.reduce((sum, width) => sum + width, 0);
-  const box = preparedOuter?.box ?? (table.tblpPr
+  const box = preparedOuter?.box ?? (effectivePositioning
     ? computeFloatTableBox(
-      table.tblpPr,
+      effectivePositioning,
       retainedState,
       retained.anchorYPt,
       tableWidthPt,
@@ -7179,9 +7133,9 @@ function stampTableLayout(
     ? retained.anchorYPt / retainedState.scale
     : box.y / retainedState.scale;
   const placementState = finalState ?? retainedState;
-  const physical = table.tblpPr ? undefined : placementState.verticalPhys;
+  const physical = effectivePositioning ? undefined : placementState.verticalPhys;
   const services = placementState.layoutServices;
-  if (table.tblpPr) {
+  if (effectivePositioning) {
     if (!preparedOuter) {
       throw new Error('Fitting outer table acceptance requires a pure prepared fragment');
     }
@@ -7282,7 +7236,7 @@ function stampTableLayout(
     xPt,
     yPt,
     widthPt: tableWidthPt,
-    heightPt: table.tblpPr ? layout.advancePt : tableWidthPt,
+    heightPt: effectivePositioning ? layout.advancePt : tableWidthPt,
   }));
   bodyFlowFragments.sourceIndices.set(el, sourceIndex);
 }
@@ -8627,7 +8581,7 @@ function measureHeaderFooterHeight(hf: HeaderFooter, base: RenderState): number 
     paintParagraph: (paragraph, storyState, suppressBefore, borderMerge) =>
       renderParagraph(paragraph, storyState, suppressBefore, undefined, false, borderMerge),
     paintTable: renderTable,
-    tableResetsParagraphFlow: (table: DocTable) => !table.tblpPr,
+    tableResetsParagraphFlow: tableParticipatesInOrdinaryFlow,
   })(hf, 0, state);
 }
 
@@ -9055,7 +9009,7 @@ function renderBodyElements(
       }
       // §17.4.57 floating tables consume the same retained physical geometry,
       // but their absolute placement does not advance the surrounding body flow.
-      if (tbl.tblpPr) {
+      if (!tableParticipatesInOrdinaryFlow(tbl)) {
         const resources = state.retainedResourcePainter;
         if (!resources) throw new Error('Floating table paint requires a retained resource painter');
         const inFlowY = state.y;
@@ -13374,7 +13328,8 @@ function resolveSharedEdge(
  * the float is still registered so wrap estimates see the band.
  */
 function renderFloatTable(table: DocTable, state: RenderState): void {
-  const tp = table.tblpPr!;
+  const tp = effectiveTablePositioning(table);
+  if (!tp) throw new Error('Floating table paint requires effective positioning');
   const inFlowY = state.y;
   const savedX = state.contentX;
   const savedW = state.contentW;
@@ -13407,9 +13362,10 @@ function renderFloatTable(table: DocTable, state: RenderState): void {
 }
 
 function renderTable(table: DocTable, state: RenderState): void {
-  // ECMA-376 §17.4.57: a `<w:tblpPr>` table floats — divert to the out-of-flow
-  // path before the normal block layout (which would advance state.y).
-  if (table.tblpPr) {
+  // ECMA-376 §17.4.57 + [MS-OI29500] §2.1.162: divert only an
+  // effectively positioned table to the out-of-flow path; Word can ignore an
+  // authored tblpPr, so lexical presence alone is not this branch condition.
+  if (!tableParticipatesInOrdinaryFlow(table)) {
     renderFloatTable(table, state);
     return;
   }

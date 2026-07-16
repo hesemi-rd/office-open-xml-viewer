@@ -467,6 +467,41 @@ function initializeSplitFloatLivePageRepository() {
   return { root, current };
 }
 
+const effectiveFlowSkipSite = '        if (!tableParticipatesInOrdinaryFlow(t)) continue;';
+const effectiveFlowAcquireSite = `      const tp = effectiveTablePositioning(tbl);
+      if (tp) {`;
+const effectiveFlowMeasureFloat = '        const measureFloat = () =>';
+
+function priorEffectiveFlowSource(current) {
+  assert.equal(current.split(effectiveFlowSkipSite).length, 2, effectiveFlowSkipSite);
+  assert.equal(current.split(effectiveFlowAcquireSite).length, 2, effectiveFlowAcquireSite);
+  assert.equal(current.split(effectiveFlowMeasureFloat).length, 2, effectiveFlowMeasureFloat);
+  return current
+    .replace(effectiveFlowSkipSite, '        if (t.tblpPr) continue;')
+    .replace(effectiveFlowAcquireSite, '      if (tbl.tblpPr) {')
+    .replace(
+      effectiveFlowMeasureFloat,
+      `        const tp = tbl.tblpPr;\n${effectiveFlowMeasureFloat}`,
+    );
+}
+
+function initializeEffectiveFlowRepository() {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-effective-flow-'));
+  const productionRoot = resolve(import.meta.dirname, '..');
+  const current = readFileSync(join(productionRoot, 'packages/docx/src/renderer.ts'), 'utf8');
+  write(root, 'packages/docx/src/renderer.ts', priorEffectiveFlowSource(current));
+  write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
+  write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
+  git(root, 'init', '-b', 'main');
+  git(root, 'config', 'user.email', 'boundary-test@example.invalid');
+  git(root, 'config', 'user.name', 'Boundary Test');
+  git(root, 'add', '.');
+  git(root, 'commit', '-m', 'base with lexical tblpPr table flow');
+  git(root, 'switch', '-c', 'a1');
+  establishA1Baseline(root);
+  return { root, current };
+}
+
 function priorSplitParentCommitSource(current) {
   const startMarker = '            (sliceTp, tableWidthPt, tableHeightPt, externalRegistry) =>';
   const endMarker = `            (sliceEl) => pushTagged(sliceEl),
@@ -1846,6 +1881,129 @@ test('composes all exact A5 computePages normalizers over production A5 bases', 
     const result = runChecker(productionRoot, '--base-ref', ref);
     assert.equal(result.status, 0, `${ref}: ${result.output}`);
   }
+});
+
+test('composes the exact effective table-flow transformation over the A5 base', () => {
+  const { root, current } = initializeEffectiveFlowRepository();
+  write(root, 'packages/docx/src/renderer.ts', current);
+
+  const result = runChecker(root, '--base-ref', 'main');
+
+  assert.equal(result.status, 0, result.output);
+});
+
+test('rejects one-site, duplicated, altered, moved, or side-effect effective flow edits', () => {
+  const variants = [
+    // Site 1 only: the ordinary-flow skip is folded back but the floating
+    // acquisition stays in its effective form — unpaired, so nothing normalizes.
+    (current) => current.replace(
+      effectiveFlowSkipSite,
+      '        if (t.tblpPr) continue;',
+    ),
+    // Site 2 only: the floating acquisition is folded back but the skip stays.
+    (current) => current
+      .replace(effectiveFlowAcquireSite, '      if (tbl.tblpPr) {')
+      .replace(
+        effectiveFlowMeasureFloat,
+        `        const tp = tbl.tblpPr;\n${effectiveFlowMeasureFloat}`,
+      ),
+    // Duplicated skip site.
+    (current) => current.replace(
+      effectiveFlowSkipSite,
+      `${effectiveFlowSkipSite}\n${effectiveFlowSkipSite}`,
+    ),
+    // Altered skip predicate callee.
+    (current) => current.replace(
+      'if (!tableParticipatesInOrdinaryFlow(t)) continue;',
+      'if (!tableFloatsOutOfFlow(t)) continue;',
+    ),
+    // Altered skip predicate argument.
+    (current) => current.replace(
+      'if (!tableParticipatesInOrdinaryFlow(t)) continue;',
+      'if (!tableParticipatesInOrdinaryFlow(e)) continue;',
+    ),
+    // Altered acquisition callee.
+    (current) => current.replace(
+      'const tp = effectiveTablePositioning(tbl);',
+      'const tp = effectiveFloatPositioning(tbl);',
+    ),
+    // Altered acquisition branch predicate (no longer the bare `tp` identifier).
+    (current) => current.replace(
+      '      const tp = effectiveTablePositioning(tbl);\n      if (tp) {',
+      '      const tp = effectiveTablePositioning(tbl);\n      if (tp !== null) {',
+    ),
+    // Moved / side-effect-adjacent acquisition: a statement now sits between the
+    // pre-resolution and its branch, breaking the exact two-statement adjacency.
+    (current) => current.replace(
+      '      const tp = effectiveTablePositioning(tbl);\n      if (tp) {',
+      '      const tp = effectiveTablePositioning(tbl);\n      sideEffect();\n      if (tp) {',
+    ),
+    // Reconstruction-erased syntax on the acquisition declaration: a variable type
+    // annotation would be dropped when the site folds back to `const tp = tbl.tblpPr;`.
+    (current) => current.replace(
+      'const tp = effectiveTablePositioning(tbl);',
+      'const tp: TblpPr | undefined = effectiveTablePositioning(tbl);',
+    ),
+    // Reconstruction-erased optional call on the acquisition callee.
+    (current) => current.replace(
+      'const tp = effectiveTablePositioning(tbl);',
+      'const tp = effectiveTablePositioning?.(tbl);',
+    ),
+    // Reconstruction-erased optional call on the skip predicate callee.
+    (current) => current.replace(
+      'if (!tableParticipatesInOrdinaryFlow(t)) continue;',
+      'if (!tableParticipatesInOrdinaryFlow?.(t)) continue;',
+    ),
+    // Reconstruction-erased call type arguments on the acquisition callee.
+    (current) => current.replace(
+      'const tp = effectiveTablePositioning(tbl);',
+      'const tp = effectiveTablePositioning<TblpPr>(tbl);',
+    ),
+    // Reconstruction-erased call type arguments on the skip predicate callee.
+    (current) => current.replace(
+      'if (!tableParticipatesInOrdinaryFlow(t)) continue;',
+      'if (!tableParticipatesInOrdinaryFlow<DocTable>(t)) continue;',
+    ),
+    // Duplicated acquisition: two adjacent pre-resolution/branch pairs break the
+    // exact single-site requirement so nothing normalizes.
+    (current) => current.replace(
+      '      const tp = effectiveTablePositioning(tbl);\n      if (tp) {',
+      `      const tp = effectiveTablePositioning(tbl);
+      if (tp) {
+      }
+      const tp = effectiveTablePositioning(tbl);
+      if (tp) {`,
+    ),
+  ];
+  for (const [index, mutate] of variants.entries()) {
+    const { root, current } = initializeEffectiveFlowRepository();
+    const mutated = mutate(current);
+    assert.notEqual(mutated, current, `variant ${index} did not mutate`);
+    write(root, 'packages/docx/src/renderer.ts', mutated);
+    const result = runChecker(root, '--base-ref', 'main');
+    assert.notEqual(result.status, 0, `variant ${index}`);
+    assert.match(result.output, /LEGACY_DECLARATION_CHANGED|BASELINE_EXPANSION/);
+  }
+});
+
+test('keeps section-occurrence routing rejected under effective-flow normalization', () => {
+  const { root, current } = initializeEffectiveFlowRepository();
+  const loopKind = `  const sectionKindFrom = (startIdx: number): string => {
+    for (let j = startIdx; j < body.length; j++) {
+      const e = body[j];
+      if (e.type === 'sectionBreak') return e.kind ?? 'nextPage';
+    }
+    return section.sectionStart ?? 'nextPage';
+  };`;
+  const occurrenceKind = `  const sectionKindFrom = (startIdx: number): string =>
+    sectionOccurrenceFrom(startIdx).startType;`;
+  assert.equal(current.split(loopKind).length, 2, loopKind);
+  write(root, 'packages/docx/src/renderer.ts', current.replace(loopKind, occurrenceKind));
+
+  const result = runChecker(root, '--base-ref', 'main');
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.output, /LEGACY_DECLARATION_CHANGED|BASELINE_EXPANSION/);
 });
 
 test('allows only the exact occurrence-owned table state threading', () => {

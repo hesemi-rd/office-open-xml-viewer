@@ -48,6 +48,7 @@ describe('retained table acquisition', () => {
     } as unknown as DocTable;
     const formats = new WeakMap<object, TableFormatInput>([
       [table, {
+        effectiveStyleId: null, ordinaryFlow: true, positioning: null,
         firstRowException: null,
         rows: [{
           height: null, cantSplit: false, repeatedHeader: false,
@@ -55,7 +56,10 @@ describe('retained table acquisition', () => {
           cells: [{ marginsPt: { top: 0, right: 0, bottom: 0, left: 0 } }],
         }],
       }],
-      [nested, { firstRowException: null, rows: [] }],
+      [nested, {
+        effectiveStyleId: null, ordinaryFlow: true, positioning: null,
+        firstRowException: null, rows: [],
+      }],
     ]);
 
     const acquisition = acquireRetainedTable(
@@ -91,6 +95,42 @@ describe('retained table acquisition', () => {
     expect(nestedAcquisition?.layout.rows).toEqual([]);
     expect(Object.isFrozen(acquisition.input)).toBe(true);
     expect(Object.isFrozen(acquisition.nestedById)).toBe(true);
+  });
+
+  it('keeps an authored but Word-ignored tblpPr in ordinary table flow', () => {
+    const table = {
+      type: 'table', rows: [], colWidths: [], borders: noBorders,
+      cellMarginTop: 0, cellMarginRight: 0, cellMarginBottom: 0, cellMarginLeft: 0,
+      jc: 'left', bidiVisual: false,
+      tblpPr: {
+        leftFromText: 0, rightFromText: 0, topFromText: 0, bottomFromText: 0,
+        horzAnchor: 'text', horzSpecified: true, vertAnchor: 'margin',
+        tblpX: 0, tblpY: 0,
+      },
+    } as unknown as DocTable;
+
+    const acquisition = acquireRetainedTable(
+      table,
+      [],
+      100,
+      { yPt: 0 },
+      [],
+      {
+        layoutServices: () => ({}) as LayoutServices,
+        tableFormat: () => ({
+          effectiveStyleId: 'TableNormal', ordinaryFlow: true, positioning: null,
+          firstRowException: null, rows: [],
+        }),
+        resolveColumns: () => [],
+        createCellState: (state) => state,
+        acquireParagraph: () => retainedParagraph(100),
+        registerFloatingTable: () => null,
+        advanceState: () => {},
+      },
+    );
+
+    expect(acquisition.input.ordinaryFlow).toBe(true);
+    expect(acquisition.floatingTables).toEqual([]);
   });
 
   it('owns a nested floating table outside cell flow and anchors it to the next regular paragraph', () => {
@@ -143,6 +183,7 @@ describe('retained table acquisition', () => {
       jc: 'left', bidiVisual: false,
     } as unknown as DocTable;
     const oneRowFormat: TableFormatInput = {
+      effectiveStyleId: null, ordinaryFlow: true, positioning: null,
       firstRowException: null,
       rows: [{
         height: null, cantSplit: false, repeatedHeader: false,
@@ -160,7 +201,25 @@ describe('retained table acquisition', () => {
       [0],
       {
         layoutServices: () => ({}) as LayoutServices,
-        tableFormat: () => oneRowFormat,
+        tableFormat: (source) => source === floating
+          ? {
+              effectiveStyleId: null,
+              ordinaryFlow: false,
+              positioning: {
+                leftFromTextPt: 1, rightFromTextPt: 2,
+                topFromTextPt: 3, bottomFromTextPt: 4,
+                horzAnchor: 'text', horzSpecified: true, vertAnchor: 'text',
+                xPt: 5, yPt: 6,
+              },
+              firstRowException: null,
+              rows: oneRowFormat.rows,
+            }
+          : source === interveningTable
+            ? {
+                effectiveStyleId: null, ordinaryFlow: true, positioning: null,
+                firstRowException: null, rows: [],
+              }
+            : oneRowFormat,
         resolveColumns: (source) => source === floating ? [40] : [100],
         createCellState: (state) => state,
         acquireParagraph: (state, paragraph, widthPt) => {
@@ -291,6 +350,7 @@ describe('retained table acquisition', () => {
       jc: 'left', bidiVisual: false,
     } as unknown as DocTable;
     const format: TableFormatInput = {
+      effectiveStyleId: null, ordinaryFlow: true, positioning: null,
       firstRowException: null,
       rows: [{
         height: null,
@@ -349,6 +409,7 @@ describe('retained table acquisition', () => {
       jc: 'left', bidiVisual: false,
     } as unknown as DocTable;
     const format: TableFormatInput = {
+      effectiveStyleId: null, ordinaryFlow: true, positioning: null,
       firstRowException: null,
       rows: [{
         height: null,

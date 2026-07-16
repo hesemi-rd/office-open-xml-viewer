@@ -1031,6 +1031,119 @@ function normalizedSyntaxHash(node, source) {
 function normalizedComputePagesHash(node, source) {
   const compactText = (current, currentSource) =>
     current.getText(currentSource).replace(/\s+/g, '');
+  // A6 effective table-flow ([MS-OI29500] §2.1.162): the paginator decides
+  // ordinary-flow participation and floating placement through
+  // `tableParticipatesInOrdinaryFlow` / `effectiveTablePositioning` instead of a
+  // lexical `tblpPr` presence test. Normalize ONLY the exact paired two-site
+  // transformation back onto the frozen lexical base:
+  //   1. `if (!tableParticipatesInOrdinaryFlow(t)) continue;` -> `if (t.tblpPr) continue;`
+  //   2. `const tp = effectiveTablePositioning(tbl); if (tp) { … }` folds back to
+  //      `if (tbl.tblpPr) { const tp = tbl.tblpPr; … }` (the pre-resolution moves
+  //      into the branch as its first statement).
+  // Both sites must be present exactly once; one-site, duplicated, moved,
+  // predicate/callee/argument-altered, or side-effect-adjacent forms fall through
+  // and stay fully represented in the hash. Section-occurrence routing is never
+  // touched here.
+  //
+  // Reconstruction rewrites both sites back to plain `tblpPr` value syntax, which
+  // erases any TypeScript-only syntax the effective form might carry: a variable
+  // type annotation (`const tp: TblpPr = …`), a definite-assignment `!`, an
+  // optional-call `?.(…)`, or call type arguments (`effectiveTablePositioning<…>(tbl)`).
+  // If such syntax were tolerated it would vanish from the resulting hash and go
+  // unaudited, so every matcher below rejects it and lets the declaration stay
+  // fully represented instead.
+  const effectiveFlowSkipSites = [];
+  const findEffectiveFlowSkip = (current) => {
+    if (ts.isIfStatement(current)
+      && !current.elseStatement
+      && ts.isPrefixUnaryExpression(current.expression)
+      && current.expression.operator === ts.SyntaxKind.ExclamationToken
+      && ts.isCallExpression(current.expression.operand)
+      && current.expression.operand.questionDotToken === undefined
+      && current.expression.operand.typeArguments === undefined
+      && ts.isIdentifier(current.expression.operand.expression)
+      && current.expression.operand.expression.text === 'tableParticipatesInOrdinaryFlow'
+      && current.expression.operand.arguments.length === 1
+      && ts.isIdentifier(current.expression.operand.arguments[0])
+      && current.expression.operand.arguments[0].text === 't'
+      && ts.isContinueStatement(current.thenStatement)
+      && !current.thenStatement.label) {
+      effectiveFlowSkipSites.push(current);
+    }
+    ts.forEachChild(current, findEffectiveFlowSkip);
+  };
+  findEffectiveFlowSkip(node);
+  const isEffectiveTpDeclaration = (statement) => {
+    if (!ts.isVariableStatement(statement)
+      || (statement.declarationList.flags & ts.NodeFlags.Const) === 0
+      || statement.declarationList.declarations.length !== 1) return false;
+    const [declaration] = statement.declarationList.declarations;
+    return ts.isIdentifier(declaration.name)
+      && declaration.name.text === 'tp'
+      && declaration.type === undefined
+      && declaration.exclamationToken === undefined
+      && declaration.initializer !== undefined
+      && ts.isCallExpression(declaration.initializer)
+      && declaration.initializer.questionDotToken === undefined
+      && declaration.initializer.typeArguments === undefined
+      && ts.isIdentifier(declaration.initializer.expression)
+      && declaration.initializer.expression.text === 'effectiveTablePositioning'
+      && declaration.initializer.arguments.length === 1
+      && ts.isIdentifier(declaration.initializer.arguments[0])
+      && declaration.initializer.arguments[0].text === 'tbl';
+  };
+  const effectiveFlowAcquireSites = [];
+  const findEffectiveFlowAcquire = (current) => {
+    const statements = ts.isBlock(current) || ts.isSourceFile(current)
+      ? current.statements
+      : undefined;
+    if (statements) {
+      for (let index = 0; index + 1 < statements.length; index += 1) {
+        const declaration = statements[index];
+        const branch = statements[index + 1];
+        if (isEffectiveTpDeclaration(declaration)
+          && ts.isIfStatement(branch)
+          && !branch.elseStatement
+          && ts.isIdentifier(branch.expression)
+          && branch.expression.text === 'tp'
+          && ts.isBlock(branch.thenStatement)) {
+          effectiveFlowAcquireSites.push({ declaration, branch });
+        }
+      }
+    }
+    ts.forEachChild(current, findEffectiveFlowAcquire);
+  };
+  findEffectiveFlowAcquire(node);
+  if (effectiveFlowSkipSites.length === 1 && effectiveFlowAcquireSites.length === 1) {
+    const nodeStart = node.getStart(source);
+    const nodeText = node.getText(source);
+    const skip = effectiveFlowSkipSites[0];
+    const { declaration, branch } = effectiveFlowAcquireSites[0];
+    const blockOpen = branch.thenStatement.getStart(source) + 1;
+    const edits = [
+      [skip.getStart(source), skip.getEnd(), 'if (t.tblpPr) continue;'],
+      [declaration.getStart(source), declaration.getEnd(), ''],
+      [branch.expression.getStart(source), branch.expression.getEnd(), 'tbl.tblpPr'],
+      [blockOpen, blockOpen, '\nconst tp = tbl.tblpPr;'],
+    ].sort((left, right) => right[0] - left[0]);
+    let virtualText = nodeText;
+    for (const [start, end, replacement] of edits) {
+      virtualText = virtualText.slice(0, start - nodeStart)
+        + replacement
+        + virtualText.slice(end - nodeStart);
+    }
+    const virtualSource = ts.createSourceFile(
+      'compute-pages-a6-effective-flow-virtual.ts',
+      virtualText,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const virtualNode = virtualSource.statements.find((statement) => (
+      ts.isFunctionDeclaration(statement) && statement.name?.text === 'computePages'
+    ));
+    if (virtualNode) return normalizedComputePagesHash(virtualNode, virtualSource);
+  }
   const occurrenceOwnerReplacements = [
     ['computeTableRowHeights(ms, t, colWPt, j)', 'computeTableRowHeights(ms, t, colWPt)'],
     [

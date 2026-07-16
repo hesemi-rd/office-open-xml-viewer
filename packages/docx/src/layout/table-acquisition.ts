@@ -4,7 +4,6 @@ import type {
   DocParagraph,
   DocTable,
   TableBorders,
-  TblpPr,
 } from '../types.js';
 import {
   acquireTableCellBlocks,
@@ -75,22 +74,6 @@ export interface NestedFloatingTableOccurrence {
   readonly overlap: 'never' | 'overlap';
   readonly positioning: FloatingTablePositionInput;
   readonly acquiredTextOffsetPt?: Readonly<{ xPt: number; yPt: number }>;
-}
-
-function floatingPositionInput(positioning: TblpPr): FloatingTablePositionInput {
-  return {
-    leftFromTextPt: positioning.leftFromText,
-    rightFromTextPt: positioning.rightFromText,
-    topFromTextPt: positioning.topFromText,
-    bottomFromTextPt: positioning.bottomFromText,
-    horzAnchor: positioning.horzAnchor,
-    horzSpecified: positioning.horzSpecified,
-    vertAnchor: positioning.vertAnchor,
-    xPt: positioning.tblpX,
-    yPt: positioning.tblpY,
-    ...(positioning.tblpXSpec == null ? {} : { xAlign: positioning.tblpXSpec }),
-    ...(positioning.tblpYSpec == null ? {} : { yAlign: positioning.tblpYSpec }),
-  };
 }
 
 function nextRegularParagraphIndex(
@@ -243,9 +226,11 @@ export function acquireRetainedTable<State>(
                 dependencies,
               );
               nestedById[nested.layout.id] = nested;
-              if (nestedTable.tblpPr != null) {
+              const nestedFormat = dependencies.tableFormat(nestedTable);
+              const effectivePositioning = nestedFormat.positioning;
+              if (effectivePositioning) {
                 const sourceBlockIndex = nestedPath[nestedPath.length - 1]!;
-                const positioning = floatingPositionInput(nestedTable.tblpPr);
+                const positioning = effectivePositioning;
                 const overlap = nestedTable.overlap === 'never' ? 'never' : 'overlap';
                 const acquiredTextOffsetPt = dependencies.registerFloatingTable(cellState, {
                   child: nested.layout,
@@ -294,7 +279,10 @@ export function acquireRetainedTable<State>(
           const sourceElement = cell.content[sourceBlockIndex];
           // ECMA-376 §17.4.57 keeps tblpPr tables at their logical source
           // position only for anchoring; they do not participate in cell flow.
-          if (sourceElement?.type === 'table' && sourceElement.tblpPr != null) return [];
+          if (
+            sourceElement?.type === 'table'
+            && dependencies.tableFormat(sourceElement).ordinaryFlow === false
+          ) return [];
           return [{
             layout,
             sourceBlockIndex,
@@ -331,7 +319,7 @@ export function acquireRetainedTable<State>(
     id: flowDomainId,
     source: { story: 'body', storyInstance: 'body', path: [...sourcePath] },
     flowDomainId,
-    ordinaryFlow: table.tblpPr == null,
+    ordinaryFlow: format.ordinaryFlow,
     alignment: physicalAlignment(table.jc, bidiVisual),
     indentPt: tableIndentPt,
     bidiVisual,

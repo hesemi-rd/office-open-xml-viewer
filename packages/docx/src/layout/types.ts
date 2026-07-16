@@ -702,11 +702,48 @@ export interface PageLayers {
   readonly footer: readonly PaintNode[];
 }
 
+/** One section-owned body-flow region on a physical page. A continuous section
+ * may add another region below existing content without creating a new page. */
+export interface PageSectionRegion {
+  readonly id: string;
+  readonly sectionOccurrenceId: string;
+  /** Logical inline/block coordinates are retained independently of physical
+   * x/y so vertical sections do not silently inherit horizontal Y-flow rules. */
+  readonly coordinateSpace?: Readonly<{
+    writingMode: WritingMode;
+    logicalToPhysical: Matrix2DData;
+  }>;
+  readonly blockStartPt: number;
+  readonly blockEndPt: number;
+  readonly flowDomainIds: readonly string[];
+  readonly section: DeepReadonly<SectionLayoutContext>;
+}
+
+export interface PageBookmarkStart {
+  readonly name: string;
+  readonly nodeId: LayoutNodeId;
+  readonly sectionOccurrenceId: string;
+}
+
+export interface PageNumberMetadata {
+  readonly displayNumber: number;
+  readonly format: string;
+  readonly sectionOccurrenceId: string;
+}
+
 export interface LayoutPage {
   readonly pageIndex: number;
   readonly geometry: PageGeometry;
   readonly flowDomains: readonly FlowDomain[];
   readonly section: DeepReadonly<SectionLayoutContext>;
+  /** Transitional optionals keep pre-A6 producers compiling while the canonical
+   * page factory becomes the sole producer; A6 removes that migration latitude. */
+  readonly sectionOccurrenceId?: string;
+  readonly parityBlank?: boolean;
+  readonly bookmarkStarts?: readonly PageBookmarkStart[];
+  readonly pageNumber?: PageNumberMetadata;
+  /** Transitional until A6's canonical page producer is the only producer. */
+  readonly sectionRegions?: readonly PageSectionRegion[];
   readonly layers: PageLayers;
   readonly readingOrder: readonly LayoutNodeId[];
 }
@@ -905,6 +942,9 @@ export interface TableRowFormatInput {
 
 /** Immutable parser/model projection consumed by table acquisition. */
 export interface TableFormatInput {
+  readonly effectiveStyleId: string | null;
+  readonly ordinaryFlow: boolean;
+  readonly positioning: FloatingTablePositionInput | null;
   readonly rows: readonly TableRowFormatInput[];
   readonly firstRowException: TableRowExceptionInput | null;
 }
