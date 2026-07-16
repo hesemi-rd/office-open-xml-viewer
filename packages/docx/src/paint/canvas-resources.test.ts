@@ -21,7 +21,9 @@ function resourceLayout(
         contentTopPt: 10, contentBottomPt: 190,
       },
       flowDomains: [{
-        id: 'body', kind: 'body', bounds: { xPt: 10, yPt: 10, widthPt: 80, heightPt: 180 },
+        id: 'body', kind: 'body',
+        logicalBounds: { xPt: 10, yPt: 10, widthPt: 80, heightPt: 180 },
+        physicalBounds: { xPt: 10, yPt: 10, widthPt: 80, heightPt: 180 },
       }],
       section: {} as SectionLayoutContext,
       layers: {

@@ -852,17 +852,24 @@ floating test.
 export interface PageFlowState {
   readonly pageIndex: number;
   readonly columnIndex: number;
+  readonly pageHasContent: boolean;
   readonly cursorBlockPt: number;
   readonly pageContentStartBlockPt: number;
   readonly regionStartBlockPt: number;
-  readonly sectionOccurrenceId: string;
-  readonly section: SectionLayoutContext;
+  readonly deepestColumnBlockPt: number;
+  readonly section: PageFlowSectionContext;
 }
 export type PageFlowEvent =
-  | Readonly<{ type: 'place'; node: PaintNode }>
+  | Readonly<{ type: 'place'; node: PaintNode; blockStartPt: number; blockEndPt: number }>
   | Readonly<{ type: 'next-column' }>
-  | Readonly<{ type: 'next-page'; reason: 'overflow' | 'explicit-break' | 'section-break' | 'parity' }>
-  | Readonly<{ type: 'begin-section'; section: SectionLayoutContext }>;
+  | Readonly<{
+      type: 'next-page';
+      reason: 'overflow' | 'explicit-break' | 'page-break-before' | 'section-break' | 'parity';
+      pageIndex: number;
+      sectionOccurrenceId: string;
+      parityBlank: boolean;
+    }>
+  | Readonly<{ type: 'begin-section'; section: PageFlowSectionContext }>;
 export function paginateBody(input: BodyLayoutInput, services: LayoutServices, options: LayoutOptions): DocumentLayout;
 ```
 
@@ -896,13 +903,17 @@ are recovered from element stamps rather than `LayoutPage`.
 
 - [ ] **Step 3: Implement explicit transitions and page ownership**
 
+PR4 supplies the explicit logical/physical coordinate and retained ownership
+contracts without connecting a production caller. PR5 performs the producer,
+paint, main-thread, and worker cutover.
+
 Normalize consecutive same-effective-style-ID in-flow tables into one logical
 table before page transitions, without merging across paragraphs or effective
 floating tables. Make each transition return a new `PageFlowState` over the
 logical block axis. A physical `LayoutPage` owns its page box and page-start
-header/footer geometry, while clone-safe page-local section regions own their
-section occurrence, columns, block origin, direction, page numbering, and flow
-domains; nodes reference the owning region/domain. This permits multiple
+header/footer geometry and resolved page number, while clone-safe page-local
+section regions own their section occurrence, columns, block origin, direction,
+page-numbering policy, and flow domains; nodes reference the owning region/domain. This permits multiple
 continuous sections on one physical page and avoids treating one singular
 `LayoutPage.section` as ownership for the whole page. Replace `computePages` closure state
 with `paginateBody`. The render worker retains `Map<string, DocumentLayout>` keyed

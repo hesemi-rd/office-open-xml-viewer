@@ -185,7 +185,9 @@ export function layoutParseErrorPage(
         contentTopPt: padPt,
         contentBottomPt: size.heightPt - padPt,
       },
-      flowDomains: [{ id: 'parse-error', kind: 'body', bounds: frame }],
+      flowDomains: [{
+        id: 'parse-error', kind: 'body', logicalBounds: frame, physicalBounds: frame,
+      }],
       section,
       layers: {
         paintOrder: [{ layer: 'body', nodeId: node.id }],

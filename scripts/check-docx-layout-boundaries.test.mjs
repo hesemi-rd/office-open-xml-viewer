@@ -36,6 +36,9 @@ function initializeFixture(prefix) {
   write(root, 'packages/docx/src/layout/occurrence-projection.ts', "import { snapshotPlainData } from './plain-data.js';\nexport const project = snapshotPlainData;\n");
   write(root, 'packages/docx/src/layout/retained-geometry-translation.ts', "import type { PointPt } from './types.js';\nexport const translate = (point: PointPt) => point;\n");
   write(root, 'packages/docx/src/layout/types.ts', 'export interface PointPt { xPt: number; yPt: number }\n');
+  write(root, 'packages/docx/src/layout/coordinate-space.ts', "import type { PointPt } from './types.js';\nexport const coordinate = (point: PointPt) => point;\n");
+  write(root, 'packages/docx/src/layout/page-graph.ts', 'export const PAGE_LAYER_IDS = [];\n');
+  write(root, 'packages/docx/src/layout/page-factory.ts', "import { coordinate } from './coordinate-space.js';\nimport { PAGE_LAYER_IDS } from './page-graph.js';\nimport type { BodyOccurrenceDestination } from './occurrence-projection.js';\nexport const pageFactory = [coordinate, PAGE_LAYER_IDS] satisfies unknown;\nexport type Destination = BodyOccurrenceDestination;\n");
   return root;
 }
 
@@ -59,6 +62,55 @@ function initializeOccurrenceProjectionRepository(importSource = "import { snaps
   write(root, 'packages/docx/src/layout/occurrence-projection.ts', importSource);
   return root;
 }
+
+function initializeCoordinateSpaceRepository() {
+  const root = initializeRepository();
+  establishA1Baseline(root);
+  return root;
+}
+
+test('coordinate-space and page-factory runtime seams allow only their explicit dependencies', () => {
+  const root = initializeCoordinateSpaceRepository();
+  const result = runChecker(root, '--base-ref', 'main');
+  assert.equal(result.status, 0, result.output);
+});
+
+for (const missing of ['coordinate-space.ts', 'page-factory.ts']) {
+  test(`coordinate-space boundary rejects missing ${missing}`, () => {
+    const root = initializeCoordinateSpaceRepository();
+    rmSync(join(root, 'packages/docx/src/layout', missing));
+    assert.match(runChecker(root, '--base-ref', 'main').output,
+      /COORDINATE_SPACE_RUNTIME_DEPENDENCY/);
+  });
+}
+
+for (const [name, source] of [
+  ['renderer', "import { value } from '../renderer.js';\nexport const coordinate = value;\n"],
+  ['parser', "import { value } from '../parser-model.js';\nexport const coordinate = value;\n"],
+  ['paint', "import { value } from '../paint/canvas-page.js';\nexport const coordinate = value;\n"],
+  ['worker', "import { value } from '../render-worker.js';\nexport const coordinate = value;\n"],
+  ['shaping', "import { value } from './text.js';\nexport const coordinate = value;\n"],
+  ['DOM Canvas package', "import value from 'canvas';\nexport const coordinate = value;\n"],
+  ['decorated', "import type { PointPt } from './types.js?raw';\nexport const coordinate = (point: PointPt) => point;\n"],
+  ['dynamic literal', "export const coordinate = import('./types.js');\n"],
+  ['dynamic nonliteral', "const path = './types.js';\nexport const coordinate = import(path);\n"],
+]) {
+  test(`coordinate-space boundary rejects ${name} imports`, () => {
+    const root = initializeCoordinateSpaceRepository();
+    write(root, 'packages/docx/src/layout/coordinate-space.ts', source);
+    const result = runChecker(root, '--base-ref', 'main');
+    assert.notEqual(result.status, 0);
+    assert.match(result.output, /COORDINATE_SPACE_RUNTIME_DEPENDENCY/);
+  });
+}
+
+test('page-factory boundary rejects a runtime occurrence-projection edge', () => {
+  const root = initializeCoordinateSpaceRepository();
+  write(root, 'packages/docx/src/layout/page-factory.ts',
+    "import { project } from './occurrence-projection.js';\nexport const pageFactory = project;\n");
+  assert.match(runChecker(root, '--base-ref', 'main').output,
+    /COORDINATE_SPACE_RUNTIME_DEPENDENCY/);
+});
 
 test('occurrence projection runtime graph allows only its entries and plain-data', () => {
   const root = initializeOccurrenceProjectionRepository();

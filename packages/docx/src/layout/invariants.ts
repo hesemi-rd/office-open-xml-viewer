@@ -1,5 +1,16 @@
 import { LayoutInvariantError } from './diagnostics.js';
+import {
+  createSectionRegionCoordinateSpace,
+  logicalPageExtent,
+  transformRect,
+  uprightPhysicalExtent,
+  writingModeFromTextDirection,
+} from './coordinate-space.js';
 import { orderedPagePaintNodes, pageLayerNodes, PageGraphError } from './page-graph.js';
+import {
+  derivePageBookmarkStarts,
+  sectionLayoutContextsEqual,
+} from './page-factory.js';
 import type {
   DeepReadonly,
   DocumentLayout,
@@ -8,8 +19,11 @@ import type {
   FlowDomain,
   LayoutRect,
   LayoutPage,
+  PageSectionRegion,
   PaintNode,
   PointPt,
+  SectionRegionCoordinateSpace,
+  WritingMode,
 } from './types.js';
 
 function assertPlainData(value: unknown, path: string, ancestors = new WeakSet<object>()): void {
@@ -78,7 +92,14 @@ function requireFinite(value: number, path: string): void {
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
 function requirePoint(point: PointPt, path: string): void {
+  if (!isRecord(point)) {
+    throw new LayoutInvariantError('INVALID_GEOMETRY', `${path} is not a point`);
+  }
   requireFinite(point.xPt, `${path}.xPt`);
   requireFinite(point.yPt, `${path}.yPt`);
 }
@@ -90,6 +111,33 @@ function requireRect(rect: LayoutRect, path: string): void {
   if (rect.widthPt < 0 || rect.heightPt < 0) {
     throw new LayoutInvariantError('INVALID_GEOMETRY', `${path} has a negative extent`);
   }
+}
+
+function requireMatrix(matrix: unknown, path: string): asserts matrix is SectionRegionCoordinateSpace['logicalToPhysical'] {
+  if (!isRecord(matrix)) {
+    throw new LayoutInvariantError('INVALID_GEOMETRY', `${path} is not a matrix`);
+  }
+  for (const coefficient of ['a', 'b', 'c', 'd', 'e', 'f'] as const) {
+    requireFinite(matrix[coefficient] as number, `${path}.${coefficient}`);
+  }
+}
+
+function requireWritingMode(value: unknown, path: string): asserts value is WritingMode {
+  if (value !== 'horizontal-tb' && value !== 'vertical-rl' && value !== 'vertical-lr') {
+    throw new LayoutInvariantError('INVALID_GEOMETRY', `${path} is unsupported`);
+  }
+}
+
+function requireCoordinateSpace(
+  value: unknown,
+  path: string,
+): asserts value is SectionRegionCoordinateSpace {
+  if (!isRecord(value)) {
+    throw new LayoutInvariantError('INVALID_GEOMETRY', `${path} is not a coordinate space`);
+  }
+  requireWritingMode(value.writingMode, `${path}.writingMode`);
+  requireMatrix(value.logicalToPhysical, `${path}.logicalToPhysical`);
+  requireMatrix(value.physicalToLogical, `${path}.physicalToLogical`);
 }
 
 function requireDrawingMLShapePlan(
@@ -147,6 +195,21 @@ function contains(outer: LayoutRect, inner: LayoutRect): boolean {
     && inner.yPt >= outer.yPt
     && inner.xPt + inner.widthPt <= outer.xPt + outer.widthPt
     && inner.yPt + inner.heightPt <= outer.yPt + outer.heightPt;
+}
+
+function equalRect(left: LayoutRect, right: LayoutRect): boolean {
+  return left.xPt === right.xPt
+    && left.yPt === right.yPt
+    && left.widthPt === right.widthPt
+    && left.heightPt === right.heightPt;
+}
+
+function equalMatrix(
+  left: PageSectionRegion['coordinateSpace']['logicalToPhysical'],
+  right: PageSectionRegion['coordinateSpace']['logicalToPhysical'],
+): boolean {
+  return left.a === right.a && left.b === right.b && left.c === right.c
+    && left.d === right.d && left.e === right.e && left.f === right.f;
 }
 
 function retainUniqueNodeId(
@@ -240,7 +303,7 @@ function requireDrawingGeometry(node: DrawingLayout, path: string): void {
   });
 }
 
-export function assertDocumentLayout(layout: DocumentLayout): void {
+function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
   assertPlainData(layout, 'layout');
   const documentRetainedNodeIds = new Set<string>();
   layout.pages.forEach((page, pageIndex) => {
@@ -254,7 +317,9 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
     requireFinite(page.geometry.contentTopPt, `pages[${pageIndex}].geometry.contentTopPt`);
     requireFinite(page.geometry.contentBottomPt, `pages[${pageIndex}].geometry.contentBottomPt`);
     if (
-      page.geometry.contentTopPt < 0
+      page.geometry.widthPt <= 0
+      || page.geometry.heightPt <= 0
+      || page.geometry.contentTopPt < 0
       || page.geometry.contentTopPt > page.geometry.contentBottomPt
       || page.geometry.contentBottomPt > page.geometry.heightPt
     ) {
@@ -266,7 +331,14 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
 
     const domains = new Map<string, FlowDomain>();
     page.flowDomains.forEach((domain, domainIndex) => {
-      requireRect(domain.bounds, `pages[${pageIndex}].flowDomains[${domainIndex}].bounds`);
+      requireRect(
+        domain.logicalBounds,
+        `pages[${pageIndex}].flowDomains[${domainIndex}].logicalBounds`,
+      );
+      requireRect(
+        domain.physicalBounds,
+        `pages[${pageIndex}].flowDomains[${domainIndex}].physicalBounds`,
+      );
       if (domains.has(domain.id)) {
         throw new LayoutInvariantError('INVALID_REFERENCE', `duplicate flow domain ${domain.id}`);
       }
@@ -298,9 +370,13 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
       sectionOccurrenceIds.add(page.sectionOccurrenceId);
     }
 
+    const regionByDomain = new Map<string, PageSectionRegion>();
     if (page.sectionRegions) {
       const regionIds = new Set<string>();
+      const occurrenceIds = new Set<string>();
       const bodyOwnership = new Map<string, number>();
+      let priorBlockEndPt = 0;
+      let pageWritingMode: WritingMode | undefined;
       page.sectionRegions.forEach((region, regionIndex) => {
         const path = `pages[${pageIndex}].sectionRegions[${regionIndex}]`;
         if (region.id.length === 0 || regionIds.has(region.id)) {
@@ -313,17 +389,119 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
             `${path} has an empty section occurrence id`,
           );
         }
+        if (occurrenceIds.has(region.sectionOccurrenceId)) {
+          throw new LayoutInvariantError(
+            'INVALID_REFERENCE',
+            `${path} has a duplicate section occurrence id`,
+          );
+        }
+        occurrenceIds.add(region.sectionOccurrenceId);
         sectionOccurrenceIds.add(region.sectionOccurrenceId);
+        requireCoordinateSpace(region.coordinateSpace, `${path}.coordinateSpace`);
+        const writingMode = region.coordinateSpace.writingMode;
+        if (pageWritingMode !== undefined && pageWritingMode !== writingMode) {
+          throw new LayoutInvariantError(
+            'INVALID_GEOMETRY',
+            `${path} mixes coordinate systems on one physical page`,
+          );
+        }
+        pageWritingMode = writingMode;
+        let sectionWritingMode: WritingMode;
+        try {
+          sectionWritingMode = writingModeFromTextDirection(region.section.textDirection);
+        } catch (error) {
+          throw new LayoutInvariantError(
+            'INVALID_GEOMETRY',
+            `${path}.section.textDirection is unsupported: ${(error as Error).message}`,
+          );
+        }
+        if (writingMode !== sectionWritingMode) {
+          throw new LayoutInvariantError(
+            'INVALID_GEOMETRY',
+            `${path} writing mode contradicts its section text direction`,
+          );
+        }
+        const logicalExtent = logicalPageExtent(page.geometry, writingMode);
+        const physicalExtent = uprightPhysicalExtent({
+          widthPt: region.section.geometry.pageWidth,
+          heightPt: region.section.geometry.pageHeight,
+        }, writingMode);
+        if (physicalExtent.widthPt !== page.geometry.widthPt
+          || physicalExtent.heightPt !== page.geometry.heightPt) {
+          throw new LayoutInvariantError(
+            'INVALID_GEOMETRY',
+            `${path} section geometry does not match the upright physical page`,
+          );
+        }
         requireFinite(region.blockStartPt, `${path}.blockStartPt`);
         requireFinite(region.blockEndPt, `${path}.blockEndPt`);
-        if (region.blockEndPt < region.blockStartPt) {
-          throw new LayoutInvariantError('INVALID_GEOMETRY', `${path} has a negative block extent`);
+        if (region.blockStartPt < 0
+          || region.blockStartPt < priorBlockEndPt
+          || region.blockEndPt <= region.blockStartPt
+          || region.blockEndPt > logicalExtent.heightPt) {
+          throw new LayoutInvariantError('INVALID_GEOMETRY', `${path} has an invalid block interval`);
         }
-        region.flowDomainIds.forEach((domainId) => {
-          if (!domains.has(domainId)) {
+        priorBlockEndPt = region.blockEndPt;
+        const expectedCoordinateSpace = createSectionRegionCoordinateSpace(
+          region.coordinateSpace.writingMode,
+          page.geometry,
+        );
+        if (!equalMatrix(
+          region.coordinateSpace.logicalToPhysical,
+          expectedCoordinateSpace.logicalToPhysical,
+        ) || !equalMatrix(
+          region.coordinateSpace.physicalToLogical,
+          expectedCoordinateSpace.physicalToLogical,
+        )) {
+          throw new LayoutInvariantError('INVALID_GEOMETRY', `${path} has an invalid coordinate transform`);
+        }
+        if (region.flowDomainIds.length !== region.section.columns.length) {
+          throw new LayoutInvariantError('INVALID_GEOMETRY', `${path} columns contradict its section`);
+        }
+        let priorInlineEndPt = 0;
+        region.flowDomainIds.forEach((domainId, columnIndex) => {
+          const domain = domains.get(domainId);
+          if (!domain) {
             throw new LayoutInvariantError('INVALID_REFERENCE', `${path} references missing flow domain ${domainId}`);
           }
+          if (domain.kind !== 'body') {
+            throw new LayoutInvariantError('INVALID_REFERENCE', `${path} owns non-body flow domain ${domainId}`);
+          }
           bodyOwnership.set(domainId, (bodyOwnership.get(domainId) ?? 0) + 1);
+          regionByDomain.set(domainId, region);
+          const bounds = domain.logicalBounds;
+          const sectionColumn = region.section.columns[columnIndex];
+          if (bounds.widthPt <= 0 || bounds.heightPt <= 0
+            || bounds.yPt !== region.blockStartPt
+            || bounds.yPt + bounds.heightPt !== region.blockEndPt
+            || bounds.xPt < 0
+            || bounds.xPt < priorInlineEndPt
+            || bounds.xPt + bounds.widthPt > logicalExtent.widthPt
+            || sectionColumn === undefined
+            || bounds.xPt !== sectionColumn.xPt
+            || bounds.widthPt !== sectionColumn.wPt) {
+            throw new LayoutInvariantError(
+              'INVALID_GEOMETRY',
+              `${domainId} is not the section column's positive logical region`,
+            );
+          }
+          priorInlineEndPt = bounds.xPt + bounds.widthPt;
+          const expectedPhysicalBounds = transformRect(
+            region.coordinateSpace.logicalToPhysical,
+            domain.logicalBounds,
+          );
+          if (!equalRect(expectedPhysicalBounds, domain.physicalBounds)) {
+            throw new LayoutInvariantError(
+              'INVALID_GEOMETRY',
+              `${domainId} physical bounds do not match its section region transform`,
+            );
+          }
+          if (!contains(page.geometry, domain.physicalBounds)) {
+            throw new LayoutInvariantError(
+              'INVALID_GEOMETRY',
+              `${domainId} physical bounds leave the upright physical page`,
+            );
+          }
         });
       });
       page.flowDomains.filter((domain) => domain.kind === 'body').forEach((domain) => {
@@ -334,6 +512,30 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
           );
         }
       });
+      if (!page.parityBlank && page.sectionRegions.length > 0
+      ) {
+        const firstRegion = page.sectionRegions[0]!;
+        if (page.sectionOccurrenceId !== firstRegion.sectionOccurrenceId) {
+          throw new LayoutInvariantError(
+            'INVALID_REFERENCE',
+            `pages[${pageIndex}] page-start section occurrence does not match its first region`,
+          );
+        }
+        if (!sectionLayoutContextsEqual(page.section, firstRegion.section)) {
+          throw new LayoutInvariantError(
+            'INVALID_GEOMETRY',
+            `pages[${pageIndex}] page-start section facts do not match its first region`,
+          );
+        }
+      }
+    }
+    for (const domain of page.flowDomains) {
+      if (!regionByDomain.has(domain.id) && !equalRect(domain.logicalBounds, domain.physicalBounds)) {
+        throw new LayoutInvariantError(
+          'INVALID_GEOMETRY',
+          `${domain.id} has unequal logical and physical bounds without a section region`,
+        );
+      }
     }
 
     if (page.pageNumber) {
@@ -380,11 +582,14 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
         throw new LayoutInvariantError('INVALID_REFERENCE', `${node.id} references missing flow domain ${node.flowDomainId}`);
       }
       if (!node.ordinaryFlow) return;
-      if (domain.kind === 'body'
-        && node.flowBounds.yPt + node.flowBounds.heightPt > page.geometry.contentBottomPt) {
-        throw new LayoutInvariantError('BOTTOM_MARGIN_INVASION', `${node.id} crosses contentBottomPt`);
+      if (domain.kind === 'body') {
+        const region = regionByDomain.get(domain.id);
+        const blockEndPt = region?.blockEndPt ?? page.geometry.contentBottomPt;
+        if (node.flowBounds.yPt + node.flowBounds.heightPt > blockEndPt) {
+          throw new LayoutInvariantError('BOTTOM_MARGIN_INVASION', `${node.id} crosses logical block end`);
+        }
       }
-      if (!contains(domain.bounds, node.flowBounds)) {
+      if (!contains(domain.logicalBounds, node.flowBounds)) {
         throw new LayoutInvariantError('FLOW_DOMAIN_INVASION', `${node.id} crosses flow domain ${domain.id}`);
       }
       ordinary.push(node);
@@ -398,26 +603,36 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
       read.add(nodeId);
     });
 
-    const bookmarkNames = new Set<string>();
-    page.bookmarkStarts?.forEach((bookmark) => {
-      if (
-        bookmark.name.length === 0
-        || bookmarkNames.has(bookmark.name)
-        || !retainedNodeIds.has(bookmark.nodeId)
-      ) {
+    if (page.bookmarkStarts !== undefined) {
+      const sectionByDomain = new Map(
+        [...regionByDomain].map(([domainId, region]) => [
+          domainId,
+          region.sectionOccurrenceId,
+        ]),
+      );
+      const expectedBookmarkStarts = derivePageBookmarkStarts(
+        orderedPagePaintNodes(page),
+        page.sectionOccurrenceId ?? '',
+        sectionByDomain,
+      );
+      const bookmarkOwnersAreValid = expectedBookmarkStarts.every((bookmark) =>
+        bookmark.sectionOccurrenceId.length > 0
+        && sectionOccurrenceIds.has(bookmark.sectionOccurrenceId));
+      const bookmarkMetadataMatches = page.bookmarkStarts.length === expectedBookmarkStarts.length
+        && page.bookmarkStarts.every((bookmark, index) => {
+          const expected = expectedBookmarkStarts[index];
+          return expected !== undefined
+            && bookmark.name === expected.name
+            && bookmark.nodeId === expected.nodeId
+            && bookmark.sectionOccurrenceId === expected.sectionOccurrenceId;
+        });
+      if (!bookmarkOwnersAreValid || !bookmarkMetadataMatches) {
         throw new LayoutInvariantError(
           'INVALID_REFERENCE',
-          `invalid bookmark node ${bookmark.nodeId}`,
+          `pages[${pageIndex}] bookmark metadata does not match its retained graph (invalid bookmark node or ownership)`,
         );
       }
-      if (!sectionOccurrenceIds.has(bookmark.sectionOccurrenceId)) {
-        throw new LayoutInvariantError(
-          'INVALID_REFERENCE',
-          `bookmark ${bookmark.name} has an invalid section owner`,
-        );
-      }
-      bookmarkNames.add(bookmark.name);
-    });
+    }
 
     for (let index = 0; index < ordinary.length; index += 1) {
       for (let other = index + 1; other < ordinary.length; other += 1) {
@@ -431,6 +646,18 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
       }
     }
   });
+}
+
+export function assertDocumentLayout(layout: DocumentLayout): void {
+  try {
+    assertDocumentLayoutUnchecked(layout);
+  } catch (error) {
+    if (error instanceof LayoutInvariantError) throw error;
+    if (error instanceof TypeError || error instanceof RangeError) {
+      throw new LayoutInvariantError('INVALID_GEOMETRY', error.message);
+    }
+    throw error;
+  }
 }
 
 function canonicalize(value: unknown): unknown {

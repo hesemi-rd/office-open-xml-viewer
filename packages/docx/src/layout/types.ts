@@ -41,6 +41,11 @@ export interface LayoutRect extends PointPt {
   readonly heightPt: number;
 }
 
+export type LayoutCoordinateSpace =
+  | 'column-local-logical'
+  | 'logical-page-points'
+  | 'upright-physical-page-points';
+
 export type FlowDomainKind =
   | 'body'
   | 'header'
@@ -53,7 +58,10 @@ export type FlowDomainKind =
 export interface FlowDomain {
   readonly id: string;
   readonly kind: FlowDomainKind;
-  readonly bounds: LayoutRect;
+  /** logical-page-points; same space as retained node flowBounds/inkBounds. */
+  readonly logicalBounds: LayoutRect;
+  /** upright-physical-page-points. */
+  readonly physicalBounds: LayoutRect;
 }
 
 export interface PageGeometry extends LayoutRect {
@@ -68,6 +76,12 @@ export interface Matrix2DData {
   readonly d: number;
   readonly e: number;
   readonly f: number;
+}
+
+export interface SectionRegionCoordinateSpace {
+  readonly writingMode: WritingMode;
+  readonly logicalToPhysical: Matrix2DData;
+  readonly physicalToLogical: Matrix2DData;
 }
 
 export type ClipPathData =
@@ -632,9 +646,10 @@ export interface FloatRegistryEntryPt {
   readonly exclusionBounds: LayoutRect;
 }
 
-export type FloatRegistryCoordinateSpace =
-  | 'logical-page-points'
-  | 'upright-physical-page-points';
+export type FloatRegistryCoordinateSpace = Exclude<
+  LayoutCoordinateSpace,
+  'column-local-logical'
+>;
 
 export interface FloatRegistrySnapshotPt {
   readonly coordinateSpace: FloatRegistryCoordinateSpace;
@@ -711,10 +726,7 @@ export interface PageSectionRegion {
   readonly sectionOccurrenceId: string;
   /** Logical inline/block coordinates are retained independently of physical
    * x/y so vertical sections do not silently inherit horizontal Y-flow rules. */
-  readonly coordinateSpace?: Readonly<{
-    writingMode: WritingMode;
-    logicalToPhysical: Matrix2DData;
-  }>;
+  readonly coordinateSpace: SectionRegionCoordinateSpace;
   readonly blockStartPt: number;
   readonly blockEndPt: number;
   readonly flowDomainIds: readonly string[];
@@ -1028,7 +1040,12 @@ export interface TableLayoutInput {
 
 export type FlowBlockInput = ParagraphLayoutInput | TableLayoutInput;
 
-export interface FlowContainer extends FlowDomain {}
+export interface FlowContainer {
+  readonly id: string;
+  readonly kind: FlowDomainKind;
+  /** Acquisition-local logical bounds; never retained physical page bounds. */
+  readonly bounds: LayoutRect;
+}
 
 export interface FlowCursor extends PointPt {}
 

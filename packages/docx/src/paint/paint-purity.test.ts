@@ -40,7 +40,8 @@ describe('paintLayoutPage', () => {
         flowDomains: [{
           id: 'body',
           kind: 'body',
-          bounds: { xPt: 10, yPt: 10, widthPt: 80, heightPt: 180 },
+          logicalBounds: { xPt: 10, yPt: 10, widthPt: 80, heightPt: 180 },
+          physicalBounds: { xPt: 10, yPt: 10, widthPt: 80, heightPt: 180 },
         }],
         section: {} as SectionLayoutContext,
         layers: {
@@ -96,7 +97,11 @@ describe('paintLayoutPage', () => {
     const page = {
       pageIndex: 0,
       geometry: { xPt: 0, yPt: 0, widthPt: 100, heightPt: 200, contentTopPt: 10, contentBottomPt: 190 },
-      flowDomains: [{ id: 'body', kind: 'body' as const, bounds: { xPt: 10, yPt: 10, widthPt: 80, heightPt: 180 } }],
+      flowDomains: [{
+        id: 'body', kind: 'body' as const,
+        logicalBounds: { xPt: 10, yPt: 10, widthPt: 80, heightPt: 180 },
+        physicalBounds: { xPt: 10, yPt: 10, widthPt: 80, heightPt: 180 },
+      }],
       section: {} as SectionLayoutContext,
       layers: {
         paintOrder: [{ layer: 'body' as const, nodeId: 'missing' }],
@@ -158,7 +163,11 @@ describe('paintLayoutPage', () => {
       pages: [{
         pageIndex: 0,
         geometry: { xPt: 0, yPt: 0, widthPt: 100, heightPt: 200, contentTopPt: 10, contentBottomPt: 190 },
-        flowDomains: [{ id: 'body', kind: 'body', bounds: { xPt: 10, yPt: 10, widthPt: 80, heightPt: 180 } }],
+        flowDomains: [{
+          id: 'body', kind: 'body',
+          logicalBounds: { xPt: 10, yPt: 10, widthPt: 80, heightPt: 180 },
+          physicalBounds: { xPt: 10, yPt: 10, widthPt: 80, heightPt: 180 },
+        }],
         section: {} as SectionLayoutContext,
         layers: {
           paintOrder: [{ layer: 'body', nodeId: 'table-0' }],

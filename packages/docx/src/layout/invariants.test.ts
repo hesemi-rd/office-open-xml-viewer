@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { layoutFlowBlocks } from './flow.js';
 import { assertDocumentLayout, layoutFingerprint } from './invariants.js';
+import { LayoutInvariantError } from './diagnostics.js';
 import type {
   BlockLayoutAlgorithms,
   DocumentLayout,
@@ -64,8 +65,130 @@ function drawing(
 const bodyDomain: FlowDomain = {
   id: 'body',
   kind: 'body',
-  bounds: rect(72, 72, 468, 648),
+  logicalBounds: rect(72, 72, 468, 648),
+  physicalBounds: rect(72, 72, 468, 648),
 };
+
+const horizontalSection: SectionLayoutContext = {
+  geometry: {
+    pageWidth: 612, pageHeight: 792,
+    marginTop: 72, marginRight: 72, marginBottom: 72, marginLeft: 72,
+    headerDistance: 36, footerDistance: 36,
+  },
+  columns: [{ xPt: 72, wPt: 468 }],
+  grid: { kind: 'none', linePitchPt: null, charSpacePt: null },
+  textDirection: 'lrTb',
+  verticalAlignment: 'top',
+};
+
+const verticalSection: SectionLayoutContext = {
+  ...horizontalSection,
+  geometry: { ...horizontalSection.geometry, pageWidth: 792, pageHeight: 612 },
+  columns: [{ xPt: 72, wPt: 648 }],
+  textDirection: 'tbRl',
+};
+
+function regionLayout(): DocumentLayout {
+  const base = documentWith([]);
+  return {
+    ...base,
+    pages: [{
+      ...base.pages[0]!,
+      section: horizontalSection,
+      sectionOccurrenceId: 'section:body',
+      flowDomains: [{
+        id: 'body', kind: 'body',
+        logicalBounds: rect(72, 72, 468, 648),
+        physicalBounds: rect(72, 72, 468, 648),
+      }],
+      sectionRegions: [{
+        id: 'region:body', sectionOccurrenceId: 'section:body',
+        coordinateSpace: {
+          writingMode: 'horizontal-tb',
+          logicalToPhysical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+          physicalToLogical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+        },
+        blockStartPt: 72, blockEndPt: 720,
+        flowDomainIds: ['body'], section: horizontalSection,
+      }],
+    }],
+  };
+}
+
+function twoRegionLayout(
+  secondSectionOccurrenceId: string,
+  secondWritingMode: 'horizontal-tb' | 'vertical-rl' = 'horizontal-tb',
+): DocumentLayout {
+  const base = regionLayout();
+  const firstDomain = {
+    ...base.pages[0]!.flowDomains[0]!,
+    logicalBounds: rect(72, 72, 468, 228),
+    physicalBounds: rect(72, 72, 468, 228),
+  };
+  const secondIsVertical = secondWritingMode === 'vertical-rl';
+  const secondSection = secondIsVertical ? verticalSection : horizontalSection;
+  const secondDomain: FlowDomain = secondIsVertical
+    ? {
+        id: 'body:second', kind: 'body',
+        logicalBounds: rect(72, 300, 648, 240),
+        physicalBounds: rect(72, 72, 240, 648),
+      }
+    : {
+        id: 'body:second', kind: 'body',
+        logicalBounds: rect(72, 300, 468, 420),
+        physicalBounds: rect(72, 300, 468, 420),
+      };
+  return {
+    ...base,
+    pages: [{
+      ...base.pages[0]!,
+      flowDomains: [firstDomain, secondDomain],
+      sectionRegions: [
+        {
+          ...base.pages[0]!.sectionRegions![0]!,
+          blockEndPt: 300,
+          flowDomainIds: [firstDomain.id],
+        },
+        {
+          id: 'region:second',
+          sectionOccurrenceId: secondSectionOccurrenceId,
+          coordinateSpace: secondIsVertical
+            ? {
+                writingMode: 'vertical-rl',
+                logicalToPhysical: { a: 0, b: 1, c: -1, d: 0, e: 612, f: 0 },
+                physicalToLogical: { a: 0, b: -1, c: 1, d: 0, e: 0, f: 612 },
+              }
+            : {
+                writingMode: 'horizontal-tb',
+                logicalToPhysical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+                physicalToLogical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+              },
+          blockStartPt: 300,
+          blockEndPt: secondIsVertical ? 540 : 720,
+          flowDomainIds: [secondDomain.id],
+          section: secondSection,
+        },
+      ],
+    }],
+  };
+}
+
+function expectInvariantCode(
+  code: LayoutInvariantError['code'],
+  run: () => void,
+): void {
+  try {
+    run();
+    throw new Error(`expected ${code}`);
+  } catch (error) {
+    expect(error).toBeInstanceOf(LayoutInvariantError);
+    expect((error as LayoutInvariantError).code).toBe(code);
+  }
+}
+
+function expectInvalidGeometry(run: () => void): void {
+  expectInvariantCode('INVALID_GEOMETRY', run);
+}
 
 function serviceStubs(): LayoutServices {
   return {
@@ -164,7 +287,10 @@ describe('assertDocumentLayout', () => {
         ...base.pages[0]!,
         flowDomains: [
           bodyDomain,
-          { id: 'footer:default', kind: 'footer', bounds: rect(72, 730, 468, 40) },
+          {
+            id: 'footer:default', kind: 'footer',
+            logicalBounds: rect(72, 730, 468, 40), physicalBounds: rect(72, 730, 468, 40),
+          },
         ],
         layers: {
           ...base.pages[0]!.layers,
@@ -191,8 +317,14 @@ describe('assertDocumentLayout', () => {
       pages: [{
         ...base.pages[0]!,
         flowDomains: [
-          { id: 'cell:1', kind: 'tableCell', bounds: rect(90, 90, 100, 40) },
-          { id: 'cell:2', kind: 'tableCell', bounds: rect(90, 90, 100, 40) },
+          {
+            id: 'cell:1', kind: 'tableCell',
+            logicalBounds: rect(90, 90, 100, 40), physicalBounds: rect(90, 90, 100, 40),
+          },
+          {
+            id: 'cell:2', kind: 'tableCell',
+            logicalBounds: rect(90, 90, 100, 40), physicalBounds: rect(90, 90, 100, 40),
+          },
         ],
       }],
     };
@@ -289,22 +421,359 @@ describe('assertDocumentLayout', () => {
 
   it('requires every body flow domain to belong to exactly one page-local section region', () => {
     const base = documentWith([drawing('n1', rect(72, 100, 200, 30))]);
+    const noColumnSection = { ...horizontalSection, columns: [] };
     const layout = {
       ...base,
       pages: [{
         ...base.pages[0]!,
+        section: noColumnSection,
         sectionRegions: [{
           id: 'section-region:0',
           sectionOccurrenceId: 'section:0',
+          coordinateSpace: {
+            writingMode: 'horizontal-tb',
+            logicalToPhysical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+            physicalToLogical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+          },
           blockStartPt: 72,
           blockEndPt: 720,
           flowDomainIds: [],
-          section: base.pages[0]!.section,
+          section: noColumnSection,
         }],
       }],
     } as DocumentLayout;
 
     expect(() => assertDocumentLayout(layout)).toThrow(/section region ownership/);
+  });
+
+  it('accepts logical vertical flow even when its upright physical rectangle has exchanged axes', () => {
+    const node = drawing('vertical', rect(72, 100, 648, 40), { flowDomainId: 'vertical-body' });
+    const base = documentWith([node]);
+    const strictVerticalSection = { ...verticalSection, textDirection: 'rlV' };
+    const layout: DocumentLayout = {
+      ...base,
+      pages: [{
+        ...base.pages[0]!,
+        section: strictVerticalSection,
+        sectionOccurrenceId: 'section:vertical',
+        flowDomains: [{
+          id: 'vertical-body', kind: 'body',
+          logicalBounds: rect(72, 72, 648, 468),
+          physicalBounds: rect(72, 72, 468, 648),
+        }],
+        sectionRegions: [{
+          id: 'region:vertical', sectionOccurrenceId: 'section:vertical',
+          coordinateSpace: {
+            writingMode: 'vertical-rl',
+            logicalToPhysical: { a: 0, b: 1, c: -1, d: 0, e: 612, f: 0 },
+            physicalToLogical: { a: 0, b: -1, c: 1, d: 0, e: 0, f: 612 },
+          },
+          blockStartPt: 72, blockEndPt: 540,
+          flowDomainIds: ['vertical-body'], section: strictVerticalSection,
+        }],
+      }],
+    };
+
+    expect(() => assertDocumentLayout(layout)).not.toThrow();
+  });
+
+  it('rejects genuine logical vertical block overflow regardless of physical page containment', () => {
+    const node = drawing('vertical-overflow', rect(72, 530, 100, 20), {
+      flowDomainId: 'vertical-body',
+    });
+    const base = documentWith([node]);
+    const layout: DocumentLayout = {
+      ...base,
+      pages: [{
+        ...base.pages[0]!, section: verticalSection, sectionOccurrenceId: 'section:vertical',
+        flowDomains: [{
+          id: 'vertical-body', kind: 'body',
+          logicalBounds: rect(72, 72, 648, 468), physicalBounds: rect(72, 72, 468, 648),
+        }],
+        sectionRegions: [{
+          id: 'region:vertical', sectionOccurrenceId: 'section:vertical',
+          coordinateSpace: {
+            writingMode: 'vertical-rl',
+            logicalToPhysical: { a: 0, b: 1, c: -1, d: 0, e: 612, f: 0 },
+            physicalToLogical: { a: 0, b: -1, c: 1, d: 0, e: 0, f: 612 },
+          },
+          blockStartPt: 72, blockEndPt: 540,
+          flowDomainIds: ['vertical-body'], section: verticalSection,
+        }],
+      }],
+    };
+
+    expect(() => assertDocumentLayout(layout))
+      .toThrow(/BOTTOM_MARGIN_INVASION|FLOW_DOMAIN_INVASION/);
+  });
+
+  it('rejects a retained physical domain that is not derived from its region transform', () => {
+    const base = documentWith([]);
+    const layout: DocumentLayout = {
+      ...base,
+      pages: [{
+        ...base.pages[0]!, section: verticalSection, sectionOccurrenceId: 'section:vertical',
+        flowDomains: [{
+          id: 'vertical-body', kind: 'body',
+          logicalBounds: rect(72, 72, 648, 468), physicalBounds: rect(0, 0, 1, 1),
+        }],
+        sectionRegions: [{
+          id: 'region:vertical', sectionOccurrenceId: 'section:vertical',
+          coordinateSpace: {
+            writingMode: 'vertical-rl',
+            logicalToPhysical: { a: 0, b: 1, c: -1, d: 0, e: 612, f: 0 },
+            physicalToLogical: { a: 0, b: -1, c: 1, d: 0, e: 0, f: 612 },
+          },
+          blockStartPt: 72, blockEndPt: 540,
+          flowDomainIds: ['vertical-body'], section: verticalSection,
+        }],
+      }],
+    };
+
+    expect(() => assertDocumentLayout(layout)).toThrow(/INVALID_GEOMETRY/);
+  });
+
+  it('requires equal dual-space bounds on transitional pages without regions', () => {
+    const base = documentWith([]);
+    const unequal: DocumentLayout = {
+      ...base,
+      pages: [{
+        ...base.pages[0]!,
+        flowDomains: [{
+          ...bodyDomain,
+          physicalBounds: rect(0, 0, 468, 648),
+        }],
+      }],
+    };
+
+    expect(() => assertDocumentLayout(unequal)).toThrow(/INVALID_GEOMETRY/);
+    expect(() => assertDocumentLayout(base)).not.toThrow();
+  });
+
+  it('requires page-start ownership and the exact supported retained transform', () => {
+    const base = documentWith([]);
+    const region = {
+      id: 'region:body', sectionOccurrenceId: 'section:first',
+      coordinateSpace: {
+        writingMode: 'horizontal-tb' as const,
+        logicalToPhysical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+        physicalToLogical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+      },
+      blockStartPt: 72, blockEndPt: 720,
+      flowDomainIds: ['body'], section: horizontalSection,
+    };
+    const page = {
+      ...base.pages[0]!, section: horizontalSection,
+      sectionOccurrenceId: 'section:first', sectionRegions: [region],
+    };
+
+    expect(() => assertDocumentLayout({ ...base, pages: [page] })).not.toThrow();
+    expect(() => assertDocumentLayout({
+      ...base, pages: [{ ...page, sectionOccurrenceId: 'section:other' }],
+    })).toThrow(/page-start section occurrence/);
+    expect(() => assertDocumentLayout({
+      ...base,
+      pages: [{
+        ...page,
+        sectionRegions: [{
+          ...region,
+          coordinateSpace: {
+            ...region.coordinateSpace,
+            logicalToPhysical: { ...region.coordinateSpace.logicalToPhysical, e: 1 },
+          },
+        }],
+      }],
+    })).toThrow(/invalid coordinate transform/);
+  });
+
+  it('rejects clone data whose region direction or columns contradict its section', () => {
+    const valid = regionLayout();
+    expect(() => assertDocumentLayout(valid)).not.toThrow();
+    expectInvalidGeometry(() => assertDocumentLayout({
+      ...valid,
+      pages: [{
+        ...valid.pages[0]!,
+        sectionRegions: [{
+          ...valid.pages[0]!.sectionRegions![0]!,
+          coordinateSpace: {
+            ...valid.pages[0]!.sectionRegions![0]!.coordinateSpace,
+            writingMode: 'vertical-rl',
+          },
+        }],
+      }],
+    }));
+    expectInvalidGeometry(() => assertDocumentLayout({
+      ...valid,
+      pages: [{
+        ...valid.pages[0]!,
+        sectionRegions: [{
+          ...valid.pages[0]!.sectionRegions![0]!,
+          section: { ...horizontalSection, columns: [{ xPt: 73, wPt: 468 }] },
+        }],
+      }],
+    }));
+  });
+
+  it('rejects duplicate section occurrence identities in cloned page regions', () => {
+    expectInvariantCode(
+      'INVALID_REFERENCE',
+      () => assertDocumentLayout(twoRegionLayout('section:body')),
+    );
+  });
+
+  it('rejects cloned page regions that mix logical coordinate systems', () => {
+    expectInvalidGeometry(() => assertDocumentLayout(
+      twoRegionLayout('section:second', 'vertical-rl'),
+    ));
+  });
+
+  it('rejects page-start section facts that contradict the first region clone', () => {
+    const valid = regionLayout();
+    const mismatches: SectionLayoutContext[] = [
+      { ...horizontalSection, geometry: { ...horizontalSection.geometry, marginLeft: 73 } },
+      { ...horizontalSection, columns: [{ xPt: 73, wPt: 468 }] },
+      { ...horizontalSection, textDirection: 'lrTbV' },
+      { ...horizontalSection, grid: { ...horizontalSection.grid, kind: 'lines' } },
+      { ...horizontalSection, verticalAlignment: 'center' },
+      {
+        ...horizontalSection,
+        lineNumbering: { start: 1, countBy: 1, restart: 'newPage' },
+      },
+    ];
+    for (const section of mismatches) {
+      expectInvalidGeometry(() => assertDocumentLayout({
+        ...valid, pages: [{ ...valid.pages[0]!, section }],
+      }));
+    }
+  });
+
+  it('rejects invalid region intervals and owned logical domain geometry', () => {
+    const valid = regionLayout();
+    const region = valid.pages[0]!.sectionRegions![0]!;
+    const domain = valid.pages[0]!.flowDomains[0]!;
+    const invalidRegions = [
+      { ...region, blockStartPt: -1 },
+      { ...region, blockEndPt: 793 },
+      { ...region, blockEndPt: region.blockStartPt },
+    ];
+    for (const invalidRegion of invalidRegions) {
+      expectInvalidGeometry(() => assertDocumentLayout({
+        ...valid,
+        pages: [{ ...valid.pages[0]!, sectionRegions: [invalidRegion] }],
+      }));
+    }
+
+    const invalidDomains = [
+      { ...domain, logicalBounds: rect(72, 71, 468, 649) },
+      { ...domain, logicalBounds: rect(72, 72, 0, 648) },
+      { ...domain, logicalBounds: rect(72, 72, 468, 0) },
+      { ...domain, logicalBounds: rect(71, 72, 469, 648) },
+      { ...domain, physicalBounds: rect(600, 72, 20, 648) },
+    ];
+    for (const invalidDomain of invalidDomains) {
+      expectInvalidGeometry(() => assertDocumentLayout({
+        ...valid,
+        pages: [{ ...valid.pages[0]!, flowDomains: [invalidDomain] }],
+      }));
+    }
+  });
+
+  it('rejects overlapping and out-of-page inline domains', () => {
+    const valid = regionLayout();
+    const region = valid.pages[0]!.sectionRegions![0]!;
+    const domains: FlowDomain[] = [
+      {
+        id: 'body:first', kind: 'body',
+        logicalBounds: rect(72, 72, 250, 648), physicalBounds: rect(72, 72, 250, 648),
+      },
+      {
+        id: 'body:second', kind: 'body',
+        logicalBounds: rect(300, 72, 240, 648), physicalBounds: rect(300, 72, 240, 648),
+      },
+    ];
+    const section = { ...horizontalSection, columns: [{ xPt: 72, wPt: 250 }, { xPt: 300, wPt: 240 }] };
+    expectInvalidGeometry(() => assertDocumentLayout({
+      ...valid,
+      pages: [{
+        ...valid.pages[0]!, section,
+        flowDomains: domains,
+        sectionRegions: [{ ...region, section, flowDomainIds: domains.map(({ id }) => id) }],
+      }],
+    }));
+
+    const outsideSection = {
+      ...horizontalSection,
+      columns: [{ xPt: 500, wPt: 200 }],
+    };
+    const outsideDomain: FlowDomain = {
+      id: 'body:outside', kind: 'body',
+      logicalBounds: rect(500, 72, 200, 648),
+      physicalBounds: rect(500, 72, 200, 648),
+    };
+    expectInvalidGeometry(() => assertDocumentLayout({
+      ...valid,
+      pages: [{
+        ...valid.pages[0]!, section: outsideSection,
+        flowDomains: [outsideDomain],
+        sectionRegions: [{
+          ...region, section: outsideSection, flowDomainIds: [outsideDomain.id],
+        }],
+      }],
+    }));
+  });
+
+  it('rejects exact derived physical bounds that leave the retained physical page box', () => {
+    const valid = regionLayout();
+    const page = valid.pages[0]!;
+    const region = page.sectionRegions![0]!;
+    const section = {
+      ...horizontalSection,
+      columns: [{ xPt: 0, wPt: 468 }],
+    };
+    const domain: FlowDomain = {
+      id: 'body:physical-overflow', kind: 'body',
+      logicalBounds: rect(0, 72, 468, 648),
+      physicalBounds: rect(0, 72, 468, 648),
+    };
+    expectInvalidGeometry(() => assertDocumentLayout({
+      ...valid,
+      pages: [{
+        ...page,
+        geometry: { ...page.geometry, xPt: 10 },
+        section,
+        flowDomains: [domain],
+        sectionRegions: [{ ...region, section, flowDomainIds: [domain.id] }],
+      }],
+    }));
+  });
+
+  it('normalizes malformed coordinate clones and invalid page extents to INVALID_GEOMETRY', () => {
+    const valid = regionLayout();
+    const region = valid.pages[0]!.sectionRegions![0]!;
+    const malformedCoordinateSpaces: unknown[] = [
+      undefined,
+      {},
+      { writingMode: 'diagonal', logicalToPhysical: {}, physicalToLogical: {} },
+      { writingMode: 'horizontal-tb', logicalToPhysical: undefined, physicalToLogical: {} },
+    ];
+    for (const coordinateSpace of malformedCoordinateSpaces) {
+      expectInvalidGeometry(() => assertDocumentLayout({
+        ...valid,
+        pages: [{
+          ...valid.pages[0]!,
+          sectionRegions: [{ ...region, coordinateSpace }],
+        }],
+      } as DocumentLayout));
+    }
+    for (const [widthPt, heightPt] of [[0, 792], [-1, 792], [612, 0]]) {
+      expectInvalidGeometry(() => assertDocumentLayout({
+        ...valid,
+        pages: [{
+          ...valid.pages[0]!,
+          geometry: { ...valid.pages[0]!.geometry, widthPt, heightPt },
+        }],
+      }));
+    }
   });
 });
 

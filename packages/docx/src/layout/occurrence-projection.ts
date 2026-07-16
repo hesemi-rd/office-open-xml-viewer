@@ -16,10 +16,11 @@ import type {
   TableLayout,
   TableRowLayout,
   TextBoxLayout,
+  LayoutCoordinateSpace,
 } from './types.js';
 
 export interface BodyOccurrenceDestination {
-  readonly coordinateSpace: 'logical-body-points';
+  readonly coordinateSpace: Extract<LayoutCoordinateSpace, 'logical-page-points'>;
   readonly flowDomainId: string;
   readonly translation: Readonly<{ xPt: number; yPt: number }>;
 }

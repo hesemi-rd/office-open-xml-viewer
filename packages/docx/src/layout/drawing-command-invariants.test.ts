@@ -24,7 +24,8 @@ function layoutWith(command: DrawingLayout['commands'][number]): DocumentLayout 
       },
       flowDomains: [{
         id: 'body', kind: 'body',
-        bounds: { xPt: 72, yPt: 72, widthPt: 468, heightPt: 648 },
+        logicalBounds: { xPt: 72, yPt: 72, widthPt: 468, heightPt: 648 },
+        physicalBounds: { xPt: 72, yPt: 72, widthPt: 468, heightPt: 648 },
       }],
       section: {} as DocumentLayout['pages'][number]['section'],
       layers: {

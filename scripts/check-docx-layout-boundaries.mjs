@@ -379,6 +379,50 @@ function assertOccurrenceProjectionRuntimeDependencies(root) {
   }
 }
 
+function assertCoordinateSpaceRuntimeDependencies(root) {
+  const coordinate = resolve(root, LAYOUT_SOURCE, 'coordinate-space.ts');
+  const pageFactory = resolve(root, LAYOUT_SOURCE, 'page-factory.ts');
+  for (const path of [coordinate, pageFactory]) {
+    if (!existsSync(path)) {
+      fail('COORDINATE_SPACE_RUNTIME_DEPENDENCY', `missing ${posixPath(relative(root, path))}`);
+    }
+  }
+
+  for (const edge of moduleEdges(coordinate)) {
+    const detail = `${posixPath(relative(root, coordinate))} -> ${edge.specifier}`;
+    if (edge.kind !== 'import' || !edge.literal || edge.bare || !edge.typeOnly
+      || edge.specifier !== './types.js') {
+      fail('COORDINATE_SPACE_RUNTIME_DEPENDENCY', detail);
+    }
+  }
+
+  const runtimeTargets = new Set([
+    resolve(root, LAYOUT_SOURCE, 'coordinate-space.ts'),
+    resolve(root, LAYOUT_SOURCE, 'page-graph.ts'),
+  ]);
+  for (const edge of moduleEdges(pageFactory)) {
+    if (edge.typeOnly) {
+      if (edge.specifier.includes('?') || edge.specifier.includes('#')) {
+        fail(
+          'COORDINATE_SPACE_RUNTIME_DEPENDENCY',
+          `${posixPath(relative(root, pageFactory))} -> ${edge.specifier}`,
+        );
+      }
+      continue;
+    }
+    const detail = `${posixPath(relative(root, pageFactory))} -> ${edge.specifier}`;
+    if (edge.kind !== 'import' || !edge.literal || edge.bare
+      || edge.specifier.includes('?') || edge.specifier.includes('#')
+      || !edge.specifier.startsWith('.')) {
+      fail('COORDINATE_SPACE_RUNTIME_DEPENDENCY', detail);
+    }
+    const dependency = resolveLocalImport(pageFactory, edge.specifier);
+    if (!dependency || !runtimeTargets.has(dependency)) {
+      fail('COORDINATE_SPACE_RUNTIME_DEPENDENCY', detail);
+    }
+  }
+}
+
 /**
  * Body paint consumes retained placements. Letting this adapter call a layout
  * entry point would silently reintroduce a second layout pass whose result can
@@ -2688,6 +2732,7 @@ export function checkDocxLayoutBoundaries(options) {
   assertNoProductionTestSupportImports(root);
   assertPaintBoundaries(root);
   assertCapabilityBoundaries(root);
+  assertCoordinateSpaceRuntimeDependencies(root);
   assertOccurrenceProjectionRuntimeDependencies(root);
   assertBodyPaintConsumesRetainedLayout(root);
   assertLayoutParserModelBoundaries(root);

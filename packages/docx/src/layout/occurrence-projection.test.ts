@@ -52,7 +52,7 @@ function table(id = 'table'): TableLayout {
 const options = {
   occurrenceId: 'page 2/header',
   destination: {
-    coordinateSpace: 'logical-body-points' as const,
+    coordinateSpace: 'logical-page-points' as const,
     flowDomainId: 'body/page-2', translation: { xPt: 20, yPt: 30 },
   },
 };
