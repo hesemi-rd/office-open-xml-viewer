@@ -45,6 +45,13 @@ import {
 } from './layout/textbox-input.js';
 import { tableCellHorizontalSpacingInsets } from './layout/table-columns.js';
 import {
+  divideExactLengthKey,
+  exactLengthKeyFromDecimal,
+  exactLengthKeyFromNumber,
+  exactLengthKeyToNumber,
+  multiplyExactLengthKeys,
+} from './layout/exact-length.js';
+import {
   sectionGeometry,
   type BodySectionIndexInput,
   type BodySectionOccurrence,
@@ -170,6 +177,12 @@ export interface TableLayoutAcquisitionWire {
   /** Word-effective flow participation after [MS-OI29500] 2.1.162(b-c), not
    * the lexical presence/absence of the public `tblpPr` compatibility field. */
   readonly ordinaryFlow: boolean;
+  /** Parser-owned ECMA-376 Part 1 §17.4.37 logical-table membership. The parser
+   * assigns one id per logical table (a standalone table receives its own id),
+   * so equal ids on directly adjacent source tables mean one logical table. */
+  readonly logicalSequenceId?: string | null;
+  readonly logicalRowOffset?: number;
+  readonly logicalTotalRows?: number;
   readonly grid: {
     readonly authored: boolean;
     readonly columns: readonly { readonly width: string | null }[];
@@ -535,6 +548,10 @@ export function tableFormatInput(table: Readonly<DocTable>): TableFormatInput {
   const input = snapshotPlainData({
     effectiveStyleId: acquisition.table?.effectiveStyleId ?? null,
     ordinaryFlow,
+    // §17.4.37 membership is decided by the parser; carry its facts verbatim.
+    logicalSequenceId: acquisition.table?.logicalSequenceId ?? null,
+    logicalRowOffset: acquisition.table?.logicalRowOffset ?? 0,
+    logicalTotalRows: acquisition.table?.logicalTotalRows ?? 0,
     positioning: ordinaryFlow || table.tblpPr == null
       ? null
       : floatingTablePositionInput(table.tblpPr),
@@ -553,11 +570,16 @@ export function adjacentTableSequenceInput(
   return Object.freeze(body.map((element) => {
     if (element.type !== 'table') return Object.freeze({ element, table: null });
     const format = tableFormatInput(element);
+    // A hand-built public table has no acquisition wire and therefore no
+    // parser-owned logical identity; it can never join a logical sequence.
+    if (format.logicalSequenceId == null) return Object.freeze({ element, table: null });
     return Object.freeze({
       element,
       table: Object.freeze({
-        effectiveStyleId: format.effectiveStyleId,
-        ordinaryFlow: format.ordinaryFlow,
+        logicalSequenceId: format.logicalSequenceId,
+        logicalRowOffset: format.logicalRowOffset ?? 0,
+        logicalTotalRows: format.logicalTotalRows ?? 0,
+        rowCount: element.rows.length,
       }),
     });
   }));
@@ -601,14 +623,129 @@ function tablePreferredWidthPt(
   return null;
 }
 
-function tableGridWidthsPt(table: DocTable, input: TableAcquisitionInput): number[] {
+const tableGridPointFactors: Readonly<Record<string, string>> = Object.freeze({
+  pt: '1/1',
+  in: '72/1',
+  cm: '3600/127',
+  mm: '360/127',
+  pc: '12/1',
+  pi: '12/1',
+});
+
+const xsdUnsignedLongMaximum = '18446744073709551615';
+
+function xsdUnsignedLongLexical(value: string): string | null {
+  const collapsed = value
+    .replace(/[\u0009\u000a\u000d\u0020]+/g, ' ')
+    .replace(/^ | $/g, '');
+  const match = /^([+-]?)([0-9]+)$/.exec(collapsed);
+  if (!match) return null;
+  const [, sign, authoredDigits] = match;
+  if (sign === '-' && /[1-9]/.test(authoredDigits!)) return null;
+  const digits = authoredDigits!.replace(/^0+/, '') || '0';
+  if (digits.length > xsdUnsignedLongMaximum.length
+    || (digits.length === xsdUnsignedLongMaximum.length && digits > xsdUnsignedLongMaximum)) {
+    return null;
+  }
+  return collapsed;
+}
+
+/** One resolved tblGrid column paired with its deterministic binary64 geometry.
+ *
+ * `key` distinguishes three states precisely:
+ *  - a valid exact key: the authored identity is known exactly;
+ *  - `'0/1'`: a DEFINITIONAL zero — the width was missing or lexically invalid,
+ *    so it is repaired to a known-zero identity (not "unknown");
+ *  - `null`: a valid measure whose exact authored identity is UNAVAILABLE
+ *    (over budget). `null` does NOT assert equality between tracks; two distinct
+ *    over-budget widths can share `null` yet carry different `widthPt`, and the
+ *    union must keep them distinct rather than merging on geometry. */
+interface GridTrack {
+  readonly key: string | null;
+  readonly widthPt: number;
+}
+
+/** A valid exact key retains its identity only while it maps to a finite
+ * coordinate; an over-range (infinite) coordinate has no paint geometry, so the
+ * identity is dropped and the width falls back to zero. */
+function exactTrack(key: string): GridTrack {
+  const widthPt = exactLengthKeyToNumber(key);
+  return Number.isFinite(widthPt) ? { key, widthPt } : definitionalZeroTrack;
+}
+
+/** Deterministic geometry for a lexically valid but over-budget universal
+ * measure: convert the magnitude to binary64 FIRST, then apply the exact unit
+ * factor and round once. The exact identity is unknown (`key: null`), but the
+ * authored geometry survives (0.000…001pt -> 0, 72.000…001pt -> 72pt). */
+function degradedTrack(magnitude: string, factor: string): GridTrack {
+  const magnitudeF64 = Number(magnitude);
+  if (!Number.isFinite(magnitudeF64)) return definitionalZeroTrack;
+  const exactMagnitude = exactLengthKeyFromNumber(magnitudeF64);
+  const widthPt = exactMagnitude === null
+    ? 0
+    : exactLengthKeyToNumber(multiplyExactLengthKeys(exactMagnitude, factor));
+  return Number.isFinite(widthPt) ? { key: null, widthPt } : definitionalZeroTrack;
+}
+
+/** Normalize one ST_TwipsMeasure / ST_PositiveUniversalMeasure tblGrid column at
+ * the parser/layout adapter. Layout owns exact topology arithmetic but not OOXML
+ * unit or lexical semantics; this returns the exact authored identity together
+ * with its geometry. */
+/** A missing or lexically invalid width is repaired to a DEFINITIONAL zero: the
+ * identity is known (zero), not unknown. */
+const definitionalZeroTrack: GridTrack = { key: '0/1', widthPt: 0 };
+
+function tableGridTrack(value: string | null | undefined): GridTrack {
+  if (value == null) return definitionalZeroTrack;
+  const unsignedLong = xsdUnsignedLongLexical(value);
+  if (unsignedLong !== null) {
+    // xsd:unsignedLong is bounded (<= 2^64-1), so it is always within the exact
+    // budget and never needs degradation.
+    const twips = exactLengthKeyFromDecimal(unsignedLong);
+    return twips === null ? definitionalZeroTrack : exactTrack(divideExactLengthKey(twips, 20n));
+  }
+  // Union whitespace follows the successful member: xsd:unsignedLong collapses
+  // XML whitespace, while the xsd:string-based universal measure preserves it.
+  // Normalizing the union before member selection would accept unit-bearing
+  // values outside ECMA-376's lexical space.
+  const universal = /^([0-9]+(?:\.[0-9]+)?)(mm|cm|in|pt|pc|pi)$/.exec(value);
+  if (!universal) return definitionalZeroTrack;
+  const factor = tableGridPointFactors[universal[2]!]!;
+  const magnitude = exactLengthKeyFromDecimal(universal[1]!);
+  return magnitude === null
+    ? degradedTrack(universal[1]!, factor)
+    : exactTrack(multiplyExactLengthKeys(magnitude, factor));
+}
+
+interface TableGridLayout {
+  readonly widthsPt: readonly number[];
+  readonly widthKeys: readonly (string | null)[];
+}
+
+/** Resolve the tblGrid column topology once into paired numeric widths and exact
+ * identity keys. A hand-built table keeps the public numeric `Math.max(0, width)`
+ * contract. */
+function tableGridLayout(table: DocTable, input: TableAcquisitionInput): TableGridLayout {
   const grid = input.table?.grid;
-  if (!grid) return table.colWidths.map((width) => Math.max(0, width));
+  if (!grid) {
+    const tracks = table.colWidths.map((width): GridTrack => (
+      Number.isFinite(width) && width >= 0
+        ? { widthPt: width, key: exactLengthKeyFromNumber(width) ?? '0/1' }
+        : definitionalZeroTrack
+    ));
+    return {
+      widthsPt: tracks.map((track) => track.widthPt),
+      widthKeys: tracks.map((track) => track.key),
+    };
+  }
   const count = Math.max(grid.requiredColumnCount, grid.columns.length);
-  return Array.from({ length: count }, (_unused, column) => {
-    const points = tableTwipsValuePt(grid.columns[column]?.width ?? null);
-    return points === null ? 0 : Math.max(0, points);
-  });
+  const tracks = Array.from({ length: count }, (_unused, column) => (
+    tableGridTrack(grid.columns[column]?.width ?? null)
+  ));
+  return {
+    widthsPt: tracks.map((track) => track.widthPt),
+    widthKeys: tracks.map((track) => track.key),
+  };
 }
 
 function skippedTableWidthConstraint(
@@ -629,7 +766,10 @@ export function tableColumnLayoutInput(
 ): TableColumnLayoutInput {
   const acquisition = tableAcquisitionInput(table);
   const format = tableFormatInput(table);
-  const gridWidthsPt = tableGridWidthsPt(table as DocTable, acquisition);
+  const { widthsPt: gridWidthsPt, widthKeys: gridWidthKeys } = tableGridLayout(
+    table as DocTable,
+    acquisition,
+  );
   const layoutKind = format.firstRowException?.layout === 'fixed'
     ? 'fixed'
     : (acquisition.table?.layout?.kind ?? table.layout);
@@ -652,6 +792,7 @@ export function tableColumnLayoutInput(
     layout: layoutKind === 'fixed' ? 'fixed' : 'autofit',
     availableWidthPt: Math.max(0, maximumWidthPt),
     gridWidthsPt,
+    gridWidthKeys,
     tablePreferredWidthPt: tablePreferredWidthPt(
       table as DocTable,
       acquisition,

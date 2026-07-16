@@ -897,6 +897,7 @@ export interface TableColumnLayoutInput {
   readonly layout: 'fixed' | 'autofit';
   readonly availableWidthPt: number;
   readonly gridWidthsPt: readonly number[];
+  readonly gridWidthKeys?: readonly (string | null)[];
   readonly tablePreferredWidthPt: number | null;
   readonly rows: readonly TableColumnRowConstraint[];
 }
@@ -944,6 +945,10 @@ export interface TableRowFormatInput {
 export interface TableFormatInput {
   readonly effectiveStyleId: string | null;
   readonly ordinaryFlow: boolean;
+  /** Parser-owned ECMA-376 §17.4.37 logical table membership. */
+  readonly logicalSequenceId?: string | null;
+  readonly logicalRowOffset?: number;
+  readonly logicalTotalRows?: number;
   readonly positioning: FloatingTablePositionInput | null;
   readonly rows: readonly TableRowFormatInput[];
   readonly firstRowException: TableRowExceptionInput | null;
@@ -995,7 +1000,9 @@ export interface TableRowLayoutInput {
   readonly exceptionBorders: TableEdgeInputs | null;
   /** Effective §17.4.27/.26 row alignment. */
   readonly alignment: 'left' | 'center' | 'right';
-  /** Effective table indent after Word's first-row tblPrEx rule. */
+  /** Effective table indent after Word's first-row tblPrEx rule. In an adjacent
+   * §17.4.37 group this is re-oriented into the group frame by the union
+   * builder, so no separate physical-indent field is retained here. */
   readonly indentPt: number;
   readonly cells: readonly TableCellLayoutInput[];
   readonly repeatedHeader: boolean;
@@ -1011,6 +1018,8 @@ export interface TableLayoutInput {
   readonly indentPt: number;
   readonly bidiVisual: boolean;
   readonly columnWidthsPt: readonly number[];
+  /** Exact grid topology; numeric widths remain the Canvas paint coordinate. */
+  readonly columnWidthKeys?: readonly (string | null)[];
   readonly borders: TableEdgeInputs;
   readonly rows: readonly TableRowLayoutInput[];
 }

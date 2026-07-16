@@ -79,9 +79,10 @@ describe('table format acquisition adapter', () => {
     });
   });
 
-  it('projects adjacent body values with cached effective table facts', () => {
-    const source = table([], {
+  it('projects parser-owned logical-sequence facts, not a layout membership decision', () => {
+    const source = table([{ cells: [] }], {
       effectiveStyleId: 'ProjectedStyle', ordinaryFlow: true,
+      logicalSequenceId: 'table-sequence:0', logicalRowOffset: 0, logicalTotalRows: 1,
       grid: { authored: false, columns: [], requiredColumnCount: 0 },
       preferredWidth: null, layout: null, cellSpacing: null,
     }) as DocTable & { type: 'table' };
@@ -93,12 +94,28 @@ describe('table format acquisition adapter', () => {
     expect(projected).toEqual([
       {
         element: source,
-        table: { effectiveStyleId: 'ProjectedStyle', ordinaryFlow: true },
+        table: {
+          logicalSequenceId: 'table-sequence:0',
+          logicalRowOffset: 0,
+          logicalTotalRows: 1,
+          rowCount: 1,
+        },
       },
       { element: paragraph, table: null },
     ]);
     expect(Object.isFrozen(projected)).toBe(true);
     expect(Object.isFrozen(projected[0]?.table)).toBe(true);
+  });
+
+  it('preserves no logical identity for a hand-built public table', () => {
+    const publicTable = {
+      type: 'table', colWidths: [10], rows: [{ cells: [] }], borders: noBorders,
+      cellMarginTop: 0, cellMarginBottom: 0, cellMarginLeft: 0, cellMarginRight: 0, jc: 'left',
+    } as unknown as BodyElement;
+
+    expect(adjacentTableSequenceInput([publicTable])).toEqual([
+      { element: publicTable, table: null },
+    ]);
   });
 
   it('distinguishes omitted hRule from explicit auto and converts twips once', () => {

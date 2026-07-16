@@ -2688,6 +2688,14 @@ pub struct TableLayoutAcquisitionWire {
     /// authored positioning payload, whose mere presence is not an effective
     /// floating-status test ([MS-OI29500] 2.1.162(b-c)).
     pub ordinary_flow: bool,
+    /// Parser-owned ECMA-376 Part 1 §17.4.37 logical-table membership. One id is
+    /// assigned per logical table; a standalone table receives its own id, so
+    /// directly adjacent source tables carrying the same id form one logical
+    /// table. `logical_row_offset`/`logical_total_rows` place this source table's
+    /// rows inside that logical table's row sequence.
+    pub logical_sequence_id: String,
+    pub logical_row_offset: usize,
+    pub logical_total_rows: usize,
     pub grid: TableGridAcquisitionWire,
     pub preferred_width: Option<TableWidthAcquisitionWire>,
     pub layout: Option<TableLayoutKindAcquisitionWire>,

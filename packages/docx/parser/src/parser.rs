@@ -1486,6 +1486,143 @@ fn parse_body_elements(
     )
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LogicalTableSequenceContext {
+    /// Parser-owned identity for one §17.4.37 logical table. The source byte
+    /// offset is deterministic within the XML part and survives serde/worker
+    /// boundaries without exposing parser-node objects.
+    sequence_id: usize,
+    /// Zero-based authored-row ordinal within the logical table formed by
+    /// adjacent source `<w:tbl>` elements.
+    ///
+    /// Only the row axis is shared here. §17.4.37 does not define how distinct
+    /// tblGrid, justification, or bidiVisual values on adjacent source tables
+    /// are reconciled, while §17.4.8 defines column membership against the
+    /// parent table's grid. Keep each source grid authoritative rather than
+    /// making a parser-time physical-grid compatibility guess.
+    row_offset: usize,
+    total_rows: usize,
+    /// Whether the logical table's FIRST member activates `w:tblLook@firstRow`.
+    /// §17.7.6.7 horizontal-band parity origins from the logical table's own
+    /// first row, so the band offset is owned by the sequence, not by each
+    /// member's local tblLook. `is_first_row`/`lastRow` and each member's
+    /// `noHBand` gate remain local because those are per-source-table facts.
+    sequence_first_row_flag: bool,
+}
+
+impl LogicalTableSequenceContext {
+    fn standalone(node: roxmltree::Node) -> Self {
+        Self {
+            sequence_id: node.range().start,
+            row_offset: 0,
+            total_rows: table_row_count(node),
+            sequence_first_row_flag: tbl_look_flag(child_w(node, "tblPr"), "firstRow", 0x0020),
+        }
+    }
+}
+
+/// Resolve ECMA-376 Part 1 §17.4.37 logical-table membership before parsing
+/// individual source tables. Conditional table formatting is defined over the
+/// resulting logical row sequence, but authored table/row identity remains
+/// intact in the parser model; consequently this prepass supplies ordinals to
+/// `parse_table` rather than manufacturing a merged table or a runtime stamp.
+fn logical_table_sequence_contexts(
+    children: &[(roxmltree::Node, bool)],
+    style_map: &StyleMap,
+    positioning_context: TablePositioningContext,
+) -> HashMap<roxmltree::NodeId, LogicalTableSequenceContext> {
+    struct TableSequenceFact {
+        node_id: roxmltree::NodeId,
+        source_offset: usize,
+        effective_style_id: String,
+        row_count: usize,
+        first_row_flag: bool,
+    }
+
+    let mut contexts = HashMap::new();
+    let mut group: Vec<TableSequenceFact> = Vec::new();
+    let flush_group =
+        |group: &mut Vec<TableSequenceFact>,
+         contexts: &mut HashMap<roxmltree::NodeId, LogicalTableSequenceContext>| {
+            let total_rows = group
+                .iter()
+                .map(|fact| fact.row_count)
+                .fold(0usize, usize::saturating_add);
+            let sequence_id = group.first().map_or(0, |fact| fact.source_offset);
+            // §17.7.6.7: the band parity origin belongs to the logical table's
+            // first member, so every member shares that member's firstRow flag.
+            let sequence_first_row_flag = group.first().is_some_and(|fact| fact.first_row_flag);
+            let mut row_offset = 0usize;
+            for fact in group.drain(..) {
+                contexts.insert(
+                    fact.node_id,
+                    LogicalTableSequenceContext {
+                        sequence_id,
+                        row_offset,
+                        total_rows,
+                        sequence_first_row_flag,
+                    },
+                );
+                row_offset = row_offset.saturating_add(fact.row_count);
+            }
+        };
+
+    for (node, cover_break_after) in children {
+        match node.tag_name().name() {
+            // §17.4.37 names an intervening paragraph as the separator. Range
+            // markup and other non-paragraph wrapper facts are transparent. A
+            // hidden/vanished paragraph is still a paragraph and still breaks
+            // adjacency.
+            "p" => flush_group(&mut group, &mut contexts),
+            "tbl" => {
+                let tbl_pr = child_w(*node, "tblPr");
+                let ordinary_flow = table_is_ordinary_flow(
+                    tbl_pr.and_then(|properties| child_w(properties, "tblpPr")),
+                    positioning_context,
+                );
+                // A table joins a logical sequence only with a valid effective
+                // table-style identity while it participates in ordinary flow;
+                // an effective float or an unresolved/non-table style is a
+                // standalone §17.4.37 barrier.
+                match effective_table_style_id(*node, style_map) {
+                    Some(effective_style_id) if ordinary_flow => {
+                        if group
+                            .first()
+                            .is_some_and(|first| first.effective_style_id != effective_style_id)
+                        {
+                            flush_group(&mut group, &mut contexts);
+                        }
+                        group.push(TableSequenceFact {
+                            node_id: node.id(),
+                            source_offset: node.range().start,
+                            effective_style_id,
+                            row_count: table_row_count(*node),
+                            first_row_flag: tbl_look_flag(tbl_pr, "firstRow", 0x0020),
+                        });
+                    }
+                    _ => {
+                        flush_group(&mut group, &mut contexts);
+                        contexts.insert(node.id(), LogicalTableSequenceContext::standalone(*node));
+                    }
+                }
+            }
+            // A body-level or mid-body `<w:sectPr>` is a §17.6.1 section
+            // boundary; two tables cannot be one logical table across it.
+            "sectPr" => flush_group(&mut group, &mut contexts),
+            _ => {}
+        }
+
+        // The cover-building-block pass emits a real page break at this
+        // boundary, so conditional table geometry cannot span across it.
+        if *cover_break_after {
+            flush_group(&mut group, &mut contexts);
+        }
+    }
+    flush_group(&mut group, &mut contexts);
+
+    contexts
+}
+
 #[allow(clippy::too_many_arguments)]
 fn parse_body_elements_in_story(
     body_node: roxmltree::Node,
@@ -1521,6 +1658,9 @@ fn parse_body_elements_in_story(
     // building blocks (§17.5.2), so a redundant one can be dropped post-pass (see
     // below) when the cover is already followed by a page-advancing construct.
     let mut cover_break_positions: Vec<usize> = Vec::new();
+
+    let logical_table_sequences =
+        logical_table_sequence_contexts(&body_children, style_map, table_positioning_context);
 
     for (child, cover_break_after) in body_children {
         match child.tag_name().name() {
@@ -1603,6 +1743,10 @@ fn parse_body_elements_in_story(
                     theme,
                     DepthGuard::root(),
                     table_positioning_context,
+                    logical_table_sequences
+                        .get(&child.id())
+                        .copied()
+                        .unwrap_or_else(|| LogicalTableSequenceContext::standalone(child)),
                 );
                 body.push(BodyElement::Table(Box::new(tbl)));
             }
@@ -8788,6 +8932,45 @@ fn table_is_ordinary_flow(
     offset_is_zero("tblpX") && offset_is_zero("tblpY") && horizontal == "text" && vertical != "text"
 }
 
+/// Count authored `<w:tr>` rows, including those nested behind range-markup
+/// wrappers, for §17.4.37 logical-table row totals.
+fn table_row_count(node: roxmltree::Node) -> usize {
+    children_w_flat(node, "tr").len()
+}
+
+/// Effective ECMA-376 §17.7.4 table-style identity of a `<w:tbl>`.
+///
+/// An explicit `<w:tblStyle w:val>` is honored only when it resolves to a real
+/// `<w:style w:type="table">`; an unresolved or non-table reference yields
+/// `None` and cannot form a §17.4.37 grouping identity. When the table omits
+/// `<w:tblStyle>` the implicit default table style applies, preserving the
+/// existing §17.7.4 omitted-style policy owned by `default_table_style_id`.
+fn effective_table_style_id(node: roxmltree::Node, style_map: &StyleMap) -> Option<String> {
+    let authored = child_w(node, "tblPr")
+        .and_then(|properties| child_w(properties, "tblStyle"))
+        .and_then(|style| attr_w(style, "val"));
+    match authored {
+        Some(style_id) if style_map.contains_table_style(&style_id) => Some(style_id),
+        Some(_) => None,
+        None => style_map.default_table_style_id().map(str::to_string),
+    }
+}
+
+/// Resolve one ECMA-376 §17.4.49 `w:tblLook` on/off flag: a named attribute
+/// (`w:firstRow="1"` …) wins, otherwise the legacy combined hex bitmask bit.
+/// Shared so §17.4.37 sequence membership and per-table cnf agree on activation.
+fn tbl_look_flag(tbl_pr: Option<roxmltree::Node>, name: &str, bit: u32) -> bool {
+    let look = tbl_pr.and_then(|p| child_w(p, "tblLook"));
+    let look_val = look
+        .and_then(|l| attr_w(l, "val"))
+        .and_then(|v| u32::from_str_radix(v.trim(), 16).ok());
+    match look.and_then(|l| attr_w(l, name)).as_deref() {
+        Some("1") | Some("true") | Some("on") => true,
+        Some(_) => false, // explicit "0"/"false" disables regardless of hex
+        None => look_val.map(|v| v & bit != 0).unwrap_or(false),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn parse_table(
     node: roxmltree::Node,
@@ -8799,17 +8982,10 @@ fn parse_table(
     theme: &ThemeColors,
     depth: DepthGuard,
     table_positioning_context: TablePositioningContext,
+    logical_sequence: LogicalTableSequenceContext,
 ) -> DocTable {
     let tbl_pr = child_w(node, "tblPr");
     let tbl_grid = child_w(node, "tblGrid");
-
-    // Resolve the table style ID (§17.4.63 w:tblStyle). Cell paragraphs
-    // inherit this style's pPr — e.g. "Table Grid" (style `af3` in this
-    // sample) sets line="240" after="0", which tightens cell line spacing
-    // below the body-text default inherited from docDefault.
-    let table_style_id = tbl_pr
-        .and_then(|p| child_w(p, "tblStyle"))
-        .and_then(|s| attr_w(s, "val"));
 
     let grid_columns = tbl_grid
         .map(|g| {
@@ -8845,10 +9021,9 @@ fn parse_table(
     // `<w:tblCellMar>` (and other tblPr defaults) MUST apply, otherwise a
     // table whose cells rely on TableNormal's 108-twip left/right padding
     // (the Word convention) renders with the wrong column geometry.
-    let effective_table_style_id = table_style_id
-        .as_deref()
-        .or_else(|| style_map.default_table_style_id());
+    let effective_table_style_id = effective_table_style_id(node, style_map);
     let tstyle = effective_table_style_id
+        .as_deref()
         .map(|id| style_map.resolve_table_style(id))
         .unwrap_or_default();
     // ECMA-376 §17.4.49 (w:tblLook). Word writes this either with the modern
@@ -8858,17 +9033,7 @@ fn parse_table(
     // Legacy bit values (§17.4.49 / the older w:tblLook hex form):
     //   0x0020 firstRow   0x0040 lastRow   0x0080 firstColumn
     //   0x0100 lastColumn 0x0200 noHBand   0x0400 noVBand
-    let look = tbl_pr.and_then(|p| child_w(p, "tblLook"));
-    let look_val: Option<u32> = look
-        .and_then(|l| attr_w(l, "val"))
-        .and_then(|v| u32::from_str_radix(v.trim(), 16).ok());
-    let look_flag = |name: &str, bit: u32| {
-        match look.and_then(|l| attr_w(l, name)).as_deref() {
-            Some("1") | Some("true") | Some("on") => true,
-            Some(_) => false, // explicit "0"/"false" disables regardless of hex
-            None => look_val.map(|v| v & bit != 0).unwrap_or(false),
-        }
-    };
+    let look_flag = |name: &str, bit: u32| tbl_look_flag(tbl_pr, name, bit);
     let first_row = look_flag("firstRow", 0x0020);
     let last_row = look_flag("lastRow", 0x0040);
     let first_col = look_flag("firstColumn", 0x0080);
@@ -8961,6 +9126,17 @@ fn parse_table(
             .get("firstRow")
             .map(|c| c.shd.is_some())
             .unwrap_or(false);
+    // The horizontal-band PARITY ORIGIN belongs to the §17.4.37 logical table's
+    // first member, not to each source table's local tblLook. A later member's
+    // own firstRow flag must not re-shift the shared banding, so gate the origin
+    // offset on the sequence-owned firstRow flag combined with the shared style's
+    // firstRow shading (all members share one effective table style).
+    let sequence_first_row_styled = logical_sequence.sequence_first_row_flag
+        && tstyle
+            .cond
+            .get("firstRow")
+            .map(|c| c.shd.is_some())
+            .unwrap_or(false);
     // firstRow rPr/pPr is honored whenever firstRow is enabled and the style
     // defines ANY firstRow run/para formatting (independent of shading).
     let first_row_has_fmt = first_row
@@ -8969,7 +9145,10 @@ fn parse_table(
             .get("firstRow")
             .map(|c| c.run.is_some() || c.para.is_some())
             .unwrap_or(false);
-    let row_count = tr_nodes.len();
+    debug_assert!(
+        logical_sequence.row_offset.saturating_add(tr_nodes.len()) <= logical_sequence.total_rows,
+        "logical table sequence must contain every authored row"
+    );
 
     // Resolve the ROW-LEVEL conditional keys for row `r` (firstRow/lastRow/
     // band*Horz), LOW→HIGH precedence per §17.7.6. The row's explicit
@@ -8987,17 +9166,21 @@ fn parse_table(
                 .collect();
         }
         let mut out: Vec<&'static str> = Vec::new();
-        let is_first_row = r == 0 && (first_row_styled || first_row_has_fmt || first_row);
-        let is_last_row = last_row && r + 1 == row_count;
+        // §17.4.37: firstRow/lastRow and horizontal banding continue across the
+        // whole logical table, so classify by the row's ordinal within the
+        // shared logical sequence, not within this authored source table.
+        let logical_row = logical_sequence.row_offset.saturating_add(r);
+        let is_first_row = logical_row == 0 && (first_row_styled || first_row_has_fmt || first_row);
+        let is_last_row = last_row && logical_row + 1 == logical_sequence.total_rows;
         // Horizontal banding applies to BODY rows — neither the (styled) first row
         // nor the last row. The banding parity offset only shifts when row 0 was
         // consumed as a SHADED first row; a first row that only carries rPr/pPr
         // (no shd) still bands from row 0 like Word.
         if !is_first_row && !is_last_row && h_band {
-            let bi = if first_row_styled {
-                r as i64 - 1
+            let bi = if sequence_first_row_styled {
+                logical_row as i64 - 1
             } else {
-                r as i64
+                logical_row as i64
             };
             // §17.7.6.7: group consecutive `row_band` body rows into one band
             // before alternating band1/band2.
@@ -9200,7 +9383,7 @@ fn parse_table(
             // for tstyle's borders, banding and cell margins. This keeps
             // the inheritance consistent across all tstyle-derived
             // attributes.
-            effective_table_style_id,
+            effective_table_style_id.as_deref(),
             &cell_conds,
             style_cell_spacing,
             style_cell_margins,
@@ -9377,11 +9560,14 @@ fn parse_table(
         .unwrap_or(0)
         .max(grid_columns.len() as u32);
     let table_layout = TableLayoutAcquisitionWire {
-        effective_style_id: effective_table_style_id.map(str::to_string),
+        effective_style_id: effective_table_style_id,
         ordinary_flow: table_is_ordinary_flow(
             tbl_pr.and_then(|p| child_w(p, "tblpPr")),
             table_positioning_context,
         ),
+        logical_sequence_id: format!("table-sequence:{}", logical_sequence.sequence_id),
+        logical_row_offset: logical_sequence.row_offset,
+        logical_total_rows: logical_sequence.total_rows,
         grid: TableGridAcquisitionWire {
             authored: tbl_grid.is_some(),
             columns: grid_columns,
@@ -9618,7 +9804,20 @@ fn parse_table_cell(
     // A complex field cannot cross a cell boundary in well-formed content, so a
     // cell gets its own field scope (paragraphs within the cell still share it).
     let mut field = FieldState::default();
-    for child in element_children_flat(node) {
+    // §17.4.37 applies inside a cell too: nested source tables use the same
+    // parser-owned membership as body-level tables.
+    let cell_children = element_children_flat(node);
+    let logical_table_children: Vec<_> = cell_children
+        .iter()
+        .copied()
+        .map(|child| (child, false))
+        .collect();
+    let logical_table_sequences = logical_table_sequence_contexts(
+        &logical_table_children,
+        style_map,
+        table_positioning_context,
+    );
+    for child in cell_children {
         match child.tag_name().name() {
             "p" => content.push(CellElement::Paragraph(Box::new(parse_paragraph_cond(
                 child,
@@ -9652,6 +9851,10 @@ fn parse_table_cell(
                         theme,
                         child_depth,
                         table_positioning_context,
+                        logical_table_sequences
+                            .get(&child.id())
+                            .copied()
+                            .unwrap_or_else(|| LogicalTableSequenceContext::standalone(child)),
                     ))));
                 }
             }
@@ -10021,6 +10224,28 @@ mod tests {
             &theme,
             DepthGuard::root(),
             table_positioning_context,
+            LogicalTableSequenceContext::standalone(doc.root_element()),
+        )
+    }
+
+    fn parse_tbl_with_style_map(body: &str, style_map: &StyleMap) -> DocTable {
+        let xml = format!(r#"<w:tbl xmlns:w="{ns}">{body}</w:tbl>"#, ns = W_NS);
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let mut num_map = NumberingMap::default();
+        let media: HashMap<String, String> = HashMap::new();
+        let rels: HashMap<String, String> = HashMap::new();
+        let theme = ThemeColors::default();
+        parse_table(
+            doc.root_element(),
+            style_map,
+            &mut num_map,
+            &media,
+            &HashMap::new(),
+            &rels,
+            &theme,
+            DepthGuard::root(),
+            TablePositioningContext::Normal,
+            LogicalTableSequenceContext::standalone(doc.root_element()),
         )
     }
 
@@ -10050,7 +10275,12 @@ mod tests {
 
     #[test]
     fn table_layout_wire_preserves_authored_grid_width_and_style_facts() {
-        let table = parse_tbl(
+        // §17.4.62/§17.7.4: an explicit table style is effective only when it
+        // resolves to a real `<w:style w:type="table">`. Supply that style so
+        // this wire-preservation test exercises the valid-explicit-style path;
+        // the unresolved/non-table case is asserted separately by
+        // `unresolved_or_non_table_style_is_not_an_effective_grouping_identity`.
+        let table = parse_tbl_with_style_map(
             r#"
             <w:tblPr>
               <w:tblStyle w:val="SyntheticTableStyle"/>
@@ -10089,6 +10319,10 @@ mod tests {
               </w:tc>
             </w:tr>
             "#,
+            &StyleMap::parse(&format!(
+                r#"<w:styles xmlns:w="{ns}"><w:style w:type="table" w:styleId="SyntheticTableStyle"/></w:styles>"#,
+                ns = W_NS,
+            )),
         );
 
         let wire = serde_json::to_value(&table).expect("serialize table layout wire");
@@ -11007,6 +11241,7 @@ mod tests {
             &theme,
             DepthGuard::root(),
             TablePositioningContext::Normal,
+            LogicalTableSequenceContext::standalone(doc.root_element()),
         )
     }
 
@@ -19307,6 +19542,7 @@ mod numbering_marker_font_tests {
             &theme,
             DepthGuard::root(),
             TablePositioningContext::Normal,
+            LogicalTableSequenceContext::standalone(doc.root_element()),
         )
     }
 
@@ -19328,6 +19564,349 @@ mod numbering_marker_font_tests {
             }),
             _ => None,
         })
+    }
+
+    // ------------------------------------------------------------------
+    // ECMA-376 Part 1 §17.4.37 parser-owned logical-table membership.
+    // ------------------------------------------------------------------
+
+    fn logical_sequence_styles() -> StyleMap {
+        StyleMap::parse(&format!(
+            r#"<w:styles xmlns:w="{ns}">
+                <w:style w:type="paragraph" w:default="1" w:styleId="Normal"/>
+                <w:style w:type="table" w:default="1" w:styleId="Sequence">
+                    <w:tblStylePr w:type="firstRow"><w:rPr><w:color w:val="AA0000"/></w:rPr></w:tblStylePr>
+                    <w:tblStylePr w:type="lastRow"><w:rPr><w:color w:val="0000BB"/></w:rPr></w:tblStylePr>
+                    <w:tblStylePr w:type="band1Horz"><w:rPr><w:color w:val="11AA11"/></w:rPr></w:tblStylePr>
+                    <w:tblStylePr w:type="band2Horz"><w:rPr><w:color w:val="BB22BB"/></w:rPr></w:tblStylePr>
+                </w:style>
+                <w:style w:type="table" w:styleId="Other">
+                    <w:tblStylePr w:type="firstRow"><w:rPr><w:color w:val="AA0000"/></w:rPr></w:tblStylePr>
+                    <w:tblStylePr w:type="lastRow"><w:rPr><w:color w:val="0000BB"/></w:rPr></w:tblStylePr>
+                </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        ))
+    }
+
+    fn parse_body_tables(body: &str, styles: &StyleMap) -> Vec<DocTable> {
+        let xml = format!(r#"<w:body xmlns:w="{ns}">{body}</w:body>"#, ns = W_NS);
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let mut num_map = NumberingMap::default();
+        parse_body_elements(
+            doc.root_element(),
+            styles,
+            &mut num_map,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .into_iter()
+        .filter_map(|element| match element {
+            BodyElement::Table(table) => Some(*table),
+            _ => None,
+        })
+        .collect()
+    }
+
+    fn one_row_table(tbl_pr: &str, text: &str) -> String {
+        format!(
+            r#"<w:tbl><w:tblPr>{tbl_pr}</w:tblPr><w:tr><w:tc><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#
+        )
+    }
+
+    fn first_cell_color(table: &DocTable) -> Option<String> {
+        cell_text_color(&table.rows[0].cells[0])
+    }
+
+    #[test]
+    fn adjacent_ordinary_tables_share_logical_outer_rows_with_effective_default_style() {
+        // §17.4.37 treats adjacent ordinary-flow tables with the same effective
+        // table style as one logical table. The style is deliberately implicit
+        // here: both source tables inherit the default table style, so lexical
+        // w:tblStyle equality is not sufficient.
+        let look = r#"<w:tblLook w:firstRow="1" w:lastRow="1" w:noHBand="1"/>"#;
+        let tables = parse_body_tables(
+            &format!(
+                "{}{}",
+                one_row_table(look, "first"),
+                one_row_table(&format!(r#"<w:tblStyle w:val="Sequence"/>{look}"#), "last")
+            ),
+            &logical_sequence_styles(),
+        );
+
+        assert_eq!(tables.len(), 2, "authored table identities are preserved");
+        assert_eq!(first_cell_color(&tables[0]).as_deref(), Some("aa0000"));
+        assert_eq!(first_cell_color(&tables[1]).as_deref(), Some("0000bb"));
+        let first = serde_json::to_value(&tables[0].table_layout).unwrap();
+        let second = serde_json::to_value(&tables[1].table_layout).unwrap();
+        assert_eq!(first["logicalSequenceId"], second["logicalSequenceId"]);
+        assert!(first["logicalSequenceId"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()));
+        assert_eq!(first["logicalRowOffset"], 0);
+        assert_eq!(second["logicalRowOffset"], 1);
+        assert_eq!(first["logicalTotalRows"], 2);
+        assert_eq!(second["logicalTotalRows"], 2);
+    }
+
+    #[test]
+    fn unresolved_or_non_table_style_is_not_an_effective_grouping_identity() {
+        let styles = StyleMap::parse(&format!(
+            r#"<w:styles xmlns:w="{ns}">
+                <w:style w:type="paragraph" w:styleId="WrongType"/>
+                <w:style w:type="table" w:default="1" w:styleId="DefaultTable"/>
+            </w:styles>"#,
+            ns = W_NS,
+        ));
+        for style_id in ["Missing", "WrongType"] {
+            let tables = parse_body_tables(
+                &format!(
+                    "{}{}",
+                    one_row_table(&format!(r#"<w:tblStyle w:val="{style_id}"/>"#), "a"),
+                    one_row_table(&format!(r#"<w:tblStyle w:val="{style_id}"/>"#), "b"),
+                ),
+                &styles,
+            );
+            assert_eq!(tables.len(), 2);
+            for table in tables {
+                assert_eq!(
+                    table.table_layout.effective_style_id, None,
+                    "§17.4.62 requires the referenced style to exist as a table style",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn adjacent_ordinary_tables_continue_horizontal_row_banding() {
+        let look = r#"<w:tblLook w:firstRow="0" w:lastRow="0"/>"#;
+        let tables = parse_body_tables(
+            &format!(
+                "{}{}",
+                one_row_table(look, "band one"),
+                one_row_table(look, "band two")
+            ),
+            &logical_sequence_styles(),
+        );
+
+        assert_eq!(first_cell_color(&tables[0]).as_deref(), Some("11aa11"));
+        assert_eq!(first_cell_color(&tables[1]).as_deref(), Some("bb22bb"));
+    }
+
+    #[test]
+    fn paragraph_different_style_and_effective_float_break_logical_table_sequences() {
+        let look = r#"<w:tblLook w:firstRow="1" w:lastRow="1" w:noHBand="1"/>"#;
+        let cases = [
+            format!(
+                "{}<w:p/>{}",
+                one_row_table(look, "before paragraph"),
+                one_row_table(look, "after paragraph")
+            ),
+            format!(
+                "{}{}",
+                one_row_table(look, "default style"),
+                one_row_table(
+                    &format!(r#"<w:tblStyle w:val="Other"/>{look}"#),
+                    "other style"
+                )
+            ),
+            format!(
+                "{}{}",
+                one_row_table(look, "ordinary"),
+                one_row_table(
+                    &format!(r#"<w:tblpPr w:tblpX="1"/>{look}"#),
+                    "effective float"
+                )
+            ),
+        ];
+
+        for body in cases {
+            let tables = parse_body_tables(&body, &logical_sequence_styles());
+            assert_eq!(first_cell_color(&tables[0]).as_deref(), Some("0000bb"));
+            assert_eq!(first_cell_color(&tables[1]).as_deref(), Some("0000bb"));
+            assert_ne!(
+                tables[0].table_layout.logical_sequence_id,
+                tables[1].table_layout.logical_sequence_id,
+                "parser-owned membership must retain each §17.4.37 barrier",
+            );
+        }
+    }
+
+    #[test]
+    fn ignored_tblppr_remains_ordinary_for_logical_table_sequence() {
+        // [MS-OI29500] 2.1.162(b-c): this authored positioning payload is
+        // ignored by Word after defaults are resolved. It therefore does not
+        // break the §17.4.37 ordinary-flow sequence merely because tblpPr is
+        // present lexically.
+        let look = r#"<w:tblLook w:firstRow="1" w:lastRow="1" w:noHBand="1"/>"#;
+        let tables = parse_body_tables(
+            &format!(
+                "{}{}",
+                one_row_table(look, "first"),
+                one_row_table(
+                    &format!(
+                        r#"<w:tblpPr w:tblpX="0" w:tblpY="0" w:horzAnchor="text" w:vertAnchor="margin"/>{look}"#
+                    ),
+                    "last"
+                )
+            ),
+            &logical_sequence_styles(),
+        );
+
+        assert_eq!(first_cell_color(&tables[0]).as_deref(), Some("aa0000"));
+        assert_eq!(first_cell_color(&tables[1]).as_deref(), Some("0000bb"));
+        assert_eq!(
+            tables[0].table_layout.logical_sequence_id,
+            tables[1].table_layout.logical_sequence_id,
+        );
+    }
+
+    #[test]
+    fn non_paragraph_range_markup_does_not_intervene_in_logical_table_sequence() {
+        // §17.4.37 says specifically that an intervening p separates tables;
+        // range markup between two block elements is not a paragraph and must
+        // not change their logical row ordinals.
+        let look = r#"<w:tblLook w:firstRow="1" w:lastRow="1" w:noHBand="1"/>"#;
+        let tables = parse_body_tables(
+            &format!(
+                r#"{}<w:bookmarkStart w:id="0" w:name="between"/>{}"#,
+                one_row_table(look, "first"),
+                one_row_table(look, "last")
+            ),
+            &logical_sequence_styles(),
+        );
+
+        assert_eq!(first_cell_color(&tables[0]).as_deref(), Some("aa0000"));
+        assert_eq!(first_cell_color(&tables[1]).as_deref(), Some("0000bb"));
+    }
+
+    #[test]
+    fn adjacent_nested_tables_share_logical_outer_rows() {
+        let look = r#"<w:tblLook w:firstRow="1" w:lastRow="1" w:noHBand="1"/>"#;
+        let outer = parse_tbl_styled(
+            &format!(
+                r#"<w:tr><w:tc>{}{}</w:tc></w:tr>"#,
+                one_row_table(look, "nested first"),
+                one_row_table(look, "nested last")
+            ),
+            &logical_sequence_styles(),
+        );
+        let nested: Vec<&DocTable> = outer.rows[0].cells[0]
+            .content
+            .iter()
+            .filter_map(|element| match element {
+                CellElement::Table(table) => Some(table.as_ref()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            nested.len(),
+            2,
+            "authored nested table identities remain distinct"
+        );
+        assert_eq!(first_cell_color(nested[0]).as_deref(), Some("aa0000"));
+        assert_eq!(first_cell_color(nested[1]).as_deref(), Some("0000bb"));
+        let first = serde_json::to_value(&nested[0].table_layout).unwrap();
+        let second = serde_json::to_value(&nested[1].table_layout).unwrap();
+        assert_eq!(first["logicalSequenceId"], second["logicalSequenceId"]);
+        assert_eq!(first["logicalRowOffset"], 0);
+        assert_eq!(second["logicalRowOffset"], 1);
+        assert_eq!(first["logicalTotalRows"], 2);
+        assert_eq!(second["logicalTotalRows"], 2);
+    }
+
+    #[test]
+    fn absent_effective_style_identity_does_not_form_a_logical_table_sequence() {
+        let body = format!(
+            r#"<w:body xmlns:w="{ns}">{}{}</w:body>"#,
+            one_row_table("", "first"),
+            one_row_table("", "second"),
+            ns = W_NS
+        );
+        let doc = roxmltree::Document::parse(&body).unwrap();
+        let children = body_children_with_cover_breaks(doc.root_element());
+        let contexts = logical_table_sequence_contexts(
+            &children,
+            &StyleMap::parse(""),
+            TablePositioningContext::Normal,
+        );
+
+        for (table, _) in children {
+            let context = contexts.get(&table.id()).expect("table context");
+            assert_eq!(*context, LogicalTableSequenceContext::standalone(table));
+        }
+    }
+
+    #[test]
+    fn body_level_sect_pr_breaks_logical_table_sequence() {
+        // §17.6.1: a section boundary between two tables prevents them from
+        // becoming one §17.4.37 logical table even when style and flow match.
+        let look = r#"<w:tblLook w:firstRow="1" w:lastRow="1" w:noHBand="1"/>"#;
+        let tables = parse_body_tables(
+            &format!(
+                r#"{}<w:sectPr><w:type w:val="continuous"/></w:sectPr>{}"#,
+                one_row_table(look, "before section"),
+                one_row_table(look, "after section")
+            ),
+            &logical_sequence_styles(),
+        );
+
+        assert_eq!(tables.len(), 2);
+        assert_ne!(
+            tables[0].table_layout.logical_sequence_id,
+            tables[1].table_layout.logical_sequence_id,
+        );
+    }
+
+    fn phase_styles() -> StyleMap {
+        StyleMap::parse(&format!(
+            r#"<w:styles xmlns:w="{ns}">
+                <w:style w:type="paragraph" w:default="1" w:styleId="Normal"/>
+                <w:style w:type="table" w:default="1" w:styleId="Phase">
+                    <w:tblStylePr w:type="firstRow"><w:tcPr><w:shd w:val="clear" w:fill="FF0000"/></w:tcPr></w:tblStylePr>
+                    <w:tblStylePr w:type="band1Horz"><w:rPr><w:color w:val="11AA11"/></w:rPr></w:tblStylePr>
+                    <w:tblStylePr w:type="band2Horz"><w:rPr><w:color w:val="BB22BB"/></w:rPr></w:tblStylePr>
+                </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        ))
+    }
+
+    fn two_row_table(tbl_pr: &str) -> String {
+        let tr = "<w:tr><w:tc><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc></w:tr>".repeat(2);
+        format!(r#"<w:tbl><w:tblPr>{tbl_pr}</w:tblPr>{tr}</w:tbl>"#)
+    }
+
+    fn row_color(table: &DocTable, row: usize) -> Option<String> {
+        cell_text_color(&table.rows[row].cells[0])
+    }
+
+    #[test]
+    fn horizontal_band_parity_origin_is_owned_by_the_logical_sequence_first_member() {
+        // The first member activates a shaded firstRow, so the logical table's
+        // horizontal-band parity origins after logical row 0. The second member
+        // turns firstRow OFF via its own tblLook; that LOCAL flag must not
+        // re-phase the shared banding. Logical rows 0(firstRow) 1 2 3 must band
+        // 1,2,1 across the seam — not restart at the second member.
+        let tables = parse_body_tables(
+            &format!(
+                "{}{}",
+                two_row_table(r#"<w:tblLook w:firstRow="1" w:lastRow="0"/>"#),
+                two_row_table(r#"<w:tblLook w:firstRow="0" w:lastRow="0"/>"#)
+            ),
+            &phase_styles(),
+        );
+
+        assert_eq!(tables.len(), 2);
+        // logical row 1 (first member body row): band1.
+        assert_eq!(row_color(&tables[0], 1).as_deref(), Some("11aa11"));
+        // logical rows 2 and 3 (second member) continue the sequence's parity.
+        assert_eq!(row_color(&tables[1], 0).as_deref(), Some("bb22bb"));
+        assert_eq!(row_color(&tables[1], 1).as_deref(), Some("11aa11"));
     }
 
     // A cell carrying an explicit firstCol cnfStyle (`001000000000`) on its tcPr
