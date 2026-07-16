@@ -4,6 +4,7 @@ import type {
   TableColumnRowConstraint,
   TablePreferredWidthConstraint,
 } from './types.js';
+import { exactLengthKeyFromNumber, type ExactLengthKey } from './exact-length.js';
 
 const EPSILON_PT = 1e-9;
 
@@ -419,7 +420,7 @@ function fitToAvailableWidth(
  * parser-independent constraint solver. `tblGrid` seeds widths; it never
  * suppresses authored row/cell preferences.
  */
-export function resolveTableColumnWidths(input: TableColumnLayoutInput): readonly number[] {
+function solveTableColumnWidths(input: TableColumnLayoutInput): readonly number[] {
   const columnCount = requiredColumnCount(input);
   if (columnCount === 0) return Object.freeze([]);
   const widths = fixedWidths(input, columnCount);
@@ -453,4 +454,34 @@ export function resolveTableColumnWidths(input: TableColumnLayoutInput): readonl
     cells,
     finiteNonNegative(input.availableWidthPt),
   ));
+}
+
+export interface ResolvedTableColumnLayout {
+  readonly widthsPt: readonly number[];
+  readonly widthKeys: readonly (ExactLengthKey | null)[];
+}
+
+/** Preserve an unchanged authored track's identity state exactly. A hand-built
+ * numeric track has no authored key array and therefore receives its numeric
+ * definition; a solver-changed track likewise receives its final numeric
+ * definition. Authored `null` is different: it means the exact identity is
+ * unavailable and must remain unknown while its geometry is unchanged. */
+export function resolveTableColumnLayout(input: TableColumnLayoutInput): ResolvedTableColumnLayout {
+  const widthsPt = solveTableColumnWidths(input);
+  const widthKeys = widthsPt.map((width, column) => {
+    const changed = width !== input.gridWidthsPt[column];
+    if (!changed && input.gridWidthKeys?.[column] === null) return null;
+    if (!changed && input.gridWidthKeys?.[column] !== undefined) {
+      return input.gridWidthKeys[column]!;
+    }
+    return exactLengthKeyFromNumber(width) ?? '0/1';
+  });
+  return Object.freeze({
+    widthsPt: Object.freeze([...widthsPt]),
+    widthKeys: Object.freeze(widthKeys),
+  });
+}
+
+export function resolveTableColumnWidths(input: TableColumnLayoutInput): readonly number[] {
+  return resolveTableColumnLayout(input).widthsPt;
 }

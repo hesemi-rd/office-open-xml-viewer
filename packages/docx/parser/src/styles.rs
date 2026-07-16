@@ -444,6 +444,17 @@ impl StyleMap {
         self.default_table_style_id.as_deref()
     }
 
+    /// Whether `style_id` names an existing `<w:style w:type="table">`. Only
+    /// table-typed styles are indexed in `table_styles`, so this rejects both a
+    /// dangling reference and a reference to a paragraph/character style. Used
+    /// by ECMA-376 Part 1 §17.4.37 logical-table membership: an explicit but
+    /// unresolved or non-table style is not a valid grouping identity. This
+    /// does not alter the omitted-style / default-table-style policy, which
+    /// remains owned by `default_table_style_id`.
+    pub fn contains_table_style(&self, style_id: &str) -> bool {
+        self.table_styles.contains_key(style_id)
+    }
+
     pub fn parse(xml: &str) -> Self {
         let doc = match parse_guarded(xml) {
             Ok(d) => d,

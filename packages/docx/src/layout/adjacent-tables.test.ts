@@ -5,109 +5,126 @@ import {
 } from './adjacent-tables.js';
 import type { BodyElement } from '../types.js';
 
-function table(
-  effectiveStyleId: string,
-  ordinaryFlow: boolean,
-  computedWidthPt: number,
-): BodyElement {
+function table(rowCount: number): BodyElement {
   return {
     type: 'table',
-    colWidths: [computedWidthPt],
-    rows: [],
+    colWidths: [10],
+    rows: Array.from({ length: rowCount }, () => ({ cells: [] })),
     borders: { top: null, right: null, bottom: null, left: null, insideH: null, insideV: null },
-    cellMarginTop: 0,
-    cellMarginRight: 0,
-    cellMarginBottom: 0,
-    cellMarginLeft: 0,
+    cellMarginTop: 0, cellMarginRight: 0, cellMarginBottom: 0, cellMarginLeft: 0,
     jc: 'left',
-    __tableLayout: {
-      effectiveStyleId,
-      ordinaryFlow,
-      grid: { authored: true, columns: [{ width: `${computedWidthPt * 20}` }], requiredColumnCount: 1 },
-      preferredWidth: null,
-      layout: null,
-      cellSpacing: null,
-    },
   } as unknown as BodyElement;
 }
 
-function paragraph(hidden = false): BodyElement {
-  return { type: 'paragraph', hidden } as unknown as BodyElement;
+function paragraph(): BodyElement {
+  return { type: 'paragraph' } as unknown as BodyElement;
 }
 
-function publicTable(): BodyElement {
-  const value = table('discarded', true, 42) as BodyElement & Record<string, unknown>;
-  delete value.__tableLayout;
-  return value;
-}
-
+/** Build a body-sequence entry from parser-owned §17.4.37 membership facts.
+ * `sequenceId === null` models a table for which the parser preserved no
+ * logical-table identity (a hand-built public table). */
 function input(
   element: BodyElement,
-  effectiveStyleId: string | null = null,
-  ordinaryFlow = true,
+  sequenceId: string | null,
+  logicalRowOffset = 0,
+  logicalTotalRows = element.type === 'table' ? element.rows.length : 0,
 ): AdjacentTableSequenceInput {
-  return { element, table: element.type === 'table' ? { effectiveStyleId, ordinaryFlow } : null };
+  if (element.type !== 'table' || sequenceId === null) {
+    return { element, table: null };
+  }
+  return {
+    element,
+    table: {
+      logicalSequenceId: sequenceId,
+      logicalRowOffset,
+      logicalTotalRows,
+      rowCount: element.rows.length,
+    },
+  };
 }
 
 describe('adjacent table normalization (ECMA-376 Part 1 §17.4.37)', () => {
-  it('groups directly adjacent in-flow tables by preserved effective style identity', () => {
-    const first = table('SameStyle', true, 36);
-    const second = table('SameStyle', true, 144);
+  it('groups adjacent tables the parser assigned to one logical sequence', () => {
+    const first = table(1);
+    const second = table(2);
 
     expect(normalizeAdjacentTables([
-      input(first, 'SameStyle'), input(second, 'SameStyle'),
+      input(first, 'seq:0', 0, 3),
+      input(second, 'seq:0', 1, 3),
     ])).toEqual([{
       kind: 'adjacent-table-group',
-      effectiveStyleId: 'SameStyle',
+      logicalSequenceId: 'seq:0',
       tables: [first, second],
     }]);
   });
 
-  it('keeps different effective style identities distinct even when public geometry matches', () => {
-    const first = table('StyleA', true, 72);
-    const second = table('StyleB', true, 72);
-
-    expect(normalizeAdjacentTables([input(first, 'StyleA'), input(second, 'StyleB')])).toEqual([
-      { kind: 'body-element', element: first },
-      { kind: 'body-element', element: second },
-    ]);
-  });
-
-  it('treats every intervening paragraph as a barrier, including hidden paragraphs', () => {
-    const first = table('SameStyle', true, 72);
-    const hidden = paragraph(true);
-    const second = table('SameStyle', true, 72);
+  it('keeps parser-distinct logical sequences apart even when adjacent', () => {
+    const first = table(1);
+    const second = table(1);
 
     expect(normalizeAdjacentTables([
-      input(first, 'SameStyle'), input(hidden), input(second, 'SameStyle'),
+      input(first, 'seq:0'),
+      input(second, 'seq:7'),
     ])).toEqual([
       { kind: 'body-element', element: first },
-      { kind: 'body-element', element: hidden },
       { kind: 'body-element', element: second },
     ]);
   });
 
-  it('does not join across an effectively floating table', () => {
-    const first = table('SameStyle', true, 72);
-    const floating = table('SameStyle', false, 72);
-    const second = table('SameStyle', true, 72);
+  it('treats an intervening body element as a barrier', () => {
+    const first = table(1);
+    const between = paragraph();
+    const second = table(1);
 
     expect(normalizeAdjacentTables([
-      input(first, 'SameStyle'), input(floating, 'SameStyle', false), input(second, 'SameStyle'),
+      input(first, 'seq:0'),
+      input(between, null),
+      input(second, 'seq:9'),
     ])).toEqual([
       { kind: 'body-element', element: first },
-      { kind: 'body-element', element: floating },
+      { kind: 'body-element', element: between },
       { kind: 'body-element', element: second },
     ]);
   });
 
-  it('keeps hand-built public tables distinct when no parser style identity was preserved', () => {
-    const first = publicTable();
-    const second = publicTable();
+  it('keeps a table with no preserved parser identity standalone', () => {
+    const first = table(1);
+    const second = table(1);
 
-    expect(normalizeAdjacentTables([input(first), input(second)])).toEqual([
+    expect(normalizeAdjacentTables([
+      input(first, null),
+      input(second, null),
+    ])).toEqual([
       { kind: 'body-element', element: first },
       { kind: 'body-element', element: second },
     ]);
+  });
+
+  it('emits a single-member logical sequence as a plain body element', () => {
+    const only = table(2);
+
+    expect(normalizeAdjacentTables([input(only, 'seq:0', 0, 2)])).toEqual([
+      { kind: 'body-element', element: only },
+    ]);
+  });
+
+  it('rejects a parser sequence whose row offsets are inconsistent', () => {
+    const first = table(1);
+    const second = table(2);
+
+    expect(() => normalizeAdjacentTables([
+      input(first, 'seq:0', 0, 3),
+      input(second, 'seq:0', 2, 3),
+    ])).toThrow(/inconsistent/);
+  });
+
+  it('rejects a parser sequence whose member rows do not total', () => {
+    const first = table(1);
+    const second = table(1);
+
+    expect(() => normalizeAdjacentTables([
+      input(first, 'seq:0', 0, 3),
+      input(second, 'seq:0', 1, 3),
+    ])).toThrow(/incomplete/);
   });
 });

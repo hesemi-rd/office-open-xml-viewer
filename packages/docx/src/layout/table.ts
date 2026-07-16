@@ -3,6 +3,7 @@ import { retainedBorderTreatment } from './border-treatment.js';
 import { paragraphGapPt } from './paragraph-spacing.js';
 import { snapshotPlainData } from './plain-data.js';
 import { tableCellHorizontalSpacingInsets } from './table-columns.js';
+import { firstAuthoredTableBorder } from './table-border-layer.js';
 import type {
   BlockLayoutResult,
   FlowBlockPlacement,
@@ -287,18 +288,6 @@ function toConflictCandidate(
   };
 }
 
-function firstAuthoredBorder(
-  ...borders: readonly (TableBorderInput | null)[]
-): TableBorderInput | null {
-  for (const border of borders) {
-    // Word treats `none` like omission while resolving cell -> style ->
-    // tblPrEx -> table borders; `nil` remains specified because it suppresses
-    // the final shared edge ([MS-OI29500] 2.1.169).
-    if (border && border.authoredStyle !== 'none') return border;
-  }
-  return null;
-}
-
 function physicalCellEdges(
   cell: TableCellLayoutInput,
   table: TableEdgeInputs,
@@ -323,12 +312,12 @@ function physicalCellEdges(
     tableInside: TableBorderInput | null,
     useInside: boolean,
   ): BorderCandidate | null => {
-    const resolvedCell = firstAuthoredBorder(direct, useInside ? cellInside : null);
+    const resolvedCell = firstAuthoredTableBorder(direct, useInside ? cellInside : null);
     if (resolvedCell) return toConflictCandidate(resolvedCell, 'cell');
     return toConflictCandidate(
       useInside
-        ? firstAuthoredBorder(exceptionInside, tableInside)
-        : firstAuthoredBorder(exceptionOuter, tableOuter),
+        ? firstAuthoredTableBorder(exceptionInside, tableInside)
+        : firstAuthoredTableBorder(exceptionOuter, tableOuter),
       'table',
     );
   };
@@ -632,7 +621,7 @@ function materializeBorders(
         const exceptionBorder = boundary === 0
           ? input.rows[0]?.exceptionBorders?.top ?? null
           : input.rows.at(-1)?.exceptionBorders?.bottom ?? null;
-        const tableBorder = firstAuthoredBorder(
+        const tableBorder = firstAuthoredTableBorder(
           exceptionBorder,
           boundary === 0 ? input.borders.top : input.borders.bottom,
         );
@@ -661,11 +650,11 @@ function materializeBorders(
           if (conditionalInsideOverridesTable) return;
           const startXPt = columnX(gridRow, column);
           const endXPt = columnX(gridRow, column + 1);
-          const aboveTableBorder = firstAuthoredBorder(
+          const aboveTableBorder = firstAuthoredTableBorder(
             input.rows[boundary - 1]?.exceptionBorders?.insideH ?? null,
             input.borders.insideH,
           );
-          const belowTableBorder = firstAuthoredBorder(
+          const belowTableBorder = firstAuthoredTableBorder(
             input.rows[boundary]?.exceptionBorders?.insideH ?? null,
             input.borders.insideH,
           );
@@ -792,11 +781,11 @@ function materializeBorders(
     const rowTopPt = rowY(rowIndex);
     const rowBottomPt = rowY(rowIndex + 1);
     const tableXPt = rowXPt[rowIndex] ?? 0;
-    push(firstAuthoredBorder(row.exceptionBorders?.left ?? null, input.borders.left),
+    push(firstAuthoredTableBorder(row.exceptionBorders?.left ?? null, input.borders.left),
       'left', { xPt: tableXPt, yPt: rowTopPt }, {
       xPt: tableXPt, yPt: rowBottomPt,
     });
-    push(firstAuthoredBorder(row.exceptionBorders?.right ?? null, input.borders.right),
+    push(firstAuthoredTableBorder(row.exceptionBorders?.right ?? null, input.borders.right),
       'right', { xPt: tableXPt + tableWidthPt, yPt: rowTopPt }, {
       xPt: tableXPt + tableWidthPt, yPt: rowBottomPt,
     });
@@ -817,7 +806,7 @@ function materializeBorders(
       if (!separatesOwners) continue;
       const xPt = columnX(rowIndex, boundary);
       if (!conditionalInsideVBoundaries.has(boundary)) {
-        push(firstAuthoredBorder(
+        push(firstAuthoredTableBorder(
           row.exceptionBorders?.insideV ?? null,
           input.borders.insideV,
         ), 'between',

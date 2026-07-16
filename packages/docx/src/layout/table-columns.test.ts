@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveTableColumnWidths } from './table-columns.js';
+import { resolveTableColumnLayout, resolveTableColumnWidths } from './table-columns.js';
 import type { TableColumnLayoutInput } from './types.js';
 
 function input(overrides: Partial<TableColumnLayoutInput> = {}): TableColumnLayoutInput {
@@ -59,6 +59,17 @@ describe('ECMA-376 §17.18.87 table column solver', () => {
       availableWidthPt: 75,
       gridWidthsPt: [70, 30],
     }))).toEqual([52.5, 22.5]);
+  });
+
+  it('gives solver-changed tracks exact keys for their final numeric definitions', () => {
+    expect(resolveTableColumnLayout(input({
+      availableWidthPt: 75,
+      gridWidthsPt: [70, 30],
+      gridWidthKeys: [null, '30/1'],
+    }))).toEqual({
+      widthsPt: [52.5, 22.5],
+      widthKeys: ['105/2', '45/2'],
+    });
   });
 
   it('distributes a preferred table width when every declared grid track starts at zero', () => {
