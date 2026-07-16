@@ -154,6 +154,8 @@ export interface DrawingLayout extends LayoutNodeBase {
   readonly commands: readonly DrawingPaintCommand[];
   readonly anchorLayer?: Readonly<{
     occurrenceId: string;
+    /** Stable identity from acquisition before occurrence-local re-keying. */
+    acquisitionOccurrenceId?: string;
     behindDoc: boolean;
     relativeHeight: number;
     sourceOrder: number;

@@ -1,0 +1,317 @@
+import { snapshotPlainData } from './plain-data.js';
+import {
+  floatingTableAxesFollowHostFlow,
+  translateCompleteParagraphLayout,
+  translateRect,
+  translateTableLayout,
+  type LayoutTranslation,
+} from './retained-geometry-translation.js';
+import type {
+  DrawingLayout,
+  FloatingTablePlacementLayout,
+  ParagraphLayout,
+  ParagraphPlacement,
+  ResolvedFloatingTablePlacementLayout,
+  TableCellLayout,
+  TableLayout,
+  TableRowLayout,
+  TextBoxLayout,
+} from './types.js';
+
+export interface BodyOccurrenceDestination {
+  readonly coordinateSpace: 'logical-body-points';
+  readonly flowDomainId: string;
+  readonly translation: Readonly<{ xPt: number; yPt: number }>;
+}
+
+export interface BodyOccurrenceProjectionOptions {
+  readonly occurrenceId: string;
+  readonly destination: BodyOccurrenceDestination;
+}
+
+type OccurrenceTableLayout = TableLayout & Readonly<{
+  floatingTables?: readonly FloatingTablePlacementLayout[];
+  resolvedFloatingTables?: readonly ResolvedFloatingTablePlacementLayout[];
+}>;
+
+function validateTranslation(translation: LayoutTranslation): void {
+  if (!Number.isFinite(translation.xPt) || !Number.isFinite(translation.yPt)) {
+    throw new RangeError('body occurrence translation must be finite');
+  }
+}
+
+function validateProjectionOptions(options: BodyOccurrenceProjectionOptions): void {
+  if (options.occurrenceId.length === 0) throw new RangeError('occurrenceId must not be empty');
+  if (options.destination.flowDomainId.length === 0) throw new RangeError('flowDomainId must not be empty');
+  validateTranslation(options.destination.translation);
+}
+
+function resolvedFloatingDelta(
+  placement: FloatingTablePlacementLayout,
+  hostDelta: LayoutTranslation,
+): LayoutTranslation {
+  const followsHost = floatingTableAxesFollowHostFlow(placement.positioning);
+  return {
+    xPt: followsHost.x ? hostDelta.xPt : 0,
+    yPt: followsHost.y ? hostDelta.yPt : 0,
+  };
+}
+
+function assertAcyclicLayoutGraph(root: ParagraphLayout | TableLayout): void {
+  const visiting = new WeakSet<object>();
+  const completed = new WeakSet<object>();
+  const visit = (layout: ParagraphLayout | TableLayout): void => {
+    if (visiting.has(layout)) throw new TypeError('body occurrence layout graph must be acyclic');
+    if (completed.has(layout)) return;
+    visiting.add(layout);
+    if (layout.kind === 'paragraph') {
+      for (const textBox of layout.textBoxes) for (const paragraph of textBox.paragraphs) visit(paragraph);
+    } else {
+      for (const row of layout.rows) for (const cell of row.cells) {
+        for (const block of cell.blocks) visit(block.layout);
+      }
+      const table = layout as OccurrenceTableLayout;
+      for (const placement of table.floatingTables ?? []) visit(placement.child);
+      for (const placement of table.resolvedFloatingTables ?? []) {
+        visit(placement.source.child);
+        visit(placement.child);
+      }
+    }
+    visiting.delete(layout);
+    completed.add(layout);
+  };
+  visit(root);
+}
+
+function translateOccurrenceGeometry<T extends ParagraphLayout | TableLayout>(
+  retained: T,
+  translation: LayoutTranslation,
+): T {
+  assertAcyclicLayoutGraph(retained);
+  const tableMemo = new WeakMap<TableLayout, { key: string; value: TableLayout }>();
+  const paragraphMemo = new WeakMap<ParagraphLayout, { key: string; value: ParagraphLayout }>();
+  const keyFor = (delta: LayoutTranslation) => `${delta.xPt}\u0000${delta.yPt}`;
+
+  const translateParagraph = (paragraph: ParagraphLayout, delta: LayoutTranslation): ParagraphLayout => {
+    const key = keyFor(delta);
+    const prior = paragraphMemo.get(paragraph);
+    if (prior) {
+      if (prior.key !== key) throw new Error('incompatible projection ownership');
+      return prior.value;
+    }
+    const translated = translateCompleteParagraphLayout(paragraph, delta);
+    paragraphMemo.set(paragraph, { key, value: translated });
+    return translated;
+  };
+
+  const translateTable = (retainedTable: OccurrenceTableLayout, delta: LayoutTranslation): TableLayout => {
+    const key = keyFor(delta);
+    const prior = tableMemo.get(retainedTable);
+    if (prior) {
+      if (prior.key !== key) throw new Error('incompatible projection ownership');
+      return prior.value;
+    }
+    const translated: OccurrenceTableLayout = translateTableLayout(retainedTable, delta);
+    tableMemo.set(retainedTable, { key, value: translated });
+
+    const resolvedDeltaBySource = new Map<FloatingTablePlacementLayout, LayoutTranslation>();
+    for (const resolved of retainedTable.resolvedFloatingTables ?? []) {
+      resolvedDeltaBySource.set(resolved.source, resolvedFloatingDelta(resolved.source, delta));
+    }
+    const sourceMemo = new Map<FloatingTablePlacementLayout, FloatingTablePlacementLayout>();
+    const translateSource = (source: FloatingTablePlacementLayout): FloatingTablePlacementLayout => {
+      const priorSource = sourceMemo.get(source);
+      if (priorSource) return priorSource;
+      const childDelta = resolvedDeltaBySource.get(source) ?? delta;
+      const result: FloatingTablePlacementLayout = {
+        ...source,
+        anchorBounds: translateRect(source.anchorBounds, delta),
+        ...(source.columnBounds ? { columnBounds: translateRect(source.columnBounds, delta) } : {}),
+        child: translateTable(source.child, childDelta),
+      };
+      sourceMemo.set(source, result);
+      return result;
+    };
+    const floatingTables = (retainedTable.floatingTables ?? []).map(translateSource);
+    const resolvedFloatingTables = (retainedTable.resolvedFloatingTables ?? []).map((resolved) => {
+      const source = translateSource(resolved.source);
+      const ownedDelta = resolvedFloatingDelta(resolved.source, delta);
+      return {
+        ...resolved,
+        xPt: resolved.xPt + ownedDelta.xPt,
+        yPt: resolved.yPt + ownedDelta.yPt,
+        bounds: translateRect(resolved.bounds, ownedDelta),
+        exclusionBounds: translateRect(resolved.exclusionBounds, ownedDelta),
+        child: source.child,
+        source,
+      } satisfies ResolvedFloatingTablePlacementLayout;
+    });
+    if (retainedTable.floatingTables || retainedTable.resolvedFloatingTables) {
+      Object.assign(translated, { floatingTables, resolvedFloatingTables });
+    }
+    return translated;
+  };
+
+  return (retained.kind === 'paragraph'
+    ? translateParagraph(retained, translation)
+    : translateTable(retained, translation)) as T;
+}
+
+export function translateBodyOccurrence<T extends ParagraphLayout | TableLayout>(
+  retained: T,
+  translation: Readonly<{ xPt: number; yPt: number }>,
+): T {
+  validateTranslation(translation);
+  return translateOccurrenceGeometry(retained, translation);
+}
+
+/** Deterministic ID/domain/freezing policy; these are engine rules, not OOXML rules. */
+export function projectBodyOccurrence<T extends ParagraphLayout | TableLayout>(
+  retained: T,
+  options: BodyOccurrenceProjectionOptions,
+): T {
+  validateProjectionOptions(options);
+  const translated = translateOccurrenceGeometry(retained, options.destination.translation);
+  const encodedOccurrence = encodeURIComponent(options.occurrenceId);
+  const tableMemo = new WeakMap<TableLayout, { domain: string; value: TableLayout }>();
+  const paragraphMemo = new WeakMap<ParagraphLayout, { domain: string; value: ParagraphLayout }>();
+  const drawingMemo = new WeakMap<DrawingLayout, { domain: string; value: DrawingLayout }>();
+  const anchorOwners = new Map<string, DrawingLayout>();
+  const floatingOwners = new Map<string, FloatingTablePlacementLayout>();
+  const nodeId = (sourceId: string) => `${options.occurrenceId}/node/${encodeURIComponent(sourceId)}`;
+  const anchorId = (sourceId: string) => `${options.occurrenceId}/anchor/${encodeURIComponent(sourceId)}`;
+  const occurrenceId = (sourceId: string) =>
+    `${options.occurrenceId}/occurrence/${encodeURIComponent(sourceId)}`;
+  const nestedDomain = (kind: 'cell' | 'textbox', sourceId: string) =>
+    `${options.destination.flowDomainId}/occurrence/${encodedOccurrence}/${kind}/${encodeURIComponent(sourceId)}`;
+
+  const projectPlacement = (placement: ParagraphPlacement): ParagraphPlacement => {
+    if (placement.kind === 'drawing') return { ...placement, drawingId: nodeId(placement.drawingId) };
+    if (placement.kind === 'anchor-host' && placement.anchorOccurrenceId) return {
+      ...placement, anchorOccurrenceId: anchorId(placement.anchorOccurrenceId),
+    };
+    return placement;
+  };
+  const projectDrawing = (drawing: DrawingLayout, domain: string): DrawingLayout => {
+    const memoized = drawingMemo.get(drawing);
+    if (memoized) {
+      if (memoized.domain !== domain) throw new Error('incompatible projection ownership');
+      return memoized.value;
+    }
+    if (drawing.anchorLayer) {
+      const prior = anchorOwners.get(drawing.anchorLayer.occurrenceId);
+      if (prior && prior !== drawing) throw new Error('duplicate anchor occurrence owner');
+      anchorOwners.set(drawing.anchorLayer.occurrenceId, drawing);
+    }
+    const projected: DrawingLayout = {
+      ...drawing, id: nodeId(drawing.id), flowDomainId: domain,
+      ...(drawing.textBoxIds ? { textBoxIds: drawing.textBoxIds.map(nodeId) } : {}),
+      ...(drawing.anchorLayer ? { anchorLayer: {
+        ...drawing.anchorLayer,
+        occurrenceId: anchorId(drawing.anchorLayer.occurrenceId),
+        acquisitionOccurrenceId: drawing.anchorLayer.acquisitionOccurrenceId ?? drawing.anchorLayer.occurrenceId,
+      } } : {}),
+    };
+    drawingMemo.set(drawing, { domain, value: projected });
+    return projected;
+  };
+  const projectTextBox = (textBox: TextBoxLayout): TextBoxLayout => {
+    const domain = nestedDomain('textbox', textBox.id);
+    return {
+      ...textBox, id: nodeId(textBox.id), flowDomainId: domain,
+      paragraphs: textBox.paragraphs.map((paragraph) => projectParagraph(paragraph, domain)),
+    };
+  };
+  const projectParagraph = (paragraph: ParagraphLayout, domain: string): ParagraphLayout => {
+    const prior = paragraphMemo.get(paragraph);
+    if (prior) {
+      if (prior.domain !== domain) throw new Error('incompatible projection ownership');
+      return prior.value;
+    }
+    const projected: ParagraphLayout = {
+      ...paragraph, id: nodeId(paragraph.id), flowDomainId: domain,
+      lines: paragraph.lines.map((line) => ({
+        ...line, placements: line.placements.map(projectPlacement),
+      })),
+      drawings: paragraph.drawings.map((drawing) => projectDrawing(drawing, domain)),
+      textBoxes: paragraph.textBoxes.map(projectTextBox),
+      exclusions: paragraph.exclusions.map((exclusion) => ({
+        ...exclusion, id: nodeId(exclusion.id),
+        ...(exclusion.anchorOccurrenceId
+          ? { anchorOccurrenceId: anchorId(exclusion.anchorOccurrenceId) } : {}),
+      })),
+      ...(paragraph.anchorFrames ? { anchorFrames: paragraph.anchorFrames.map((frame) => ({
+        ...frame, occurrenceId: anchorId(frame.occurrenceId),
+      })) } : {}),
+    };
+    paragraphMemo.set(paragraph, { domain, value: projected });
+    return projected;
+  };
+  const projectCell = (cell: TableCellLayout): TableCellLayout => {
+    const domain = nestedDomain('cell', cell.id);
+    return {
+      ...cell, id: nodeId(cell.id), flowDomainId: domain,
+      blocks: cell.blocks.map((block) => ({ ...block, layout: projectBlock(block.layout, domain) })),
+    };
+  };
+  const projectRow = (row: TableRowLayout, domain: string): TableRowLayout => ({
+    ...row, id: nodeId(row.id), flowDomainId: domain,
+    ...('occurrenceId' in row && typeof row.occurrenceId === 'string'
+      ? { occurrenceId: occurrenceId(row.occurrenceId) } : {}),
+    cells: row.cells.map(projectCell),
+  });
+  const projectSource = (source: FloatingTablePlacementLayout): FloatingTablePlacementLayout => {
+    const childDomain = nestedDomain('cell', source.hostCellId);
+    return {
+      ...source,
+      occurrenceId: occurrenceId(source.occurrenceId),
+      hostCellId: nodeId(source.hostCellId),
+      tableId: nodeId(source.tableId),
+      child: projectTable(source.child as OccurrenceTableLayout, childDomain),
+    };
+  };
+  const projectTable = (table: OccurrenceTableLayout, domain: string): TableLayout => {
+    const prior = tableMemo.get(table);
+    if (prior) {
+      if (prior.domain !== domain) throw new Error('incompatible projection ownership');
+      return prior.value;
+    }
+    const projected: OccurrenceTableLayout = {
+      ...table, id: nodeId(table.id), flowDomainId: domain,
+      rows: table.rows.map((row) => projectRow(row, domain)),
+    };
+    tableMemo.set(table, { domain, value: projected });
+    const sourceMemo = new Map<FloatingTablePlacementLayout, FloatingTablePlacementLayout>();
+    const sourceFor = (source: FloatingTablePlacementLayout) => {
+      const priorSource = sourceMemo.get(source);
+      if (priorSource) return priorSource;
+      const priorOwner = floatingOwners.get(source.occurrenceId);
+      if (priorOwner && priorOwner !== source) {
+        throw new Error('duplicate floating placement occurrence owner');
+      }
+      floatingOwners.set(source.occurrenceId, source);
+      const result = projectSource(source);
+      sourceMemo.set(source, result);
+      return result;
+    };
+    const floatingTables = (table.floatingTables ?? []).map(sourceFor);
+    const resolvedFloatingTables = (table.resolvedFloatingTables ?? []).map((resolved) => {
+      const source = sourceFor(resolved.source);
+      return {
+        ...resolved, occurrenceId: occurrenceId(resolved.occurrenceId), child: source.child, source,
+      } satisfies ResolvedFloatingTablePlacementLayout;
+    });
+    if (table.floatingTables || table.resolvedFloatingTables) {
+      Object.assign(projected, { floatingTables, resolvedFloatingTables });
+    }
+    return projected;
+  };
+  function projectBlock(layout: ParagraphLayout | TableLayout, domain: string): ParagraphLayout | TableLayout {
+    return layout.kind === 'paragraph'
+      ? projectParagraph(layout, domain)
+      : projectTable(layout, domain);
+  }
+
+  const projected = projectBlock(translated, options.destination.flowDomainId);
+  return snapshotPlainData(projected, 'DOCX body occurrence projection') as T;
+}

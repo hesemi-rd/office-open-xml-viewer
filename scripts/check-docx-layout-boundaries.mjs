@@ -347,6 +347,38 @@ function assertCapabilityBoundaries(root) {
   }
 }
 
+function assertOccurrenceProjectionRuntimeDependencies(root) {
+  const occurrence = resolve(root, LAYOUT_SOURCE, 'occurrence-projection.ts');
+  const translation = resolve(root, LAYOUT_SOURCE, 'retained-geometry-translation.ts');
+  const plainData = resolve(root, LAYOUT_SOURCE, 'plain-data.ts');
+  const guarded = [occurrence, translation, plainData];
+  for (const path of guarded) {
+    if (!existsSync(path)) {
+      fail('OCCURRENCE_PROJECTION_RUNTIME_DEPENDENCY', `missing ${posixPath(relative(root, path))}`);
+    }
+  }
+  const allowedTargets = new Map([
+    [occurrence, new Set([translation, plainData])],
+    [translation, new Set()],
+    [plainData, new Set()],
+  ]);
+  for (const current of guarded) {
+    for (const edge of moduleEdges(current)) {
+      if (edge.typeOnly) continue;
+      const detail = `${posixPath(relative(root, current))} -> ${edge.specifier}`;
+      if (!edge.literal || edge.kind === 'dynamic-import' || edge.kind === 'require'
+        || edge.bare || edge.specifier.includes('?') || edge.specifier.includes('#')
+        || !edge.specifier.startsWith('.')) {
+        fail('OCCURRENCE_PROJECTION_RUNTIME_DEPENDENCY', detail);
+      }
+      const dependency = resolveLocalImport(current, edge.specifier);
+      if (!dependency || !allowedTargets.get(current)?.has(dependency)) {
+        fail('OCCURRENCE_PROJECTION_RUNTIME_DEPENDENCY', detail);
+      }
+    }
+  }
+}
+
 /**
  * Body paint consumes retained placements. Letting this adapter call a layout
  * entry point would silently reintroduce a second layout pass whose result can
@@ -2656,6 +2688,7 @@ export function checkDocxLayoutBoundaries(options) {
   assertNoProductionTestSupportImports(root);
   assertPaintBoundaries(root);
   assertCapabilityBoundaries(root);
+  assertOccurrenceProjectionRuntimeDependencies(root);
   assertBodyPaintConsumesRetainedLayout(root);
   assertLayoutParserModelBoundaries(root);
 

@@ -1,4 +1,5 @@
 import { resolveFloatOverlap } from '../float-layout.js';
+import { floatingTableAxesFollowHostFlow } from './retained-geometry-translation.js';
 import type {
   FloatRegistryEntryPt,
   FloatRegistryDeltaPt,
@@ -112,16 +113,12 @@ export function resolveFloatingTablePlacement(
   const widthPt = placement.child.columnWidthsPt.reduce((sum, width) => sum + width, 0);
   const heightPt = placement.child.advancePt;
   const raw = resolveFloatingTableBoxPt(placement.positioning, frames, widthPt, heightPt);
-  const usesTextX = !placement.positioning.horzSpecified
-    || (placement.positioning.horzAnchor !== 'page'
-      && placement.positioning.horzAnchor !== 'margin');
-  const usesTextY = placement.positioning.vertAnchor !== 'page'
-    && placement.positioning.vertAnchor !== 'margin';
+  const followsHost = floatingTableAxesFollowHostFlow(placement.positioning);
   return resolvedPlacement(
     placement,
-    usesTextX && placement.acquiredTextOffsetPt
+    followsHost.x && placement.acquiredTextOffsetPt
       ? frames.text.xPt + placement.acquiredTextOffsetPt.xPt : raw.x,
-    usesTextY && placement.acquiredTextOffsetPt
+    followsHost.y && placement.acquiredTextOffsetPt
       ? frames.text.yPt + placement.acquiredTextOffsetPt.yPt : raw.y,
   );
 }

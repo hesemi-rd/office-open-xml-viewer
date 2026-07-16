@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -30,8 +30,17 @@ function runChecker(root, ...args) {
   return command(root, process.execPath, [checker, '--root', root, ...args]);
 }
 
+function initializeFixture(prefix) {
+  const root = mkdtempSync(join(tmpdir(), prefix));
+  write(root, 'packages/docx/src/layout/plain-data.ts', 'export function snapshotPlainData(value) { return value; }\n');
+  write(root, 'packages/docx/src/layout/occurrence-projection.ts', "import { snapshotPlainData } from './plain-data.js';\nexport const project = snapshotPlainData;\n");
+  write(root, 'packages/docx/src/layout/retained-geometry-translation.ts', "import type { PointPt } from './types.js';\nexport const translate = (point: PointPt) => point;\n");
+  write(root, 'packages/docx/src/layout/types.ts', 'export interface PointPt { xPt: number; yPt: number }\n');
+  return root;
+}
+
 function initializeRepository() {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-'));
+  const root = initializeFixture('docx-layout-boundary-');
   write(root, 'packages/docx/src/renderer.ts', 'function buildMeasureState(ctx: unknown, fonts: unknown) { return [ctx, fonts]; }\nexport function computePages(ctx: unknown, resolvedLocalFonts: unknown = {}) { const measure = buildMeasureState(ctx, resolvedLocalFonts); return [measure]; }\nexport function computeTableLayout() { return []; }\n');
   write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
   write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
@@ -42,6 +51,76 @@ function initializeRepository() {
   git(root, 'commit', '-m', 'base');
   git(root, 'switch', '-c', 'a1');
   return root;
+}
+
+function initializeOccurrenceProjectionRepository(importSource = "import { snapshotPlainData } from './plain-data.js';\nexport const project = snapshotPlainData;\n") {
+  const root = initializeRepository();
+  establishA1Baseline(root);
+  write(root, 'packages/docx/src/layout/occurrence-projection.ts', importSource);
+  return root;
+}
+
+test('occurrence projection runtime graph allows only its entries and plain-data', () => {
+  const root = initializeOccurrenceProjectionRepository();
+  const result = runChecker(root, '--base-ref', 'main');
+  assert.equal(result.status, 0, result.output);
+});
+
+test('occurrence projection runtime graph rejects translation and plain-data dependencies', () => {
+  const translationRoot = initializeOccurrenceProjectionRepository();
+  write(translationRoot, 'packages/docx/src/layout/retained-geometry-translation.ts',
+    "import { measure } from '../paragraph-measure.js';\nexport const translate = measure;\n");
+  assert.match(runChecker(translationRoot, '--base-ref', 'main').output,
+    /OCCURRENCE_PROJECTION_RUNTIME_DEPENDENCY/);
+
+  const plainRoot = initializeOccurrenceProjectionRepository();
+  write(plainRoot, 'packages/docx/src/layout/plain-data.ts',
+    "import { parser } from '../parser-model.js';\nexport const snapshotPlainData = parser;\n");
+  assert.match(runChecker(plainRoot, '--base-ref', 'main').output,
+    /OCCURRENCE_PROJECTION_RUNTIME_DEPENDENCY/);
+});
+
+test('occurrence projection runtime graph rejects reverse edges', () => {
+  const reverseRoot = initializeOccurrenceProjectionRepository();
+  write(reverseRoot, 'packages/docx/src/layout/retained-geometry-translation.ts',
+    "import { project } from './occurrence-projection.js';\nexport const translate = project;\n");
+  assert.match(runChecker(reverseRoot, '--base-ref', 'main').output,
+    /OCCURRENCE_PROJECTION_RUNTIME_DEPENDENCY/);
+
+});
+
+for (const missing of ['occurrence-projection.ts', 'retained-geometry-translation.ts', 'plain-data.ts']) {
+  test(`occurrence projection runtime graph rejects missing ${missing}`, () => {
+    const root = initializeOccurrenceProjectionRepository();
+    rmSync(join(root, 'packages/docx/src/layout', missing));
+    assert.match(runChecker(root, '--base-ref', 'main').output,
+      /OCCURRENCE_PROJECTION_RUNTIME_DEPENDENCY/);
+  });
+}
+
+test('occurrence projection runtime graph rejects a missing seam', () => {
+  const root = initializeOccurrenceProjectionRepository();
+  for (const missing of ['occurrence-projection.ts', 'retained-geometry-translation.ts', 'plain-data.ts']) {
+    rmSync(join(root, 'packages/docx/src/layout', missing));
+  }
+  assert.match(runChecker(root, '--base-ref', 'main').output,
+    /OCCURRENCE_PROJECTION_RUNTIME_DEPENDENCY/);
+});
+
+for (const [name, source] of [
+  ['external local', "import { measure } from '../paragraph-measure.js';\nexport const project = measure;\n"],
+  ['decorated', "import { snapshotPlainData } from './plain-data.js?raw';\nexport const project = snapshotPlainData;\n"],
+  ['dynamic literal', "export const project = import('./plain-data.js');\n"],
+  ['dynamic nonliteral', "const path = './plain-data.js';\nexport const project = import(path);\n"],
+  ['bare parser', "import { parser } from '../parser-model.js';\nexport const project = parser;\n"],
+  ['bare package', "import value from 'measurement-service';\nexport const project = value;\n"],
+]) {
+  test(`occurrence projection runtime graph rejects ${name} dependencies`, () => {
+    const root = initializeOccurrenceProjectionRepository(source);
+    const result = runChecker(root, '--base-ref', 'main');
+    assert.notEqual(result.status, 0);
+    assert.match(result.output, /OCCURRENCE_PROJECTION_RUNTIME_DEPENDENCY/);
+  });
 }
 
 const computePagesTableStampBaseline = `
@@ -133,7 +212,7 @@ const computePagesEnvelopeMigration = computePagesEnvelopeBaseline
   .replaceAll('attachRetainedTableEnvelope', 'attachTableFragment');
 
 function initializeComputePagesUprightRepository() {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-upright-finalize-'));
+  const root = initializeFixture('docx-layout-boundary-upright-finalize-');
   write(root, 'packages/docx/src/renderer.ts', computePagesUprightBaseline);
   write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
   write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
@@ -148,7 +227,7 @@ function initializeComputePagesUprightRepository() {
 }
 
 function initializeComputePagesEnvelopeRepository() {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-envelope-rename-'));
+  const root = initializeFixture('docx-layout-boundary-envelope-rename-');
   write(root, 'packages/docx/src/renderer.ts', computePagesEnvelopeBaseline);
   write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
   write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
@@ -199,7 +278,7 @@ export function computeTableLayout() { return []; }
 `;
 
 function initializeComputePagesFittingOuterRepository() {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-fitting-outer-finalize-'));
+  const root = initializeFixture('docx-layout-boundary-fitting-outer-finalize-');
   write(root, 'packages/docx/src/renderer.ts', computePagesFittingOuterBaseline);
   write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
   write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
@@ -262,7 +341,7 @@ function priorFittingOuterProbeSource(current) {
 }
 
 function initializeComposedFittingOuterProbeRepository() {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-composed-fitting-probe-'));
+  const root = initializeFixture('docx-layout-boundary-composed-fitting-probe-');
   const productionRoot = resolve(import.meta.dirname, '..');
   const current = readFileSync(join(productionRoot, 'packages/docx/src/renderer.ts'), 'utf8');
   write(root, 'packages/docx/src/renderer.ts', priorFittingOuterProbeSource(current));
@@ -432,7 +511,7 @@ function priorOccurrenceOwnerSource(current) {
 }
 
 function initializeOccurrenceOwnerRepository() {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-occurrence-owner-'));
+  const root = initializeFixture('docx-layout-boundary-occurrence-owner-');
   const productionRoot = resolve(import.meta.dirname, '..');
   const current = readFileSync(join(productionRoot, 'packages/docx/src/renderer.ts'), 'utf8');
   write(root, 'packages/docx/src/renderer.ts', priorOccurrenceOwnerSource(current));
@@ -449,7 +528,7 @@ function initializeOccurrenceOwnerRepository() {
 }
 
 function initializeSplitFloatLivePageRepository() {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-split-float-live-page-'));
+  const root = initializeFixture('docx-layout-boundary-split-float-live-page-');
   const productionRoot = resolve(import.meta.dirname, '..');
   const current = readFileSync(join(productionRoot, 'packages/docx/src/renderer.ts'), 'utf8');
   const livePageCallback = '            () => pages.length - 1,\n';
@@ -486,7 +565,7 @@ function priorEffectiveFlowSource(current) {
 }
 
 function initializeEffectiveFlowRepository() {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-effective-flow-'));
+  const root = initializeFixture('docx-layout-boundary-effective-flow-');
   const productionRoot = resolve(import.meta.dirname, '..');
   const current = readFileSync(join(productionRoot, 'packages/docx/src/renderer.ts'), 'utf8');
   write(root, 'packages/docx/src/renderer.ts', priorEffectiveFlowSource(current));
@@ -533,7 +612,7 @@ function priorSplitParentCommitSource(current) {
 }
 
 function initializeSplitParentCommitRepository() {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-split-parent-commit-'));
+  const root = initializeFixture('docx-layout-boundary-split-parent-commit-');
   const productionRoot = resolve(import.meta.dirname, '..');
   const current = readFileSync(join(productionRoot, 'packages/docx/src/renderer.ts'), 'utf8');
   write(root, 'packages/docx/src/renderer.ts', priorSplitParentCommitSource(current));
@@ -550,7 +629,7 @@ function initializeSplitParentCommitRepository() {
 }
 
 function initializeComputePagesTableStampRepository() {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-compute-pages-table-stamp-'));
+  const root = initializeFixture('docx-layout-boundary-compute-pages-table-stamp-');
   write(root, 'packages/docx/src/renderer.ts', computePagesTableStampBaseline);
   write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
   write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
@@ -621,7 +700,7 @@ export function computeTableLayout(table: any, contentWPx: number, state: any) {
 ${computeTableLayoutCommonTail.slice(1)}`;
 
 function initializeComputeTableLayoutRepository() {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-compute-table-layout-'));
+  const root = initializeFixture('docx-layout-boundary-compute-table-layout-');
   write(root, 'packages/docx/src/renderer.ts', computeTableLayoutStampBaseline);
   write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
   write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
@@ -738,7 +817,7 @@ export function computeTableLayout() { return []; }
 `;
 
 function initializeComputePagesAcquisitionRepository() {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-compute-pages-'));
+  const root = initializeFixture('docx-layout-boundary-compute-pages-');
   write(root, 'packages/docx/src/renderer.ts', computePagesAcquisitionBaseline);
   write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
   write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
@@ -776,7 +855,7 @@ const tablePaintGateMigration = tablePaintGateBaseline
   .replace('    !fragmentPaintEnabled ||\n', '');
 
 function initializeTablePaintGateRepository(pruneDeletedFlag = true) {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-table-gate-'));
+  const root = initializeFixture('docx-layout-boundary-table-gate-');
   write(root, 'packages/docx/src/renderer.ts', tablePaintGateBaseline);
   write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
   write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
@@ -808,7 +887,7 @@ function initializeTablePaintGateRepository(pruneDeletedFlag = true) {
 }
 
 function initializeLayoutParserBoundaryRepository() {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-parser-boundary-'));
+  const root = initializeFixture('docx-layout-parser-boundary-');
   write(root, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
   write(root, 'packages/docx/src/parser-model.ts', 'export function normalizeInternalDocumentModel(document: unknown) { return { document, mathOccurrences: [] }; }\nexport const parserFacts = true;\nexport interface ParserFacts { value: string; }\n');
   write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
@@ -822,7 +901,7 @@ const exactParserGatewaySource =
   + '}\n';
 
 function initializeShapeRepository() {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-shape-'));
+  const root = initializeFixture('docx-layout-boundary-shape-');
   write(root, 'packages/docx/src/renderer.ts', 'function buildFont(bold: boolean, italic: boolean, size: number, family: string | null, classes: Record<string, string>) { return String([bold, italic, size, family, classes]); }\nexport function renderShapeText(s: { bold: boolean; italic: boolean; size: number; family: string | null; fontRoute?: unknown }, classes: Record<string, string>) { return buildFont(s.bold, s.italic, s.size, s.family, classes); }\n');
   write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
   write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
@@ -837,7 +916,7 @@ function initializeShapeRepository() {
 }
 
 function initializeMetricShapeRepository() {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-shape-metric-'));
+  const root = initializeFixture('docx-layout-boundary-shape-metric-');
   write(root, 'packages/docx/src/renderer.ts', 'function buildFont(bold: boolean, italic: boolean, size: number, family: string | null, classes: Record<string, string>, route?: unknown) { return String([bold, italic, size, family, classes, route]); }\nexport function renderShapeText(s: { bold: boolean; italic: boolean; size: number; family: string | null; fontRoute?: unknown; eaFloorRoute?: unknown }, classes: Record<string, string>) { const shapeLineMetrics = (family: string | null) => { return buildFont(s.bold, s.italic, s.size, family, classes); }; return shapeLineMetrics(s.family); }\n');
   write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
   write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
@@ -852,7 +931,7 @@ function initializeMetricShapeRepository() {
 }
 
 function initializeNumberingShapeRepository() {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-shape-numbering-'));
+  const root = initializeFixture('docx-layout-boundary-shape-numbering-');
   write(root, 'packages/docx/src/renderer.ts', 'export function renderShapeText(block: any, ctx: any, scale: number, effState: any, eaVertUpright: boolean, markerX: number, baseline: number) { const markerText = markerDisplayText(block.numbering); const markerW = ctx.measureText(markerText).width; if (eaVertUpright) { drawVerticalRun(ctx, markerText, markerX, baseline, block.fontSizePt * scale, 0); } else { ctx.fillText(markerText, markerX, baseline); } return markerW; }\n');
   write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
   write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
@@ -901,7 +980,7 @@ test('allows a migrated legacy declaration to be deleted from source and baselin
 });
 
 test('rejects a transitive paint edge to a measurement module', () => {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-edge-'));
+  const root = initializeFixture('docx-layout-boundary-edge-');
   write(root, 'packages/docx/src/renderer.ts', 'export const adapter = true;\n');
   write(root, 'packages/docx/src/paint/canvas-page.ts', "import { helper } from './helper.js';\nexport { helper };\n");
   write(root, 'packages/docx/src/paint/helper.ts', "import { layoutLines } from '../line-layout.js';\nexport const helper = layoutLines;\n");
@@ -1128,7 +1207,7 @@ test('rejects non-literal dynamic and CommonJS edges in the parser gateway', () 
 });
 
 test('rejects any paint runtime dependency outside the paint owner directory', () => {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-arbitrary-edge-'));
+  const root = initializeFixture('docx-layout-boundary-arbitrary-edge-');
   write(root, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
   write(root, 'packages/docx/src/paint/canvas-page.ts', "import { helper } from '../text-wrap.js';\nexport { helper };\n");
   write(root, 'packages/docx/src/text-wrap.ts', 'export const helper = true;\n');
@@ -1141,7 +1220,7 @@ test('rejects any paint runtime dependency outside the paint owner directory', (
 });
 
 test('allows only the layout contract as a type-only paint dependency', () => {
-  const allowed = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-type-edge-'));
+  const allowed = initializeFixture('docx-layout-boundary-type-edge-');
   write(allowed, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
   write(allowed, 'packages/docx/src/layout/types.ts', 'export interface Layout { pages: number; }\n');
   write(allowed, 'packages/docx/src/paint/canvas-page.ts', "import type { Layout } from '../layout/types.js';\nexport type Page = Layout;\n");
@@ -1155,7 +1234,7 @@ test('allows only the layout contract as a type-only paint dependency', () => {
 });
 
 test('allows only named shared atomic painters from core', () => {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-shared-paint-'));
+  const root = initializeFixture('docx-layout-boundary-shared-paint-');
   write(root, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
   write(root, 'packages/docx/src/paint/canvas-page.ts', "import { renderChart } from '@silurus/ooxml-core';\nexport { renderChart };\n");
   assert.equal(runChecker(root, '--final').status, 0);
@@ -1213,7 +1292,7 @@ test('allows only named shared atomic painters from core', () => {
 });
 
 test('rejects forbidden core APIs reached through a paint helper', () => {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-shared-paint-transitive-'));
+  const root = initializeFixture('docx-layout-boundary-shared-paint-transitive-');
   write(root, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
   write(root, 'packages/docx/src/paint/canvas-page.ts', "import { paint } from './helper.js';\nvoid paint;\n");
   write(root, 'packages/docx/src/paint/helper.ts', "import { measureTextWidth } from '@silurus/ooxml-core';\nexport const paint = measureTextWidth;\n");
@@ -1226,7 +1305,7 @@ test('rejects forbidden core APIs reached through a paint helper', () => {
 });
 
 test('keeps layout-only border treatment outside the paint dependency graph', () => {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-border-treatment-'));
+  const root = initializeFixture('docx-layout-boundary-border-treatment-');
   write(root, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
   write(root, 'packages/docx/src/layout/types.ts', 'export interface Layout { pages: number; }\n');
   write(root, 'packages/docx/src/layout/border-treatment.ts', "import { docxBorderDashArray } from '@silurus/ooxml-core';\nexport const treatment = docxBorderDashArray('dotDash', 1);\n");
@@ -1243,7 +1322,7 @@ test('rejects paint dependencies on layout resource implementations even when ty
     "import { createPaintResourceRegistry } from '../layout/paint-resources.js';\nexport const registry = createPaintResourceRegistry([]);\n",
     "import type { PaintResourceRegistry } from '../layout/paint-resources.js';\nexport type Registry = PaintResourceRegistry;\n",
   ]) {
-    const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-resource-owner-'));
+    const root = initializeFixture('docx-layout-boundary-resource-owner-');
     write(root, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
     write(root, 'packages/docx/src/layout/paint-resources.ts', 'export interface PaintResourceRegistry {}\nexport function createPaintResourceRegistry() {}\n');
     write(root, 'packages/docx/src/paint/canvas-page.ts', source);
@@ -1256,7 +1335,7 @@ test('rejects paint dependencies on layout resource implementations even when ty
 });
 
 test('audits dependencies of the retained page graph allowed in paint', () => {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-page-graph-edge-'));
+  const root = initializeFixture('docx-layout-boundary-page-graph-edge-');
   write(root, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
   write(root, 'packages/docx/src/paint/canvas-page.ts', "import { orderedPagePaintNodes } from '../layout/page-graph.js';\nexport { orderedPagePaintNodes };\n");
   write(root, 'packages/docx/src/layout/page-graph.ts', "import { measureTextWidth } from '../measurement.js';\nexport const orderedPagePaintNodes = measureTextWidth;\n");
@@ -1270,7 +1349,7 @@ test('audits dependencies of the retained page graph allowed in paint', () => {
 });
 
 test('rejects non-literal dynamic paint imports', () => {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-dynamic-edge-'));
+  const root = initializeFixture('docx-layout-boundary-dynamic-edge-');
   write(root, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
   write(root, 'packages/docx/src/paint/canvas-page.ts', 'export const load = (name: string) => import(`../${name}.js`);\n');
 
@@ -1281,14 +1360,14 @@ test('rejects non-literal dynamic paint imports', () => {
 });
 
 test('rejects computed measurement access in paint and display inputs in layout TSX', () => {
-  const paintRoot = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-computed-'));
+  const paintRoot = initializeFixture('docx-layout-boundary-computed-');
   write(paintRoot, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
   write(paintRoot, 'packages/docx/src/paint/canvas-page.ts', "export const width = (ctx: CanvasRenderingContext2D) => ctx['measureText']('x').width;\n");
   const paintResult = runChecker(paintRoot, '--final');
   assert.notEqual(paintResult.status, 0);
   assert.match(paintResult.output, /PAINT_CAPABILITY/);
 
-  const layoutRoot = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-layout-display-'));
+  const layoutRoot = initializeFixture('docx-layout-boundary-layout-display-');
   write(layoutRoot, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
   write(layoutRoot, 'packages/docx/src/layout/page.tsx', 'export const Page = ({ dpr }: { dpr: number }) => dpr;\n');
   const layoutResult = runChecker(layoutRoot, '--final');
@@ -1315,7 +1394,7 @@ test('rejects layout acquisition from the retained body paint adapter', () => {
     'renderParagraph()',
     'services.resolveFrameBox()',
   ]) {
-    const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-body-paint-'));
+    const root = initializeFixture('docx-layout-boundary-body-paint-');
     write(
       root,
       'packages/docx/src/renderer.ts',
@@ -1385,7 +1464,7 @@ test('rejects aliased, computed, and unresolved calls from retained body paint',
   ];
 
   for (const renderer of renderers) {
-    const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-body-paint-alias-'));
+    const root = initializeFixture('docx-layout-boundary-body-paint-alias-');
     write(root, 'packages/docx/src/renderer.ts', renderer);
     write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
 
@@ -1548,7 +1627,7 @@ test('rejects late mutations of canonical body fragment sidecars', () => {
 });
 
 test('rejects transitive layout acquisition from a local body paragraph paint helper', () => {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-body-paint-transitive-'));
+  const root = initializeFixture('docx-layout-boundary-body-paint-transitive-');
   write(
     root,
     'packages/docx/src/renderer.ts',
@@ -1573,7 +1652,7 @@ test('rejects transitive layout acquisition from a local body paragraph paint he
 });
 
 test('rejects layout acquisition hidden inside an inline retained-paint callback', () => {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-body-paint-callback-'));
+  const root = initializeFixture('docx-layout-boundary-body-paint-callback-');
   write(
     root,
     'packages/docx/src/renderer.ts',
@@ -1597,7 +1676,7 @@ test('rejects layout acquisition hidden inside an inline retained-paint callback
 });
 
 test('follows the else branch of a negated paragraph dispatch', () => {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-body-paint-negated-'));
+  const root = initializeFixture('docx-layout-boundary-body-paint-negated-');
   write(
     root,
     'packages/docx/src/renderer.ts',
@@ -1620,7 +1699,7 @@ test('follows the else branch of a negated paragraph dispatch', () => {
 });
 
 test('fails closed when the body paragraph dispatch cannot be audited', () => {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-body-paint-opaque-'));
+  const root = initializeFixture('docx-layout-boundary-body-paint-opaque-');
   write(root, 'packages/docx/src/renderer.ts', 'function renderBodyElements() { dispatchBody(); }\n');
   write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
 
@@ -1667,7 +1746,7 @@ test('allows the exact frozen production fragment map and retained paragraph pai
 });
 
 test('rejects a CommonJS require edge that bypasses static ESM imports', () => {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-require-'));
+  const root = initializeFixture('docx-layout-boundary-require-');
   write(root, 'packages/docx/src/renderer.ts', 'export const adapter = true;\n');
   write(root, 'packages/docx/src/paint/canvas-page.ts', "const helper = require('./helper.js');\nexport { helper };\n");
   write(root, 'packages/docx/src/paint/helper.ts', "const measured = require('../line-layout.js');\nexport { measured };\n");
@@ -2445,7 +2524,7 @@ test('rejects any non-exact A2 parameter syntax and pass-through expression', ()
 });
 
 test('final mode enforces the renderer adapter export and import allowlists', () => {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-final-adapter-'));
+  const root = initializeFixture('docx-layout-boundary-final-adapter-');
   write(root, 'packages/docx/src/layout/document.ts', 'export function layoutDocument() {}\n');
   write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paintLayoutPage() {}\n');
   write(root, 'packages/docx/src/renderer.ts', "import { layoutDocument } from './layout/document.js';\nimport { paintLayoutPage } from './paint/canvas-page.js';\nexport function paginateDocument() { return layoutDocument(); }\nexport function renderDocumentToCanvas() { return paintLayoutPage(); }\n");
@@ -2459,7 +2538,7 @@ test('final mode enforces the renderer adapter export and import allowlists', ()
 });
 
 test('final mode rejects layout logic hidden inside an allowed renderer adapter', () => {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-inline-adapter-'));
+  const root = initializeFixture('docx-layout-boundary-inline-adapter-');
   write(root, 'packages/docx/src/renderer.ts', `
 export function paginateDocument(items: unknown[]) {
   const pages = [];
@@ -2476,19 +2555,19 @@ export function renderDocumentToCanvas() {}
 });
 
 test('final mode rejects renamed fallback and style-cascade capabilities', () => {
-  const diagnostic = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-diagnostic-fallback-'));
+  const diagnostic = initializeFixture('docx-layout-boundary-diagnostic-fallback-');
   write(diagnostic, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
   write(diagnostic, 'packages/docx/src/layout/page.ts', "export const diagnosticFallback = { code: 'UNSUPPORTED_FEATURE' };\n");
   assert.equal(runChecker(diagnostic, '--final').status, 0);
 
-  const fallback = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-old-engine-'));
+  const fallback = initializeFixture('docx-layout-boundary-old-engine-');
   write(fallback, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
   write(fallback, 'packages/docx/src/layout/page.ts', 'export const useOldEngine = true;\n');
   const fallbackResult = runChecker(fallback, '--final');
   assert.notEqual(fallbackResult.status, 0);
   assert.match(fallbackResult.output, /FINAL_LEGACY_BOUNDARY/);
 
-  const style = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-fold-style-'));
+  const style = initializeFixture('docx-layout-boundary-fold-style-');
   write(style, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
   write(style, 'packages/docx/src/layout/page.ts', 'export function foldRunFormatting(base: object, direct: object) { return { ...base, ...direct }; }\n');
   const styleResult = runChecker(style, '--final');
@@ -2497,7 +2576,7 @@ test('final mode rejects renamed fallback and style-cascade capabilities', () =>
 });
 
 test('final mode rejects star exports from renderer', () => {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-star-export-'));
+  const root = initializeFixture('docx-layout-boundary-star-export-');
   write(root, 'packages/docx/src/layout/page.ts', 'export function accidentalAlgorithm() {}\n');
   write(root, 'packages/docx/src/renderer.ts', "export * from './layout/page.js';\nexport function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n");
 
@@ -2508,7 +2587,7 @@ test('final mode rejects star exports from renderer', () => {
 });
 
 test('excludes test-support modules from production inventory but rejects production imports', () => {
-  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-test-support-'));
+  const root = initializeFixture('docx-layout-boundary-test-support-');
   write(root, 'packages/docx/src/retained.test-support.ts', 'export function acquireForTest() { return 1; }\n');
   write(root, 'packages/docx/src/retained.test.ts', "import { acquireForTest } from './retained.test-support.js';\nvoid acquireForTest();\n");
   write(root, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');

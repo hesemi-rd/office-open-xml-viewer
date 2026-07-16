@@ -326,6 +326,19 @@ describe('layoutParagraph', () => {
     expect(continuation.borders[0]).toMatchObject({ from: { yPt: 15 }, to: { yPt: 15 } });
   });
 
+  it('characterizes continuation Y translation as the general translation with zero X delta', () => {
+    const whole = layoutParagraph(input());
+    const deltaYPt = whole.flowBounds.yPt - whole.lines[1]!.bounds.yPt;
+
+    const continuation = sliceParagraphLayout(whole, {
+      lineStart: 1, lineEnd: 2, continuesFromPrevious: true, continuesOnNext: false,
+    });
+    const generallyTranslated = translateParagraphLayout(whole, { xPt: 0, yPt: deltaYPt });
+
+    expect(continuation.lines[0]).toEqual(generallyTranslated.lines[1]);
+    expect(continuation.lines[0]!.bounds.xPt).toBe(whole.lines[1]!.bounds.xPt);
+  });
+
   it('keeps page-owned anchor geometry fixed when its host line is rebased on a continuation', () => {
     const base = input();
     const drawing = {

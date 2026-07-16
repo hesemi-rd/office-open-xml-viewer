@@ -41,4 +41,17 @@ describe('plain layout data snapshots', () => {
     expect(() => snapshotPlainData(cyclic, 'layout payload'))
       .toThrow(/structured-clone-safe plain data/i);
   });
+
+  it('validates a shared plain-data DAG only once before cloning', () => {
+    let reads = 0;
+    const shared = Object.defineProperty({}, 'value', {
+      enumerable: true,
+      get() { reads += 1; return 7; },
+    });
+
+    const snapshot = snapshotPlainData({ first: shared, second: shared }, 'layout payload');
+
+    expect(snapshot.first).toBe(snapshot.second);
+    expect(reads).toBe(2); // one validation traversal and one structured clone traversal
+  });
 });

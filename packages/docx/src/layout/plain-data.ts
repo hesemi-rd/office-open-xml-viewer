@@ -3,7 +3,8 @@ import type { DeepReadonly } from './types.js';
 function assertPlainData(
   value: unknown,
   path: string,
-  ancestors = new WeakSet<object>(),
+  visiting = new WeakSet<object>(),
+  completed = new WeakSet<object>(),
 ): void {
   if (
     value === null
@@ -18,21 +19,23 @@ function assertPlainData(
   if (typeof value !== 'object') {
     throw new TypeError(`${path} must be structured-clone-safe plain data`);
   }
-  if (ancestors.has(value)) {
+  if (visiting.has(value)) {
     throw new TypeError(`${path} must be structured-clone-safe plain data`);
   }
+  if (completed.has(value)) return;
   const prototype = Object.getPrototypeOf(value);
   if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) {
     throw new TypeError(`${path} must be structured-clone-safe plain data`);
   }
-  ancestors.add(value);
+  visiting.add(value);
   try {
     for (const [key, child] of Object.entries(value)) {
-      assertPlainData(child, `${path}.${key}`, ancestors);
+      assertPlainData(child, `${path}.${key}`, visiting, completed);
     }
   } finally {
-    ancestors.delete(value);
+    visiting.delete(value);
   }
+  completed.add(value);
 }
 
 export function deepFreezePlainData<T>(
